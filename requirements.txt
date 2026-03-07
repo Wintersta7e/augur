@@ -4,3 +4,4 @@ river
 redis
 nats-py
 httpx
+keyboard

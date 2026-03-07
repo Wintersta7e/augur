@@ -58,16 +58,16 @@ else
     exit 1
 fi
 
-# 2. Chess advisor (listens for anomalies from detector)
-echo -ne "  [2/5] Chess advisor     ...  "
-$PYTHON "$PROJECT_DIR/reasoning/chess_advisor.py" \
-    > "$LOG_DIR/chess_advisor.log" 2>&1 &
+# 2. Augur advisor (multi-domain LLM advisor — listens for anomalies)
+echo -ne "  [2/5] Augur advisor     ...  "
+$PYTHON "$PROJECT_DIR/reasoning/augur_advisor.py" \
+    > "$LOG_DIR/augur_advisor.log" 2>&1 &
 PIDS+=($!)
 sleep 1
 if kill -0 "${PIDS[-1]}" 2>/dev/null; then
     echo -e "${GREEN}started${RESET}  (PID ${PIDS[-1]})"
 else
-    echo -e "\033[91mFAILED${RESET}  — check $LOG_DIR/chess_advisor.log"
+    echo -e "\033[91mFAILED${RESET}  — check $LOG_DIR/augur_advisor.log"
     exit 1
 fi
 
@@ -105,8 +105,9 @@ echo ""
 echo -e "${GRAY}  Logs: $LOG_DIR/${RESET}"
 echo -e "${GRAY}  PIDs: ${PIDS[*]}${RESET}"
 echo ""
-echo -e "  Start the chess board in another terminal:"
+echo -e "  Start perception sources in other terminals:"
 echo -e "  ${CYAN}$PYTHON $PROJECT_DIR/perception/chess_board.py${RESET}"
+echo -e "  ${CYAN}sudo $PYTHON $PROJECT_DIR/perception/typing_monitor.py${RESET}"
 echo ""
 echo -e "${GRAY}  Press Ctrl+C to stop all components.${RESET}"
 echo ""

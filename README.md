@@ -16,12 +16,14 @@ Augur uses a **blackboard architecture** where specialized subsystems communicat
   Anomaly Detector (River HalfSpaceTrees + EWMA)
         |
         | NATS: augur.detection.anomaly
-        v
-  Chess Advisor (Ollama / qwen2.5:32b)
+        +----------------------------+
+        v                            v
+  Chess Advisor             Console Display
+  (Ollama / qwen2.5:32b)   (low severity alerts)
         |
         | NATS: augur.reasoning.advice
         v
-  Console Display (ANSI terminal output)
+  Console Display (full advice blocks)
 ```
 
 ### Subsystems
@@ -57,6 +59,7 @@ Augur uses a **blackboard architecture** where specialized subsystems communicat
 - Python 3.12+
 - Docker (for Redis and NATS)
 - [Ollama](https://ollama.com) with `qwen2.5:32b` pulled
+- Ollama must be running on Windows (not inside WSL). The advisor connects via `http://host.docker.internal:11434` by default. Override with `OLLAMA_URL` env var if needed.
 
 ## Getting Started
 
@@ -102,7 +105,7 @@ infrastructure/run_augur.sh
 
 - Only **medium** and **high** severity anomalies trigger an LLM query (conserving resources)
 - The advisor enriches the anomaly with board context from Redis (move history, current position)
-- Ollama generates concise strategic advice (~3-5 sentences)
+- Ollama generates detailed strategic analysis of the position and situation
 - A concurrency lock prevents piling up requests during slow LLM responses
 
 ## Dependencies
@@ -118,4 +121,4 @@ httpx           # Async HTTP client for Ollama
 
 ## License
 
-Proprietary
+MIT

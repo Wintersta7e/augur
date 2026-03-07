@@ -1,0 +1,6 @@
+python-chess
+pygame
+river
+redis
+nats-py
+httpx

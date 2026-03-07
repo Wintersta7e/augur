@@ -47,6 +47,7 @@ BG_YELLOW = "\033[43m"
 NATS_URL = "nats://localhost:4222"
 SUBJECT_ANOMALY = "augur.detection.anomaly"
 SUBJECT_ADVICE = "augur.reasoning.advice"
+SUBJECT_REFLECT = "augur.reflect.complete"
 WRAP_WIDTH = 80
 
 # ---------------------------------------------------------------------------
@@ -118,6 +119,61 @@ def render_advice(data: dict) -> str:
     return "\n".join(lines)
 
 
+def render_reflection(data: dict) -> str:
+    """End-of-session reflection summary block."""
+    session_id = data.get("session_id", "?")
+    analyses = data.get("analyses", {})
+    adjustments = data.get("adjustments", {})
+
+    precision = analyses.get("precision", {})
+    utility = analyses.get("utility", {})
+    counterfactual = analyses.get("counterfactual", {})
+
+    prec_ratio = precision.get("precision_ratio", 0)
+    prec_color = FG_GREEN if prec_ratio >= 0.7 else FG_YELLOW if prec_ratio >= 0.4 else FG_RED
+    util_score = utility.get("utility_score", 0)
+    util_color = FG_GREEN if util_score >= 0.7 else FG_YELLOW if util_score >= 0.4 else FG_RED
+
+    sigma_line = ""
+    if adjustments.get("sigma_adjusted"):
+        sigma_line = (
+            f"\n  {FG_YELLOW}Sigma threshold adjusted to "
+            f"{adjustments.get('sigma_value', '?')}{RESET}"
+        )
+
+    prompt_line = ""
+    if adjustments.get("prompt_mutated"):
+        prompt_line = f"\n  {FG_YELLOW}LLM prompt mutated for next session{RESET}"
+
+    cf_rec = counterfactual.get("recommendation", "")
+
+    lines = [
+        "",
+        THICK_SEPARATOR,
+        f"  {BOLD}AUGUR REFLECTION{RESET}  {FG_GRAY}session {session_id[:8]}...{RESET}",
+        SEPARATOR,
+        f"  {FG_GRAY}Precision:{RESET}   {prec_color}{BOLD}{prec_ratio:.0%}{RESET}"
+        f"  {FG_GRAY}({precision.get('escalated', 0)}/{precision.get('total_anomalies', 0)} useful){RESET}",
+        f"  {FG_GRAY}Utility:{RESET}     {util_color}{BOLD}{util_score:.2f}{RESET}"
+        f"  {FG_GRAY}(explicit={utility.get('explicit_component', 0):.2f},"
+        f" behavioral={utility.get('behavioral_component', 0):.2f}){RESET}",
+        f"  {FG_GRAY}Counterfactual:{RESET}  {FG_WHITE}{cf_rec}{RESET}",
+    ]
+
+    if sigma_line:
+        lines.append(sigma_line)
+    if prompt_line:
+        lines.append(prompt_line)
+
+    lines.extend([
+        SEPARATOR,
+        f"  {FG_GRAY}{precision.get('reason', '')}{RESET}",
+        THICK_SEPARATOR,
+        "",
+    ])
+    return "\n".join(lines)
+
+
 def _short_ts(iso_ts: str) -> str:
     """Extract HH:MM:SS from an ISO timestamp, or return as-is."""
     try:
@@ -145,8 +201,9 @@ BANNER = f"""{FG_CYAN}{BOLD}
     ╚═══════════════════════════════════════════════════════════╝
 {RESET}
 {FG_GRAY}  Listening for events...
-  ├─ {FG_GREEN}anomalies{FG_GRAY}  →  {SUBJECT_ANOMALY}
-  └─ {FG_CYAN}advice{FG_GRAY}     →  {SUBJECT_ADVICE}
+  ├─ {FG_GREEN}anomalies{FG_GRAY}    →  {SUBJECT_ANOMALY}
+  ├─ {FG_CYAN}advice{FG_GRAY}       →  {SUBJECT_ADVICE}
+  └─ {FG_YELLOW}reflection{FG_GRAY}   →  {SUBJECT_REFLECT}
 {RESET}"""
 
 # ---------------------------------------------------------------------------
@@ -176,8 +233,17 @@ async def run() -> None:
 
         print(render_advice(data), flush=True)
 
+    async def on_reflection(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = json.loads(msg.data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        print(render_reflection(data), flush=True)
+
     await nc.subscribe(SUBJECT_ANOMALY, cb=on_anomaly)
     await nc.subscribe(SUBJECT_ADVICE, cb=on_advice)
+    await nc.subscribe(SUBJECT_REFLECT, cb=on_reflection)
 
     try:
         while True:

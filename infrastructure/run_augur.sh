@@ -46,7 +46,7 @@ echo "  Starting Augur pipeline..."
 echo -e "${RESET}"
 
 # 1. Anomaly detector (must be first — listens for chess moves)
-echo -ne "  [1/4] Anomaly detector ...  "
+echo -ne "  [1/5] Anomaly detector ...  "
 $PYTHON "$PROJECT_DIR/detection/anomaly_detector.py" \
     > "$LOG_DIR/anomaly_detector.log" 2>&1 &
 PIDS+=($!)
@@ -59,7 +59,7 @@ else
 fi
 
 # 2. Chess advisor (listens for anomalies from detector)
-echo -ne "  [2/4] Chess advisor     ...  "
+echo -ne "  [2/5] Chess advisor     ...  "
 $PYTHON "$PROJECT_DIR/reasoning/chess_advisor.py" \
     > "$LOG_DIR/chess_advisor.log" 2>&1 &
 PIDS+=($!)
@@ -72,7 +72,7 @@ else
 fi
 
 # 3. Feedback collector (listens for advice + perception events)
-echo -ne "  [3/4] Feedback collector...  "
+echo -ne "  [3/5] Feedback collector...  "
 $PYTHON "$PROJECT_DIR/perception/feedback_collector.py" \
     > "$LOG_DIR/feedback_collector.log" 2>&1 &
 PIDS+=($!)
@@ -84,8 +84,21 @@ else
     exit 1
 fi
 
-# 4. Console display (runs in foreground — output goes to terminal)
-echo -e "  [4/4] Console display   ...  ${GREEN}starting (foreground)${RESET}"
+# 4. Reflection engine (triggers at end of session)
+echo -ne "  [4/5] Reflection engine ...  "
+$PYTHON "$PROJECT_DIR/reasoning/reflection_engine.py" \
+    > "$LOG_DIR/reflection_engine.log" 2>&1 &
+PIDS+=($!)
+sleep 1
+if kill -0 "${PIDS[-1]}" 2>/dev/null; then
+    echo -e "${GREEN}started${RESET}  (PID ${PIDS[-1]})"
+else
+    echo -e "\033[91mFAILED${RESET}  — check $LOG_DIR/reflection_engine.log"
+    exit 1
+fi
+
+# 5. Console display (runs in foreground — output goes to terminal)
+echo -e "  [5/5] Console display   ...  ${GREEN}starting (foreground)${RESET}"
 echo ""
 echo -e "${GREEN}${BOLD}  All components running.${RESET}"
 echo ""

@@ -15,6 +15,10 @@ import nats
 import pygame
 import redis
 
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
+from blackboard.contracts import PerceptionEvent
+from blackboard.session import SessionManager
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -265,6 +269,20 @@ def main() -> None:
         log.error("Cannot connect to NATS: %s", exc)
         sys.exit(1)
 
+    # Session management
+    session_mgr = SessionManager(redis_client)
+    session_id = session_mgr.start()
+
+    # Publish session start to NATS
+    try:
+        nats_pub.publish("augur.session.start", {
+            "session_id": session_id,
+            "domain": "chess",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as exc:
+        log.error("Failed to publish session start: %s", exc)
+
     board = chess.Board()
     selected_sq: Optional[int] = None
     think_start = time.monotonic()
@@ -328,26 +346,44 @@ def main() -> None:
                         think_time = time.monotonic() - think_start
                         player = "white" if board.turn == chess.WHITE else "black"
                         san = board.san(move)
+                        ts = datetime.now(timezone.utc).isoformat()
 
                         board.push(move)
 
-                        payload = {
+                        # Redis payload (unchanged legacy format)
+                        redis_payload = {
                             "player": player,
                             "move_uci": move.uci(),
                             "move_san": san,
                             "think_time_seconds": round(think_time, 3),
                             "move_number": move_number,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": ts,
                         }
 
-                        # Publish to Redis and NATS
                         try:
-                            publish_move_redis(redis_client, payload)
+                            publish_move_redis(redis_client, redis_payload)
                         except redis.RedisError as exc:
                             log.error("Redis publish failed: %s", exc)
 
+                        # NATS payload (PerceptionEvent envelope)
+                        event = PerceptionEvent(
+                            domain="chess",
+                            stream_id="chess_timing",
+                            entity=player,
+                            event_type="move",
+                            value=round(think_time, 3),
+                            unit="seconds",
+                            context={
+                                "move_uci": move.uci(),
+                                "move_san": san,
+                                "move_number": move_number,
+                            },
+                            timestamp=ts,
+                            session_id=session_id,
+                        )
+
                         try:
-                            nats_pub.publish(NATS_SUBJECT, payload)
+                            nats_pub.publish(NATS_SUBJECT, json.loads(event.to_json()))
                         except Exception as exc:
                             log.error("NATS publish failed: %s", exc)
 
@@ -370,6 +406,17 @@ def main() -> None:
         draw_info(screen, board, info_font, think_start)
         pygame.display.flip()
         clock.tick(30)
+
+    # Session end
+    session_mgr.end()
+    try:
+        nats_pub.publish("augur.session.end", {
+            "session_id": session_id,
+            "domain": "chess",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as exc:
+        log.error("Failed to publish session end: %s", exc)
 
     # Cleanup
     nats_pub.close()

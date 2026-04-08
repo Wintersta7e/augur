@@ -40,7 +40,6 @@ log = logging.getLogger("anomaly_detector")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-NATS_URL = "nats://localhost:4222"
 SUBSCRIBE_SUBJECT = "augur.perception.>"
 PUBLISH_SUBJECT = "augur.detection.anomaly"
 REDIS_KEY_ANOMALY = "augur:detection:last_anomaly"
@@ -59,6 +58,7 @@ DEFAULT_THRESHOLDS = {
 # Per-entity baseline
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class EntityBaseline:
     """Tracks EWMA mean/variance and HST model for one (domain, entity)."""
@@ -66,12 +66,14 @@ class EntityBaseline:
     ewma_mean: float = 0.0
     ewma_var: float = 0.0
     observation_count: int = 0
-    hst: HalfSpaceTrees = field(default_factory=lambda: HalfSpaceTrees(
-        n_trees=15,
-        height=8,
-        window_size=50,
-        seed=42,
-    ))
+    hst: HalfSpaceTrees = field(
+        default_factory=lambda: HalfSpaceTrees(
+            n_trees=15,
+            height=8,
+            window_size=50,
+            seed=42,
+        )
+    )
 
     @property
     def ewma_std(self) -> float:
@@ -125,9 +127,11 @@ def classify_severity(
         return "medium"
     return "low"
 
+
 # ---------------------------------------------------------------------------
 # Threshold loading
 # ---------------------------------------------------------------------------
+
 
 def load_domain_thresholds(pm: PersistenceManager, domain: str) -> dict:
     stored = pm.load_thresholds(domain)
@@ -137,12 +141,15 @@ def load_domain_thresholds(pm: PersistenceManager, domain: str) -> dict:
         return merged
     return dict(DEFAULT_THRESHOLDS)
 
+
 # ---------------------------------------------------------------------------
 # Baseline loading from persistence
 # ---------------------------------------------------------------------------
 
+
 def load_persisted_baselines(
-    pm: PersistenceManager, r: redis.Redis,
+    pm: PersistenceManager,
+    r: redis.Redis,
 ) -> dict[tuple[str, str], EntityBaseline]:
     """Scan Redis for existing augur:profile:* keys and restore baselines."""
     baselines: dict[tuple[str, str], EntityBaseline] = {}
@@ -161,29 +168,43 @@ def load_persisted_baselines(
                     baselines[(domain, entity)] = bl
                     log.info(
                         "Restored baseline (%s, %s): %d observations, mean=%.2f",
-                        domain, entity, bl.observation_count, bl.ewma_mean,
+                        domain,
+                        entity,
+                        bl.observation_count,
+                        bl.ewma_mean,
                     )
         if cursor == 0:
             break
     return baselines
 
+
 # ---------------------------------------------------------------------------
 # Core loop
 # ---------------------------------------------------------------------------
 
+
 async def run() -> None:
-    redis_client = redis.Redis(host="localhost", port=6379, socket_connect_timeout=5)
+    config = AugurConfig.from_env()
+
+    redis_client = redis.Redis(
+        host=config.redis_host,
+        port=config.redis_port,
+        socket_connect_timeout=config.redis_connect_timeout,
+    )
     redis_client.ping()
-    log.info("Redis connected")
+    log.info("Redis connected (%s)", config.redis_url)
 
     pm = PersistenceManager(redis_client)
 
-    nc = await nats.connect(NATS_URL, connect_timeout=5)
-    log.info("NATS connected (%s)", NATS_URL)
+    nc = await nats.connect(
+        config.nats_url, connect_timeout=config.nats_connect_timeout
+    )
+    log.info("NATS connected (%s)", config.nats_url)
 
     # Restore persisted baselines
     baselines: dict[tuple[str, str], EntityBaseline] = load_persisted_baselines(
-        pm, redis_client,
+        pm,
+        redis_client,
     )
     if baselines:
         log.info("Restored %d baselines from persistence", len(baselines))
@@ -242,15 +263,23 @@ async def run() -> None:
         log.info(
             "[%s/%s] %s  value=%.2f%s  ewma=%.2f  std=%.2f  "
             "dev=%.2f\u03c3  hst=%.3f  trained=%s",
-            domain, entity, label, value, event.unit,
-            bl.ewma_mean, bl.ewma_std,
-            deviation, hst_score, is_trained,
+            domain,
+            entity,
+            label,
+            value,
+            event.unit,
+            bl.ewma_mean,
+            bl.ewma_std,
+            deviation,
+            hst_score,
+            is_trained,
         )
 
         if not is_trained:
             log.info(
                 "  \u2514\u2500 Building baseline (%d/%d observations)",
-                bl.observation_count, th["min_observations"],
+                bl.observation_count,
+                th["min_observations"],
             )
             return
 
@@ -261,8 +290,10 @@ async def run() -> None:
             return
 
         severity = classify_severity(
-            deviation, hst_score,
-            th["severity_medium_sigma"], th["severity_high_sigma"],
+            deviation,
+            hst_score,
+            th["severity_medium_sigma"],
+            th["severity_high_sigma"],
         )
 
         # Anomaly payload includes full event context plus compat aliases
@@ -290,7 +321,12 @@ async def run() -> None:
 
         log.warning(
             "  \u26a0 ANOMALY [%s] %s/%s: value=%.2f  dev=%.1f\u03c3  hst=%.3f",
-            severity.upper(), domain, entity, value, deviation, hst_score,
+            severity.upper(),
+            domain,
+            entity,
+            value,
+            deviation,
+            hst_score,
         )
 
         try:

@@ -11,9 +11,12 @@ import json
 import logging
 import sys
 import textwrap
-from datetime import datetime, timezone
+from datetime import datetime
+from pathlib import Path
 
 import nats
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # ---------------------------------------------------------------------------
 # Logging (minimal — this module IS the display)
@@ -44,7 +47,6 @@ BG_YELLOW = "\033[43m"
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-NATS_URL = "nats://localhost:4222"
 SUBJECT_ANOMALY = "augur.detection.anomaly"
 SUBJECT_ADVICE = "augur.reasoning.advice"
 SUBJECT_REFLECT = "augur.reflect.complete"
@@ -130,9 +132,13 @@ def render_reflection(data: dict) -> str:
     counterfactual = analyses.get("counterfactual", {})
 
     prec_ratio = precision.get("precision_ratio", 0)
-    prec_color = FG_GREEN if prec_ratio >= 0.7 else FG_YELLOW if prec_ratio >= 0.4 else FG_RED
+    prec_color = (
+        FG_GREEN if prec_ratio >= 0.7 else FG_YELLOW if prec_ratio >= 0.4 else FG_RED
+    )
     util_score = utility.get("utility_score", 0)
-    util_color = FG_GREEN if util_score >= 0.7 else FG_YELLOW if util_score >= 0.4 else FG_RED
+    util_color = (
+        FG_GREEN if util_score >= 0.7 else FG_YELLOW if util_score >= 0.4 else FG_RED
+    )
 
     sigma_line = ""
     if adjustments.get("sigma_adjusted"):
@@ -165,12 +171,14 @@ def render_reflection(data: dict) -> str:
     if prompt_line:
         lines.append(prompt_line)
 
-    lines.extend([
-        SEPARATOR,
-        f"  {FG_GRAY}{precision.get('reason', '')}{RESET}",
-        THICK_SEPARATOR,
-        "",
-    ])
+    lines.extend(
+        [
+            SEPARATOR,
+            f"  {FG_GRAY}{precision.get('reason', '')}{RESET}",
+            THICK_SEPARATOR,
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -181,6 +189,7 @@ def _short_ts(iso_ts: str) -> str:
         return dt.strftime("%H:%M:%S")
     except (ValueError, TypeError):
         return iso_ts[:8] if iso_ts else "??:??:??"
+
 
 # ---------------------------------------------------------------------------
 # Startup banner
@@ -210,8 +219,12 @@ BANNER = f"""{FG_CYAN}{BOLD}
 # Core loop
 # ---------------------------------------------------------------------------
 
+
 async def run() -> None:
-    nc = await nats.connect(NATS_URL, connect_timeout=5)
+    config = AugurConfig.from_env()
+    nc = await nats.connect(
+        config.nats_url, connect_timeout=config.nats_connect_timeout
+    )
 
     print(BANNER, flush=True)
 

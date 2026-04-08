@@ -34,8 +34,6 @@ log = logging.getLogger("feedback_collector")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-NATS_URL = "nats://localhost:4222"
-
 SUBJECT_ADVICE = "augur.reasoning.advice"
 SUBJECT_PERCEPTION = "augur.perception.>"
 SUBJECT_SESSION_END = "augur.session.end"
@@ -56,6 +54,7 @@ RESET = "\033[0m"
 # ---------------------------------------------------------------------------
 # Pending advice tracker
 # ---------------------------------------------------------------------------
+
 
 class PendingAdvice:
     """Tracks one piece of advice waiting for feedback signals."""
@@ -130,9 +129,11 @@ class PendingAdvice:
             "timestamp": self.timestamp,
         }
 
+
 # ---------------------------------------------------------------------------
 # Async stdin reader
 # ---------------------------------------------------------------------------
+
 
 async def read_stdin_with_timeout(timeout: float) -> str | None:
     """Non-blocking stdin read with timeout. Returns None on timeout."""
@@ -146,19 +147,29 @@ async def read_stdin_with_timeout(timeout: float) -> str | None:
     except asyncio.TimeoutError:
         return None
 
+
 # ---------------------------------------------------------------------------
 # Core loop
 # ---------------------------------------------------------------------------
 
+
 async def run() -> None:
-    redis_client = redis.Redis(host="localhost", port=6379, socket_connect_timeout=5)
+    config = AugurConfig.from_env()
+
+    redis_client = redis.Redis(
+        host=config.redis_host,
+        port=config.redis_port,
+        socket_connect_timeout=config.redis_connect_timeout,
+    )
     redis_client.ping()
-    log.info("Redis connected")
+    log.info("Redis connected (%s)", config.redis_url)
 
     pm = PersistenceManager(redis_client)
 
-    nc = await nats.connect(NATS_URL, connect_timeout=5)
-    log.info("NATS connected")
+    nc = await nats.connect(
+        config.nats_url, connect_timeout=config.nats_connect_timeout
+    )
+    log.info("NATS connected (%s)", config.nats_url)
 
     # State
     current_session_id: str | None = None
@@ -181,12 +192,11 @@ async def run() -> None:
         total = len(advice_events)
         explicit_pos = sum(1 for a in advice_events if a.explicit_rating == "y")
         explicit_neg = sum(1 for a in advice_events if a.explicit_rating == "n")
-        behavioral_scores = [
-            a.behavioral_score for a in advice_events if a.finalized
-        ]
+        behavioral_scores = [a.behavioral_score for a in advice_events if a.finalized]
         avg_behavioral = (
             round(sum(behavioral_scores) / len(behavioral_scores), 3)
-            if behavioral_scores else 0.0
+            if behavioral_scores
+            else 0.0
         )
         return {
             "total_advice": total,
@@ -222,11 +232,11 @@ async def run() -> None:
 
         # Read baseline mean from Redis
         baseline_raw = pm.load_baseline(
-            "chess", entity,
+            "chess",
+            entity,
         )
         baseline_mean = (
-            baseline_raw.get("ewma_mean", think_time)
-            if baseline_raw else think_time
+            baseline_raw.get("ewma_mean", think_time) if baseline_raw else think_time
         )
 
         advice_id = str(uuid.uuid4())[:8]
@@ -243,7 +253,9 @@ async def run() -> None:
 
         log.info(
             "Advice received for %s (%s, %s) — awaiting feedback",
-            entity, move, severity,
+            entity,
+            move,
+            severity,
         )
 
         # Prompt for explicit feedback (non-blocking with timeout)
@@ -251,7 +263,8 @@ async def run() -> None:
             f"\n{CYAN}[AUGUR]{RESET} Was this advice useful? "
             f"{BOLD}[y/n/s]{RESET} "
             f"{GRAY}({EXPLICIT_TIMEOUT_S}s to respond, s=skip){RESET} ",
-            end="", flush=True,
+            end="",
+            flush=True,
         )
 
         response = await read_stdin_with_timeout(EXPLICIT_TIMEOUT_S)
@@ -288,14 +301,19 @@ async def run() -> None:
 
         log.info(
             "Post-advice move %d/%d for %s: %.2f%s (baseline=%.2f)",
-            len(pending.think_times_after), POST_ADVICE_TRACK_MOVES,
-            entity, event.value, event.unit, pending.baseline_mean,
+            len(pending.think_times_after),
+            POST_ADVICE_TRACK_MOVES,
+            entity,
+            event.value,
+            event.unit,
+            pending.baseline_mean,
         )
 
         if pending.finalized:
             log.info(
                 "Behavioral score for %s: %.3f",
-                entity, pending.behavioral_score,
+                entity,
+                pending.behavioral_score,
             )
             del active_tracking[entity]
             save_current_feedback()
@@ -318,19 +336,23 @@ async def run() -> None:
         log.info(
             "Session finalized: %d advice, %d positive, %d negative, "
             "avg behavioral=%.3f",
-            summary["total_advice"], summary["explicit_positive"],
-            summary["explicit_negative"], summary["avg_behavioral_score"],
+            summary["total_advice"],
+            summary["explicit_positive"],
+            summary["explicit_negative"],
+            summary["avg_behavioral_score"],
         )
 
         # Publish completion event
         try:
             await nc.publish(
                 SUBJECT_FEEDBACK_COMPLETE,
-                json.dumps({
-                    "session_id": get_session_id(),
-                    "summary": summary,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }).encode(),
+                json.dumps(
+                    {
+                        "session_id": get_session_id(),
+                        "summary": summary,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                ).encode(),
             )
             log.info("Published feedback complete to %s", SUBJECT_FEEDBACK_COMPLETE)
         except Exception as exc:
@@ -341,7 +363,12 @@ async def run() -> None:
     await nc.subscribe(SUBJECT_PERCEPTION, cb=on_perception)
     await nc.subscribe(SUBJECT_SESSION_END, cb=on_session_end)
 
-    log.info("Subscribed to: %s, %s, %s", SUBJECT_ADVICE, SUBJECT_PERCEPTION, SUBJECT_SESSION_END)
+    log.info(
+        "Subscribed to: %s, %s, %s",
+        SUBJECT_ADVICE,
+        SUBJECT_PERCEPTION,
+        SUBJECT_SESSION_END,
+    )
     log.info("Waiting for advice events...")
 
     try:

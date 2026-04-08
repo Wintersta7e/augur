@@ -17,7 +17,6 @@ import asyncio
 import json
 import logging
 import math
-import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -42,23 +41,9 @@ log = logging.getLogger("reflection_engine")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-NATS_URL = "nats://localhost:4222"
-
 SUBJECT_FEEDBACK_COMPLETE = "augur.feedback.complete"
 SUBJECT_REFLECT_TRIGGER = "augur.reflect.trigger"
 SUBJECT_REFLECT_COMPLETE = "augur.reflect.complete"
-
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434")
-OLLAMA_MODEL = "qwen2.5:32b"
-OLLAMA_TIMEOUT_S = 120
-
-# Precision tuning
-SIGMA_ADJUST_STEP = 0.1
-SIGMA_MIN = 1.5
-SIGMA_MAX = 5.0
-
-# Utility threshold for prompt mutation
-UTILITY_MUTATION_THRESHOLD = 0.4
 
 # Default domain for chess
 DEFAULT_DOMAIN = "chess"
@@ -67,9 +52,11 @@ DEFAULT_DOMAIN = "chess"
 # Precision analysis
 # ---------------------------------------------------------------------------
 
+
 def analyze_precision(
     feedback: dict,
     current_thresholds: dict,
+    config: AugurConfig,
 ) -> dict:
     """Evaluate detection precision from session feedback.
 
@@ -108,7 +95,7 @@ def analyze_precision(
 
     if precision < 0.3 and total >= 2:
         # Too many false positives — raise threshold
-        sigma_after = min(sigma_before + SIGMA_ADJUST_STEP, SIGMA_MAX)
+        sigma_after = min(sigma_before + config.sigma_adjust_step, config.sigma_max)
         action = "raise_sigma"
         reason = (
             f"Low precision ({precision:.0%}): {useful}/{total} useful. "
@@ -116,7 +103,7 @@ def analyze_precision(
         )
     elif precision > 0.8 and total >= 2:
         # Very high precision — could lower threshold to catch more
-        sigma_after = max(sigma_before - SIGMA_ADJUST_STEP, SIGMA_MIN)
+        sigma_after = max(sigma_before - config.sigma_adjust_step, config.sigma_min)
         action = "lower_sigma"
         reason = (
             f"High precision ({precision:.0%}): {useful}/{total} useful. "
@@ -139,11 +126,12 @@ def analyze_precision(
 # Utility analysis
 # ---------------------------------------------------------------------------
 
-def analyze_utility(feedback: dict) -> dict:
+
+def analyze_utility(feedback: dict, config: AugurConfig) -> dict:
     """Evaluate advice utility from explicit + behavioral signals.
 
     Weighted score: 60% explicit, 40% behavioral.
-    If utility < UTILITY_MUTATION_THRESHOLD, flags for prompt mutation.
+    If utility < config.utility_mutation_threshold, flags for prompt mutation.
     """
     advice_events = feedback.get("advice_events", [])
     summary = feedback.get("session_summary", {})
@@ -170,7 +158,9 @@ def analyze_utility(feedback: dict) -> dict:
         else:
             explicit_scores.append(0.5)
 
-    explicit_avg = sum(explicit_scores) / len(explicit_scores) if explicit_scores else 0.5
+    explicit_avg = (
+        sum(explicit_scores) / len(explicit_scores) if explicit_scores else 0.5
+    )
 
     # Behavioral component
     behavioral_scores = [
@@ -179,13 +169,12 @@ def analyze_utility(feedback: dict) -> dict:
         if ev.get("behavioral_score", 0) > 0
     ]
     behavioral_avg = (
-        sum(behavioral_scores) / len(behavioral_scores)
-        if behavioral_scores else 0.5
+        sum(behavioral_scores) / len(behavioral_scores) if behavioral_scores else 0.5
     )
 
     # Weighted combination
     utility = 0.6 * explicit_avg + 0.4 * behavioral_avg
-    needs_mutation = utility < UTILITY_MUTATION_THRESHOLD and total >= 2
+    needs_mutation = utility < config.utility_mutation_threshold and total >= 2
 
     reason = f"Utility {utility:.2f} (explicit={explicit_avg:.2f}, behavioral={behavioral_avg:.2f})"
     if needs_mutation:
@@ -204,6 +193,7 @@ def analyze_utility(feedback: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Counterfactual analysis
 # ---------------------------------------------------------------------------
+
 
 def analyze_counterfactual(
     pm: PersistenceManager,
@@ -304,11 +294,13 @@ def analyze_counterfactual(
 # Prompt mutation via Ollama
 # ---------------------------------------------------------------------------
 
+
 async def mutate_prompt(
     pm: PersistenceManager,
     domain: str,
     utility_result: dict,
     http_client: httpx.AsyncClient,
+    config: AugurConfig,
 ) -> dict | None:
     """Ask Ollama to suggest a better system prompt based on feedback."""
     current_prompt = pm.load_prompt(domain)
@@ -320,15 +312,15 @@ async def mutate_prompt(
         )
 
     prompt = f"""You are an AI prompt engineer. A chess advisor system has been receiving
-low utility scores from users (score: {utility_result['utility_score']:.2f}/1.0).
+low utility scores from users (score: {utility_result["utility_score"]:.2f}/1.0).
 
 The current system prompt for the advisor is:
 ---
 {current_prompt}
 ---
 
-Explicit feedback score: {utility_result['explicit_component']:.2f}/1.0
-Behavioral feedback score: {utility_result['behavioral_component']:.2f}/1.0
+Explicit feedback score: {utility_result["explicit_component"]:.2f}/1.0
+Behavioral feedback score: {utility_result["behavioral_component"]:.2f}/1.0
 
 Suggest an improved version of the system prompt that would produce more useful,
 actionable chess advice. Focus on making advice more specific and practical.
@@ -337,16 +329,16 @@ Return ONLY the new prompt text, nothing else."""
 
     try:
         payload = {
-            "model": OLLAMA_MODEL,
+            "model": config.ollama_model,
             "prompt": prompt,
             "stream": False,
             "options": {"temperature": 0.8, "num_predict": 512},
         }
         t0 = time.monotonic()
         resp = await http_client.post(
-            f"{OLLAMA_URL}/api/generate",
+            f"{config.ollama_url}/api/generate",
             json=payload,
-            timeout=OLLAMA_TIMEOUT_S,
+            timeout=config.ollama_timeout,
         )
         latency_ms = (time.monotonic() - t0) * 1000
         resp.raise_for_status()
@@ -360,7 +352,9 @@ Return ONLY the new prompt text, nothing else."""
         pm.save_prompt(domain, new_prompt, score=utility_result["utility_score"])
         log.info(
             "Mutated prompt for '%s' (%.0fms, %d chars)",
-            domain, latency_ms, len(new_prompt),
+            domain,
+            latency_ms,
+            len(new_prompt),
         )
         return {
             "mutated": True,
@@ -377,6 +371,7 @@ Return ONLY the new prompt text, nothing else."""
 # Core reflection
 # ---------------------------------------------------------------------------
 
+
 async def run_reflection(
     session_id: str,
     feedback: dict,
@@ -384,6 +379,7 @@ async def run_reflection(
     redis_client: redis.Redis,
     http_client: httpx.AsyncClient,
     nc: nats.aio.client.Client,
+    config: AugurConfig,
 ) -> dict:
     """Execute all three analyses and build the reflection report."""
     domain = DEFAULT_DOMAIN
@@ -399,7 +395,7 @@ async def run_reflection(
     }
 
     # 1. Precision analysis
-    precision = analyze_precision(feedback, current_thresholds)
+    precision = analyze_precision(feedback, current_thresholds, config)
     log.info("Precision: %s", precision["reason"])
 
     # Apply sigma adjustment if needed
@@ -408,18 +404,22 @@ async def run_reflection(
         pm.save_thresholds(domain, current_thresholds)
         log.info(
             "Saved updated sigma threshold: %.1f -> %.1f",
-            precision["sigma_before"], precision["sigma_after"],
+            precision["sigma_before"],
+            precision["sigma_after"],
         )
 
     # 2. Utility analysis
-    utility = analyze_utility(feedback)
+    utility = analyze_utility(feedback, config)
     log.info("Utility: %s", utility["reason"])
 
     # Prompt mutation if utility is low
     mutation_result = None
     if utility["needs_prompt_mutation"]:
-        log.info("Utility below %.1f — attempting prompt mutation", UTILITY_MUTATION_THRESHOLD)
-        mutation_result = await mutate_prompt(pm, domain, utility, http_client)
+        log.info(
+            "Utility below %.1f — attempting prompt mutation",
+            config.utility_mutation_threshold,
+        )
+        mutation_result = await mutate_prompt(pm, domain, utility, http_client, config)
         if mutation_result and mutation_result.get("mutated"):
             log.info("Prompt mutation successful")
         else:
@@ -441,7 +441,8 @@ async def run_reflection(
         "adjustments": {
             "sigma_adjusted": precision["action"] != "none",
             "sigma_value": precision["sigma_after"],
-            "prompt_mutated": mutation_result is not None and mutation_result.get("mutated", False),
+            "prompt_mutated": mutation_result is not None
+            and mutation_result.get("mutated", False),
         },
     }
 
@@ -473,25 +474,37 @@ async def run_reflection(
 # Core loop
 # ---------------------------------------------------------------------------
 
+
 async def run() -> None:
-    redis_client = redis.Redis(host="localhost", port=6379, socket_connect_timeout=5)
+    config = AugurConfig.from_env()
+
+    redis_client = redis.Redis(
+        host=config.redis_host,
+        port=config.redis_port,
+        socket_connect_timeout=config.redis_connect_timeout,
+    )
     redis_client.ping()
-    log.info("Redis connected")
+    log.info("Redis connected (%s)", config.redis_url)
 
     pm = PersistenceManager(redis_client)
 
-    nc = await nats.connect(NATS_URL, connect_timeout=5)
-    log.info("NATS connected")
+    nc = await nats.connect(
+        config.nats_url, connect_timeout=config.nats_connect_timeout
+    )
+    log.info("NATS connected (%s)", config.nats_url)
 
     http_client = httpx.AsyncClient()
 
     # Check Ollama reachability (non-fatal)
     try:
-        probe = await http_client.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+        probe = await http_client.get(f"{config.ollama_url}/api/tags", timeout=5)
         probe.raise_for_status()
-        log.info("Ollama reachable at %s", OLLAMA_URL)
+        log.info("Ollama reachable at %s", config.ollama_url)
     except (httpx.HTTPError, httpx.ConnectError) as exc:
-        log.warning("Ollama not reachable at startup (%s) — prompt mutation will be skipped", exc)
+        log.warning(
+            "Ollama not reachable at startup (%s) — prompt mutation will be skipped",
+            exc,
+        )
 
     reflection_lock = asyncio.Lock()
 
@@ -505,7 +518,9 @@ async def run() -> None:
         session_id = data.get("session_id", "unknown")
 
         if reflection_lock.locked():
-            log.warning("Reflection already in progress, skipping session %s", session_id)
+            log.warning(
+                "Reflection already in progress, skipping session %s", session_id
+            )
             return
 
         async with reflection_lock:
@@ -515,7 +530,9 @@ async def run() -> None:
                 log.warning("No feedback found for session %s", session_id)
                 return
 
-            await run_reflection(session_id, feedback, pm, redis_client, http_client, nc)
+            await run_reflection(
+                session_id, feedback, pm, redis_client, http_client, nc, config
+            )
 
     async def on_trigger(msg: nats.aio.client.Msg) -> None:
         """Manual trigger — accepts {session_id} or runs on latest session."""
@@ -536,7 +553,9 @@ async def run() -> None:
                 return
 
         if reflection_lock.locked():
-            log.warning("Reflection already in progress, skipping trigger for %s", session_id)
+            log.warning(
+                "Reflection already in progress, skipping trigger for %s", session_id
+            )
             return
 
         async with reflection_lock:
@@ -545,12 +564,16 @@ async def run() -> None:
                 log.warning("No feedback found for session %s", session_id)
                 return
 
-            await run_reflection(session_id, feedback, pm, redis_client, http_client, nc)
+            await run_reflection(
+                session_id, feedback, pm, redis_client, http_client, nc, config
+            )
 
     await nc.subscribe(SUBJECT_FEEDBACK_COMPLETE, cb=on_feedback_complete)
     await nc.subscribe(SUBJECT_REFLECT_TRIGGER, cb=on_trigger)
 
-    log.info("Subscribed to: %s, %s", SUBJECT_FEEDBACK_COMPLETE, SUBJECT_REFLECT_TRIGGER)
+    log.info(
+        "Subscribed to: %s, %s", SUBJECT_FEEDBACK_COMPLETE, SUBJECT_REFLECT_TRIGGER
+    )
     log.info("Waiting for session feedback or manual trigger...")
 
     try:

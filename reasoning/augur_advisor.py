@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -40,17 +39,12 @@ log = logging.getLogger("augur_advisor")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-NATS_URL = "nats://localhost:4222"
 SUBSCRIBE_SUBJECT = "augur.detection.anomaly"
 PUBLISH_SUBJECT = "augur.reasoning.advice"
 
 REDIS_KEY_LAST_MOVE = "augur:chess:last_move"
 REDIS_KEY_HISTORY = "augur:chess:move_history"
 REDIS_KEY_ADVICE = "augur:reasoning:last_advice"
-
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434")
-OLLAMA_MODEL = "qwen2.5:32b"
-OLLAMA_TIMEOUT_S = 120
 
 SEVERITY_GATE = {"medium", "high"}
 
@@ -75,8 +69,13 @@ DEFAULT_PROMPTS = {
 # Redis helpers
 # ---------------------------------------------------------------------------
 
-def connect_redis() -> redis.Redis:
-    client = redis.Redis(host="localhost", port=6379, socket_connect_timeout=5)
+
+def connect_redis(config: AugurConfig) -> redis.Redis:
+    client = redis.Redis(
+        host=config.redis_host,
+        port=config.redis_port,
+        socket_connect_timeout=config.redis_connect_timeout,
+    )
     client.ping()
     log.info("Redis connected")
     return client
@@ -93,9 +92,11 @@ def read_board_context(r: redis.Redis) -> tuple[dict | None, list[dict]]:
     history.reverse()
     return last_move, history
 
+
 # ---------------------------------------------------------------------------
 # Chess prompt builder
 # ---------------------------------------------------------------------------
+
 
 def build_chess_prompt(
     anomaly: dict,
@@ -121,11 +122,15 @@ def build_chess_prompt(
         prefix = f"{num}." if p == "white" else f"{num}..."
         history_lines.append(f"  {prefix} {san} ({p}, {t}s)")
 
-    history_block = "\n".join(history_lines) if history_lines else "  (no history available)"
+    history_block = (
+        "\n".join(history_lines) if history_lines else "  (no history available)"
+    )
 
     current_move = "unknown"
     if last_move:
-        current_move = f"{last_move.get('move_san', '?')} (UCI: {last_move.get('move_uci', '?')})"
+        current_move = (
+            f"{last_move.get('move_san', '?')} (UCI: {last_move.get('move_uci', '?')})"
+        )
 
     return f"""{system_prompt}
 
@@ -147,9 +152,11 @@ def build_chess_prompt(
 
 Keep your response concise (3-5 sentences). Focus on actionable chess insight, not generic advice."""
 
+
 # ---------------------------------------------------------------------------
 # Typing prompt builder
 # ---------------------------------------------------------------------------
+
 
 def build_typing_prompt(
     anomaly: dict,
@@ -190,9 +197,11 @@ def build_typing_prompt(
 
 Keep your response concise (2-4 sentences). Be supportive, not intrusive. Focus on cognitive well-being and productivity."""
 
+
 # ---------------------------------------------------------------------------
 # Generic prompt builder (fallback for unknown domains)
 # ---------------------------------------------------------------------------
+
 
 def build_generic_prompt(
     anomaly: dict,
@@ -220,6 +229,7 @@ def build_generic_prompt(
 
 Analyze this anomaly and provide a concise assessment (2-4 sentences)."""
 
+
 # ---------------------------------------------------------------------------
 # Domain handler registry
 # ---------------------------------------------------------------------------
@@ -234,10 +244,15 @@ DOMAIN_HANDLERS: dict[str, callable] = {
 # Ollama client
 # ---------------------------------------------------------------------------
 
-async def query_ollama(prompt: str, client: httpx.AsyncClient) -> tuple[str, float]:
+
+async def query_ollama(
+    prompt: str,
+    client: httpx.AsyncClient,
+    config: AugurConfig,
+) -> tuple[str, float]:
     """Send prompt to Ollama, return (response_text, latency_ms)."""
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": config.ollama_model,
         "prompt": prompt,
         "stream": False,
         "options": {
@@ -248,9 +263,9 @@ async def query_ollama(prompt: str, client: httpx.AsyncClient) -> tuple[str, flo
 
     t0 = time.monotonic()
     resp = await client.post(
-        f"{OLLAMA_URL}/api/generate",
+        f"{config.ollama_url}/api/generate",
         json=payload,
-        timeout=OLLAMA_TIMEOUT_S,
+        timeout=config.ollama_timeout,
     )
     latency_ms = (time.monotonic() - t0) * 1000
     resp.raise_for_status()
@@ -262,35 +277,40 @@ async def query_ollama(prompt: str, client: httpx.AsyncClient) -> tuple[str, flo
 
     return text, latency_ms
 
+
 # ---------------------------------------------------------------------------
 # Core loop
 # ---------------------------------------------------------------------------
 
+
 async def run() -> None:
-    redis_client = connect_redis()
+    config = AugurConfig.from_env()
+
+    redis_client = connect_redis(config)
     pm = PersistenceManager(redis_client)
 
-    nc = await nats.connect(NATS_URL, connect_timeout=5)
-    log.info("NATS connected (%s)", NATS_URL)
+    nc = await nats.connect(
+        config.nats_url, connect_timeout=config.nats_connect_timeout
+    )
+    log.info("NATS connected (%s)", config.nats_url)
 
     http_client = httpx.AsyncClient()
 
     # Check Ollama reachability at startup (non-fatal)
     try:
-        probe = await http_client.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+        probe = await http_client.get(f"{config.ollama_url}/api/tags", timeout=5)
         probe.raise_for_status()
         models = [m["name"] for m in probe.json().get("models", [])]
         log.info("Ollama reachable. Available models: %s", models or "(none)")
-        if not any(OLLAMA_MODEL in m for m in models):
+        if not any(config.ollama_model in m for m in models):
             log.warning(
                 "Model '%s' not found locally. "
                 "It will be pulled on first request (may be slow).",
-                OLLAMA_MODEL,
+                config.ollama_model,
             )
     except (httpx.HTTPError, httpx.ConnectError) as exc:
         log.warning(
-            "Ollama not reachable at startup (%s). "
-            "Will retry when anomalies arrive.",
+            "Ollama not reachable at startup (%s). Will retry when anomalies arrive.",
             exc,
         )
 
@@ -312,13 +332,19 @@ async def run() -> None:
         if severity not in SEVERITY_GATE:
             log.info(
                 "Ignoring %s severity anomaly for %s/%s (%.2f)",
-                severity, domain, entity, value,
+                severity,
+                domain,
+                entity,
+                value,
             )
             return
 
         log.info(
             "Anomaly received [%s] %s/%s value=%.2f — querying LLM",
-            severity.upper(), domain, entity, value,
+            severity.upper(),
+            domain,
+            entity,
+            value,
         )
 
         if reasoning_lock.locked():
@@ -350,15 +376,17 @@ async def run() -> None:
 
             # Query Ollama
             try:
-                advice, latency_ms = await query_ollama(prompt, http_client)
+                advice, latency_ms = await query_ollama(prompt, http_client, config)
             except httpx.ConnectError:
                 log.error(
-                    "Ollama unreachable at %s — is it running?", OLLAMA_URL,
+                    "Ollama unreachable at %s — is it running?",
+                    config.ollama_url,
                 )
                 return
             except httpx.TimeoutException:
                 log.error(
-                    "Ollama timed out after %ds", OLLAMA_TIMEOUT_S,
+                    "Ollama timed out after %ds",
+                    config.ollama_timeout,
                 )
                 return
             except httpx.HTTPStatusError as exc:
@@ -370,7 +398,8 @@ async def run() -> None:
 
             log.info(
                 "LLM responded in %.0fms (%d chars)",
-                latency_ms, len(advice),
+                latency_ms,
+                len(advice),
             )
             log.info("Advice for %s/%s:\n%s", domain, entity, advice)
 
@@ -381,12 +410,14 @@ async def run() -> None:
                 "advice": advice,
                 "value": value,
                 "severity": severity,
-                "model": OLLAMA_MODEL,
+                "model": config.ollama_model,
                 "latency_ms": round(latency_ms, 1),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 # Compat aliases for console_display and downstream
                 "player": entity,
-                "move": anomaly.get("move", anomaly.get("context", {}).get("label", "?")),
+                "move": anomaly.get(
+                    "move", anomaly.get("context", {}).get("label", "?")
+                ),
                 "think_time": value,
             }
 
@@ -411,7 +442,9 @@ async def run() -> None:
     log.info("Subscribed to %s", SUBSCRIBE_SUBJECT)
     log.info("Severity gate: only processing %s", SEVERITY_GATE)
     log.info("Supported domains: %s (+ generic fallback)", list(DOMAIN_HANDLERS.keys()))
-    log.info("Ollama model: %s (timeout: %ds)", OLLAMA_MODEL, OLLAMA_TIMEOUT_S)
+    log.info(
+        "Ollama model: %s (timeout: %ds)", config.ollama_model, config.ollama_timeout
+    )
     log.info("Waiting for anomalies...")
 
     try:

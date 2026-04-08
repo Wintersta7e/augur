@@ -1,0 +1,12 @@
+.venv/
+.git/
+tests/
+docs/
+*.pyc
+__pycache__/
+.claude/
+CLAUDE.md
+*.md
+logs/
+.env
+.env.*

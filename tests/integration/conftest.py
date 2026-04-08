@@ -29,6 +29,7 @@ _config = AugurConfig.from_env()
 # Infrastructure availability probes (run at module load time)
 # ---------------------------------------------------------------------------
 
+
 def _redis_available() -> bool:
     try:
         r = redis.Redis.from_url(_config.redis_url, socket_connect_timeout=2)
@@ -41,6 +42,7 @@ def _redis_available() -> bool:
 
 def _nats_available() -> bool:
     try:
+
         async def _check() -> bool:
             nc = await nats_client.connect(_config.nats_url, connect_timeout=2)
             await nc.close()
@@ -83,6 +85,7 @@ requires_ollama = pytest.mark.slow(requires_ollama)  # type: ignore[assignment]
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest_asyncio.fixture
 async def redis_client() -> AsyncIterator[redis.Redis]:  # type: ignore[type-arg]
     """Synchronous Redis client with augur:* key cleanup before each test."""
@@ -118,7 +121,9 @@ def session_id() -> str:
 
 
 @pytest_asyncio.fixture
-async def pipeline(request: pytest.FixtureRequest) -> AsyncIterator[dict[str, asyncio.subprocess.Process]]:
+async def pipeline(
+    request: pytest.FixtureRequest,
+) -> AsyncIterator[dict[str, asyncio.subprocess.Process]]:
     """Start one or more pipeline components as asyncio subprocesses.
 
     Parametrize with a list of component names, e.g.:
@@ -127,11 +132,11 @@ async def pipeline(request: pytest.FixtureRequest) -> AsyncIterator[dict[str, as
     Available components: detector, advisor, feedback, reflection, display.
     """
     component_commands: dict[str, list[str]] = {
-        "detector":   [sys.executable, "-m", "detection.anomaly_detector"],
-        "advisor":    [sys.executable, "-m", "reasoning.augur_advisor"],
-        "feedback":   [sys.executable, "-m", "perception.feedback_collector"],
+        "detector": [sys.executable, "-m", "detection.anomaly_detector"],
+        "advisor": [sys.executable, "-m", "reasoning.augur_advisor"],
+        "feedback": [sys.executable, "-m", "perception.feedback_collector"],
         "reflection": [sys.executable, "-m", "reasoning.reflection_engine"],
-        "display":    [sys.executable, "-m", "output.console_display"],
+        "display": [sys.executable, "-m", "output.console_display"],
     }
 
     requested: list[str] = getattr(request, "param", [])
@@ -142,13 +147,13 @@ async def pipeline(request: pytest.FixtureRequest) -> AsyncIterator[dict[str, as
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(PROJECT_ROOT),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         procs[name] = proc
 
-    # Give components time to connect to Redis/NATS
-    await asyncio.sleep(1.5)
+    # Give components time to connect to Redis/NATS and subscribe
+    await asyncio.sleep(3.0)
 
     yield procs
 
@@ -169,6 +174,7 @@ async def pipeline(request: pytest.FixtureRequest) -> AsyncIterator[dict[str, as
 # ---------------------------------------------------------------------------
 # Helper functions (not fixtures)
 # ---------------------------------------------------------------------------
+
 
 async def inject_perception_event(
     nc: nats_client.NATS,

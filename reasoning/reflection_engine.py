@@ -27,6 +27,7 @@ import nats
 import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from blackboard.config import AugurConfig
 from blackboard.persistence import PersistenceManager
 
 # ---------------------------------------------------------------------------

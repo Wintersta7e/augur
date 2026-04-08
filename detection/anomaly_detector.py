@@ -25,6 +25,7 @@ import redis
 from river.anomaly import HalfSpaceTrees
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from blackboard.config import AugurConfig
 from blackboard.contracts import PerceptionEvent
 from blackboard.persistence import PersistenceManager
 

@@ -28,3 +28,7 @@ Thumbs.db
 # Data
 *.log
 logs/
+.claude
+
+# Local design specs and plans (not for remote)
+docs/superpowers/

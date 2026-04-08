@@ -23,13 +23,16 @@ class TestAnomalyPipeline:
     ) -> None:
         """After building a baseline, an extreme outlier triggers anomaly detection."""
         sid = "anomaly-test"
-        for _ in range(10):
+        # Use varied values to build a baseline with non-zero variance
+        # (identical values → std≈0 → deviation forced to 0 by detector)
+        baseline_values = [4.5, 5.2, 4.8, 5.5, 4.3, 5.1, 4.7, 5.3, 4.9, 5.0]
+        for val in baseline_values:
             await inject_perception_event(
                 nats_conn,
                 domain="anomtest",
                 entity="subject",
                 event_type="move",
-                value=5.0,
+                value=val,
                 unit="seconds",
                 context={},
                 session_id=sid,
@@ -37,7 +40,7 @@ class TestAnomalyPipeline:
             await asyncio.sleep(0.05)
         await asyncio.sleep(1.0)
 
-        # Inject extreme outlier
+        # Inject extreme outlier (10x baseline mean)
         await inject_perception_event(
             nats_conn,
             domain="anomtest",
@@ -110,13 +113,14 @@ class TestAnomalyPipeline:
     ) -> None:
         """Anomaly events contain all expected fields."""
         sid = "fields-test"
-        for _ in range(10):
+        baseline_values = [2.8, 3.2, 3.0, 3.5, 2.7, 3.1, 2.9, 3.3, 3.0, 3.4]
+        for val in baseline_values:
             await inject_perception_event(
                 nats_conn,
                 domain="fieldtest",
                 entity="player",
                 event_type="move",
-                value=3.0,
+                value=val,
                 unit="seconds",
                 context={},
                 session_id=sid,
@@ -146,5 +150,5 @@ class TestAnomalyPipeline:
         assert raw is not None
         anomaly = json.loads(raw)
         if anomaly.get("domain") == "fieldtest":
-            required = {"domain", "entity", "severity", "value", "deviation"}
+            required = {"domain", "entity", "severity", "value", "deviation_score"}
             assert required.issubset(anomaly.keys())

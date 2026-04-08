@@ -1,0 +1,10 @@
+python-chess
+pygame
+river
+redis[hiredis]
+nats-py
+httpx
+keyboard
+pytest
+pytest-asyncio
+fastmcp

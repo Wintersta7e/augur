@@ -1,0 +1,67 @@
+services:
+  detector:
+    build: .
+    command: python -m detection.anomaly_detector
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      AUGUR_NATS_URL: nats://nats:4222
+      AUGUR_REDIS_URL: redis://redis:6379
+    restart: unless-stopped
+
+  advisor:
+    build: .
+    command: python -m reasoning.augur_advisor
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      AUGUR_NATS_URL: nats://nats:4222
+      AUGUR_REDIS_URL: redis://redis:6379
+      AUGUR_OLLAMA_URL: http://host.docker.internal:11434
+    restart: unless-stopped
+
+  feedback:
+    build: .
+    command: python -m perception.feedback_collector
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      AUGUR_NATS_URL: nats://nats:4222
+      AUGUR_REDIS_URL: redis://redis:6379
+    restart: unless-stopped
+
+  reflection:
+    build: .
+    command: python -m reasoning.reflection_engine
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      AUGUR_NATS_URL: nats://nats:4222
+      AUGUR_REDIS_URL: redis://redis:6379
+      AUGUR_OLLAMA_URL: http://host.docker.internal:11434
+    restart: unless-stopped
+
+  display:
+    build: .
+    command: python -m output.console_display
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      AUGUR_NATS_URL: nats://nats:4222
+      AUGUR_REDIS_URL: redis://redis:6379
+    restart: unless-stopped

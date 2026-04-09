@@ -40,17 +40,16 @@ log = logging.getLogger("typing_monitor")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-NATS_URL = "nats://localhost:4222"
 NATS_SUBJECT = "augur.perception.typing"
 
 DOMAIN = "typing"
 STREAM_ID = "typing_rhythm"
 ENTITY = "user"
 
-PAUSE_THRESHOLD_S = 3.0       # gap > 3s = pause event
-ROLLING_WINDOW_S = 5.0        # window for rolling speed
+PAUSE_THRESHOLD_S = 3.0  # gap > 3s = pause event
+ROLLING_WINDOW_S = 5.0  # window for rolling speed
 MIN_KEYPRESSES_BASELINE = 20  # minimum before scoring begins
-SAMPLE_INTERVAL = 30          # publish a rhythm sample every N keypresses
+SAMPLE_INTERVAL = 30  # publish a rhythm sample every N keypresses
 
 # ---------------------------------------------------------------------------
 # ANSI helpers
@@ -65,6 +64,7 @@ RESET = "\033[0m"
 # ---------------------------------------------------------------------------
 # Typing tracker
 # ---------------------------------------------------------------------------
+
 
 class TypingTracker:
     """Tracks typing rhythm, detects pauses, computes rolling stats."""
@@ -147,11 +147,20 @@ class TypingTracker:
 # Core loop
 # ---------------------------------------------------------------------------
 
+
 async def run() -> None:
+    # ARCH-04: route Redis + NATS through AugurConfig so Docker deploy
+    # mode (and any AUGUR_* env override) applies to this component.
+    config = AugurConfig.from_env()
+
     # Redis
-    redis_client = redis.Redis(host="localhost", port=6379, socket_connect_timeout=5)
+    redis_client = redis.Redis(
+        host=config.redis_host,
+        port=config.redis_port,
+        socket_connect_timeout=config.redis_connect_timeout,
+    )
     redis_client.ping()
-    log.info("Redis connected")
+    log.info("Redis connected (%s)", config.redis_url)
 
     pm = PersistenceManager(redis_client)
 
@@ -170,16 +179,23 @@ async def run() -> None:
     log.info("Session started: %s", session_id)
 
     # NATS
-    nc = await nats.connect(NATS_URL, connect_timeout=5)
-    log.info("NATS connected")
+    nc = await nats.connect(
+        config.nats_url, connect_timeout=config.nats_connect_timeout
+    )
+    log.info("NATS connected (%s)", config.nats_url)
 
     # Publish session start
     try:
-        await nc.publish("augur.session.start", json.dumps({
-            "session_id": session_id,
-            "domain": DOMAIN,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }).encode())
+        await nc.publish(
+            "augur.session.start",
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "domain": DOMAIN,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            ).encode(),
+        )
     except Exception as exc:
         log.error("Failed to publish session start: %s", exc)
 
@@ -206,7 +222,10 @@ async def run() -> None:
 
     print(f"\n{CYAN}{BOLD}  Augur Typing Monitor{RESET}", flush=True)
     print(f"{GRAY}  Listening for keypresses...{RESET}", flush=True)
-    print(f"{GRAY}  Pause threshold: {PAUSE_THRESHOLD_S}s | Sample every {SAMPLE_INTERVAL} keys{RESET}", flush=True)
+    print(
+        f"{GRAY}  Pause threshold: {PAUSE_THRESHOLD_S}s | Sample every {SAMPLE_INTERVAL} keys{RESET}",
+        flush=True,
+    )
     print(f"{GRAY}  Press Ctrl+C to stop.{RESET}\n", flush=True)
 
     try:
@@ -219,7 +238,8 @@ async def run() -> None:
                     wpm = tracker.rolling_wpm()
                     log.info(
                         "Status: %d keypresses, %.1f WPM",
-                        tracker.keypress_count, wpm,
+                        tracker.keypress_count,
+                        wpm,
                     )
                 continue
 
@@ -244,7 +264,8 @@ async def run() -> None:
                 )
                 log.info(
                     "%sPAUSE%s  %.1fs gap  (after %d keys, %.0f WPM)",
-                    YELLOW, RESET,
+                    YELLOW,
+                    RESET,
                     result["value"],
                     result["keypresses_since_last_pause"],
                     wpm,
@@ -268,7 +289,8 @@ async def run() -> None:
                 )
                 log.info(
                     "%sSAMPLE%s  avg interval=%.0fms  (%d keys, %.0f WPM)",
-                    GREEN, RESET,
+                    GREEN,
+                    RESET,
                     result["value"],
                     tracker.keypress_count,
                     wpm,
@@ -304,11 +326,16 @@ async def run() -> None:
         # Session end
         session_mgr.end()
         try:
-            await nc.publish("augur.session.end", json.dumps({
-                "session_id": session_id,
-                "domain": DOMAIN,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }).encode())
+            await nc.publish(
+                "augur.session.end",
+                json.dumps(
+                    {
+                        "session_id": session_id,
+                        "domain": DOMAIN,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                ).encode(),
+            )
             await nc.flush()
         except Exception as exc:
             log.error("Failed to publish session end: %s", exc)

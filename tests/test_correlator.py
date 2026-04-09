@@ -490,6 +490,84 @@ class TestSessionGraph:
 
 
 from reasoning.correlator import ensure_matrix_seeded
+from reasoning.correlator import flush_graph_to_redis  # noqa: E402
+
+
+class TestFlushGraphToRedis:
+    """flush_graph_to_redis(graph, pm, session_id) serializes the DiGraph
+    via networkx.node_link_data and calls pm.save_correlation_graph."""
+
+    def test_serializes_and_calls_save(self) -> None:
+        graph = new_session_graph()
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        correlated = _make_anomaly("typing", "user", "low", "2026-03-17T14:29:48+00:00")
+        add_correlation_to_graph(
+            graph,
+            primary=primary,
+            correlated=[correlated],
+            combined_severity="MEDIUM",
+            rule_label="LOW+LOW\u2192MEDIUM",
+        )
+
+        mock_pm = MagicMock()
+        flush_graph_to_redis(graph, mock_pm, "sess-abc")
+
+        mock_pm.save_correlation_graph.assert_called_once()
+        session_id_arg, graph_data_arg = mock_pm.save_correlation_graph.call_args[0]
+        assert session_id_arg == "sess-abc"
+
+        # Verify serialized structure (node_link_data shape).
+        # NetworkX 3.4+ uses "edges" as the default key (was "links" in older
+        # versions). This project runs networkx 3.6.1.
+        assert graph_data_arg["directed"] is True
+        assert len(graph_data_arg["nodes"]) == 2
+        assert len(graph_data_arg["edges"]) == 1
+
+        node_ids = {n["id"] for n in graph_data_arg["nodes"]}
+        assert "chess:white:2026-03-17T14:30:00+00:00" in node_ids
+        assert "typing:user:2026-03-17T14:29:48+00:00" in node_ids
+
+        edge = graph_data_arg["edges"][0]
+        assert edge["escalation_rule"] == "LOW+LOW\u2192MEDIUM"
+        assert edge["combined_severity"] == "MEDIUM"
+        # The ``domains`` edge attribute is a tuple in memory. node_link_data
+        # hands it through unchanged; it only becomes a list after a json
+        # round-trip (which happens inside PersistenceManager, not here).
+        assert list(edge["domains"]) == ["chess", "typing"]
+
+    def test_empty_graph_still_saved(self) -> None:
+        # Empty graph is valid state — save it so consumers can observe
+        # "session had no correlations" rather than confuse it with missing data.
+        graph = new_session_graph()
+        mock_pm = MagicMock()
+
+        flush_graph_to_redis(graph, mock_pm, "sess-empty")
+
+        mock_pm.save_correlation_graph.assert_called_once()
+        _, graph_data_arg = mock_pm.save_correlation_graph.call_args[0]
+        assert graph_data_arg["nodes"] == []
+        assert graph_data_arg["edges"] == []
+        assert graph_data_arg["directed"] is True
+
+    def test_multiple_edges_serialized(self) -> None:
+        graph = new_session_graph()
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        typing_ev = _make_anomaly("typing", "user", "low", "2026-03-17T14:29:50+00:00")
+        focus_ev = _make_anomaly("focus", "app", "low", "2026-03-17T14:29:40+00:00")
+        add_correlation_to_graph(
+            graph,
+            primary=primary,
+            correlated=[typing_ev, focus_ev],
+            combined_severity="MEDIUM",
+            rule_label="LOW+LOW\u2192MEDIUM",
+        )
+
+        mock_pm = MagicMock()
+        flush_graph_to_redis(graph, mock_pm, "sess-multi")
+
+        _, graph_data_arg = mock_pm.save_correlation_graph.call_args[0]
+        assert len(graph_data_arg["nodes"]) == 3
+        assert len(graph_data_arg["edges"]) == 2
 
 
 class TestEnsureMatrixSeeded:

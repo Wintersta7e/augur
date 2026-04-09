@@ -21,6 +21,7 @@ from pathlib import Path
 import nats
 import nats.aio.client
 import networkx as nx
+from networkx.readwrite import json_graph
 import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -350,6 +351,28 @@ def dump_graph(graph: nx.DiGraph) -> None:
             data.get("combined_severity"),
         )
     log.info("=== End graph dump ===")
+
+
+def flush_graph_to_redis(
+    graph: nx.DiGraph,
+    pm: PersistenceManager,
+    session_id: str,
+) -> None:
+    """Serialize the session DiGraph via node_link_data and persist it.
+
+    Saves an empty-graph placeholder for sessions with no correlations so
+    consumers can distinguish "session had no correlations" from "session
+    has never existed". The tuple-valued ``domains`` edge attribute is
+    converted to a list by the JSON round-trip inside PersistenceManager.
+    """
+    graph_data = json_graph.node_link_data(graph)
+    pm.save_correlation_graph(session_id, graph_data)
+    log.info(
+        "Flushed correlation graph for session %s (%d nodes, %d edges)",
+        session_id,
+        len(graph.nodes),
+        len(graph.edges),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -323,8 +323,12 @@ the domains, not each signal in isolation."""
 # Domain handler registry
 # ---------------------------------------------------------------------------
 
-# Maps domain name -> prompt builder function
-DOMAIN_HANDLERS: dict[str, callable] = {
+# Maps domain name -> prompt builder function.
+# The prompt builder signature is (anomaly, redis_client, system_prompt) -> str.
+# Using collections.abc.Callable (not the lowercase built-in `callable`, which
+# is a function and not a valid generic alias) so mypy/pyright can check that
+# new handlers match the expected shape.
+DOMAIN_HANDLERS: dict[str, Callable[[dict, redis.Redis, str], str]] = {
     "chess": build_chess_prompt,
     "typing": build_typing_prompt,
 }

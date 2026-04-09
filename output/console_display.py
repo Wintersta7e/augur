@@ -378,10 +378,13 @@ async def run() -> None:
 
         print(render_reflection(data), flush=True)
 
-    await nc.subscribe(SUBJECT_ANOMALY, cb=on_anomaly)
-    await nc.subscribe(SUBJECT_CORRELATION, cb=on_correlation)
-    await nc.subscribe(SUBJECT_ADVICE, cb=on_advice)
-    await nc.subscribe(SUBJECT_REFLECT, cb=on_reflection)
+    # LEAK-07: save subscription handles so unsubscribe() is called on
+    # shutdown rather than relying on nc.close() to tear them down abruptly
+    # mid-render.
+    sub_anomaly = await nc.subscribe(SUBJECT_ANOMALY, cb=on_anomaly)
+    sub_correlation = await nc.subscribe(SUBJECT_CORRELATION, cb=on_correlation)
+    sub_advice = await nc.subscribe(SUBJECT_ADVICE, cb=on_advice)
+    sub_reflect = await nc.subscribe(SUBJECT_REFLECT, cb=on_reflection)
 
     try:
         while True:
@@ -389,6 +392,13 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        try:
+            await sub_anomaly.unsubscribe()
+            await sub_correlation.unsubscribe()
+            await sub_advice.unsubscribe()
+            await sub_reflect.unsubscribe()
+        except Exception as exc:
+            log.debug("Unsubscribe failed during shutdown: %s", exc)
         await nc.close()
 
 

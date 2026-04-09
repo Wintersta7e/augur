@@ -274,6 +274,45 @@ def describe_signal(domain: str, anomaly: dict) -> str:
     )
 
 
+def build_correlation_prompt(payload: dict) -> str:
+    """Build a cross-domain correlation prompt from a correlation payload.
+
+    Unlike the single-domain prompt builders, this does not take a redis
+    client or system_prompt — it uses its own purpose-built template focused
+    on RELATIONAL reasoning (not two prompts concatenated).
+    """
+    primary = payload["primary_anomaly"]
+    correlated = payload["correlated_events"]
+
+    lines = [describe_signal(primary["domain"], primary)]
+    for ev in correlated:
+        lines.append(describe_signal(ev["domain"], ev))
+    signals_block = "\n".join(lines)
+
+    lag = payload.get("temporal_lag_seconds", "?")
+    combined = payload.get("combined_severity", "?")
+    rule = payload.get("escalation_rule", "")
+    escalated_from = ""
+    if rule:
+        # rule looks like "LOW+LOW→MEDIUM"
+        left = rule.split("\u2192")[0]
+        escalated_from = f" (escalated from {left})"
+
+    return f"""Two or more simultaneous anomalies detected across different behavioral domains:
+
+{signals_block}
+
+These signals occurred within {lag} seconds of each other.
+Combined severity: {combined}{escalated_from}.
+
+Reason about what the COMBINATION of these signals suggests about the operator's
+current state. What is the most likely underlying cause? What single piece of
+advice would address the root cause rather than either symptom individually?
+
+Keep your response concise (3-5 sentences). Focus on the relationship between
+the domains, not each signal in isolation."""
+
+
 # ---------------------------------------------------------------------------
 # Domain handler registry
 # ---------------------------------------------------------------------------

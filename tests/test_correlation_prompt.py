@@ -7,7 +7,6 @@ payload.correlation_found.
 from __future__ import annotations
 
 
-
 from reasoning.augur_advisor import describe_signal
 
 
@@ -77,3 +76,68 @@ class TestDescribeSignal:
         line = describe_signal("focus", event)
         assert "focus" in line.lower()
         assert "\n" not in line
+
+
+from reasoning.augur_advisor import build_correlation_prompt
+
+
+def _correlation_payload() -> dict:
+    return {
+        "primary_anomaly": _chess_event() | {"timestamp": "2026-03-17T14:30:00+00:00"},
+        "correlated_events": [
+            _typing_event() | {"timestamp": "2026-03-17T14:29:48+00:00"}
+        ],
+        "correlation_found": True,
+        "temporal_lag_seconds": 12.0,
+        "combined_severity": "MEDIUM",
+        "severity_escalated": True,
+        "escalation_rule": "LOW+LOW→MEDIUM",
+        "escalation_matrix_version": "1.0",
+        "timestamp": "2026-03-17T14:30:00+00:00",
+    }
+
+
+class TestBuildCorrelationPrompt:
+    def test_contains_both_domain_one_liners(self) -> None:
+        prompt = build_correlation_prompt(_correlation_payload())
+        assert "CHESS" in prompt
+        assert "TYPING" in prompt
+
+    def test_mentions_temporal_lag(self) -> None:
+        prompt = build_correlation_prompt(_correlation_payload())
+        assert "12" in prompt
+
+    def test_mentions_combined_severity(self) -> None:
+        prompt = build_correlation_prompt(_correlation_payload())
+        assert "MEDIUM" in prompt
+
+    def test_mentions_escalation_rule(self) -> None:
+        prompt = build_correlation_prompt(_correlation_payload())
+        assert "LOW" in prompt  # escalated from LOW+LOW
+
+    def test_asks_for_relational_reasoning_not_sum(self) -> None:
+        prompt = build_correlation_prompt(_correlation_payload())
+        # The correlation prompt's value is forcing the LLM to reason about
+        # the combination — not the two signals in isolation.
+        assert "combination" in prompt.lower() or "combined" in prompt.lower()
+
+    def test_handles_three_domain_correlation(self) -> None:
+        payload = _correlation_payload()
+        payload["correlated_events"].append(
+            {
+                "domain": "focus",
+                "entity": "app",
+                "event_type": "switch",
+                "value": 5,
+                "unit": "count",
+                "context": {},
+                "baseline_mean": 1,
+                "deviation_score": 3.0,
+                "severity": "low",
+                "timestamp": "2026-03-17T14:29:40+00:00",
+            }
+        )
+        prompt = build_correlation_prompt(payload)
+        assert "CHESS" in prompt
+        assert "TYPING" in prompt
+        assert "FOCUS" in prompt

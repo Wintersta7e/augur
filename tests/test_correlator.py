@@ -5,13 +5,45 @@ Pure-logic tests only — no NATS or live Redis. Redis is mocked.
 
 from __future__ import annotations
 
+import json
+from unittest.mock import MagicMock
 
 from reasoning.correlator import (
     CORRELATION_WINDOW_S,
+    DEFAULT_ESCALATION_MATRIX,
     PRUNE_WINDOW_S,
     SEVERITY_ORDER,
+    add_to_window,
+    lookup_escalation,
     normalize_rule_key,
+    parse_timestamp,
+    query_window,
 )
+
+
+def _make_anomaly(
+    domain: str,
+    entity: str,
+    severity: str,
+    ts_iso: str,
+    value: float = 1.0,
+) -> dict:
+    return {
+        "domain": domain,
+        "stream_id": f"{domain}_stream",
+        "entity": entity,
+        "event_type": "test",
+        "value": value,
+        "unit": "s",
+        "context": {},
+        "session_id": "test-session",
+        "baseline_mean": 0.0,
+        "baseline_std": 1.0,
+        "deviation_score": 2.5,
+        "anomaly_score": 0.5,
+        "severity": severity,
+        "timestamp": ts_iso,
+    }
 
 
 class TestNormalizeRuleKey:
@@ -56,12 +88,6 @@ class TestConstants:
     def test_severity_order_ranks_low_medium_high(self) -> None:
         assert SEVERITY_ORDER["LOW"] < SEVERITY_ORDER["MEDIUM"]
         assert SEVERITY_ORDER["MEDIUM"] < SEVERITY_ORDER["HIGH"]
-
-
-from reasoning.correlator import (  # noqa: E402
-    DEFAULT_ESCALATION_MATRIX,
-    lookup_escalation,
-)
 
 
 class TestLookupEscalation:
@@ -120,3 +146,110 @@ class TestLookupEscalation:
         combined, rule = lookup_escalation("weird", "other", DEFAULT_ESCALATION_MATRIX)
         assert combined == "WEIRD"  # caller already dropped in real flow
         assert rule is None
+
+
+class TestParseTimestamp:
+    def test_iso_utc_z_suffix(self) -> None:
+        ts = parse_timestamp("2026-03-17T14:30:00+00:00")
+        assert ts > 0
+
+    def test_two_timestamps_produce_expected_delta(self) -> None:
+        t1 = parse_timestamp("2026-03-17T14:30:00+00:00")
+        t2 = parse_timestamp("2026-03-17T14:30:30+00:00")
+        assert abs((t2 - t1) - 30.0) < 0.001
+
+
+class TestAddToWindow:
+    def test_zadd_called_with_json_member_and_timestamp_score(self) -> None:
+        mock_redis = MagicMock()
+        anomaly = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+
+        add_to_window(mock_redis, anomaly)
+
+        mock_redis.zadd.assert_called_once()
+        args, _ = mock_redis.zadd.call_args
+        key, mapping = args
+        assert key == "augur:correlation:window"
+        # mapping is {json_str: score}
+        assert len(mapping) == 1
+        member, score = next(iter(mapping.items()))
+        assert json.loads(member)["domain"] == "chess"
+        expected = parse_timestamp("2026-03-17T14:30:00+00:00")
+        assert abs(score - expected) < 0.001
+
+    def test_prune_call_uses_prune_window_boundary(self) -> None:
+        mock_redis = MagicMock()
+        anomaly = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+
+        add_to_window(mock_redis, anomaly)
+
+        # ZREMRANGEBYSCORE is the pruning primitive
+        mock_redis.zremrangebyscore.assert_called_once()
+        args, _ = mock_redis.zremrangebyscore.call_args
+        key, min_score, max_score = args
+        assert key == "augur:correlation:window"
+        assert min_score == "-inf"
+        now = parse_timestamp("2026-03-17T14:30:00+00:00")
+        # Prune everything older than now - 60s
+        assert abs(max_score - (now - PRUNE_WINDOW_S)) < 0.001
+
+
+class TestQueryWindow:
+    def test_returns_events_from_other_domains_only(self) -> None:
+        primary_ts = "2026-03-17T14:30:00+00:00"
+        primary = _make_anomaly("chess", "white", "low", primary_ts)
+
+        other_domain = _make_anomaly(
+            "typing", "user", "low", "2026-03-17T14:29:50+00:00"
+        )
+        same_domain = _make_anomaly(
+            "chess", "black", "low", "2026-03-17T14:29:55+00:00"
+        )
+
+        mock_redis = MagicMock()
+        # ZRANGEBYSCORE returns members (bytes) for the 30s window
+        mock_redis.zrangebyscore.return_value = [
+            json.dumps(other_domain).encode(),
+            json.dumps(same_domain).encode(),
+            json.dumps(primary).encode(),
+        ]
+
+        results = query_window(mock_redis, primary)
+
+        assert len(results) == 1
+        assert results[0]["domain"] == "typing"
+
+    def test_zrangebyscore_called_with_inclusive_30s_window(self) -> None:
+        primary_ts = "2026-03-17T14:30:00+00:00"
+        primary = _make_anomaly("chess", "white", "low", primary_ts)
+
+        mock_redis = MagicMock()
+        mock_redis.zrangebyscore.return_value = []
+
+        query_window(mock_redis, primary)
+
+        args, _ = mock_redis.zrangebyscore.call_args
+        key, min_score, max_score = args
+        assert key == "augur:correlation:window"
+        now = parse_timestamp(primary_ts)
+        assert abs(max_score - now) < 0.001
+        assert abs(min_score - (now - CORRELATION_WINDOW_S)) < 0.001
+
+    def test_excludes_primary_itself_when_already_in_set(self) -> None:
+        # Primary shares domain with itself, so domain filter drops it
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        mock_redis = MagicMock()
+        mock_redis.zrangebyscore.return_value = [json.dumps(primary).encode()]
+
+        assert query_window(mock_redis, primary) == []
+
+    def test_handles_string_members_from_decoded_redis(self) -> None:
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        other = _make_anomaly("typing", "user", "low", "2026-03-17T14:29:55+00:00")
+
+        mock_redis = MagicMock()
+        mock_redis.zrangebyscore.return_value = [json.dumps(other)]  # str, not bytes
+
+        results = query_window(mock_redis, primary)
+        assert len(results) == 1
+        assert results[0]["domain"] == "typing"

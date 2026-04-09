@@ -12,15 +12,15 @@ neither signal would trigger individually.
 from __future__ import annotations
 
 import asyncio  # noqa: F401 — used in run loop (Task 8)
-import json  # noqa: F401 — used in window serialization (Task 5)
+import json
 import logging
 import sys
-from datetime import datetime, timezone  # noqa: F401 — used in window helpers (Task 5)
+from datetime import datetime
 from pathlib import Path
 
 import nats  # noqa: F401 — used in NATS subscriber (Task 7)
 import networkx as nx  # noqa: F401 — used in correlation graph (Task 6)
-import redis  # noqa: F401 — used in Redis window store (Task 5)
+import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from blackboard.config import AugurConfig  # noqa: F401 — used in run loop (Task 8)
@@ -115,3 +115,56 @@ def lookup_escalation(
         return s1, None
     combined = s1 if r1 >= r2 else s2
     return combined, None
+
+
+# ---------------------------------------------------------------------------
+# Redis window helpers
+# ---------------------------------------------------------------------------
+
+
+def parse_timestamp(iso_ts: str) -> float:
+    """Parse ISO-8601 timestamp to unix epoch seconds (float)."""
+    return datetime.fromisoformat(iso_ts).timestamp()
+
+
+def _decode_member(member: bytes | str) -> dict:
+    """Decode a Redis sorted-set member (bytes or str) to a dict."""
+    if isinstance(member, bytes):
+        member = member.decode()
+    return json.loads(member)
+
+
+def add_to_window(r: redis.Redis, anomaly: dict) -> None:
+    """Add an anomaly to the correlation window and prune old entries.
+
+    Member: JSON-serialized anomaly dict.
+    Score: unix timestamp parsed from ``anomaly['timestamp']``.
+    Prune: removes entries with score <= ``now - PRUNE_WINDOW_S``.
+    """
+    score = parse_timestamp(anomaly["timestamp"])
+    member = json.dumps(anomaly)
+    r.zadd(REDIS_KEY_WINDOW, {member: score})
+    # Score-based prune: remove everything older than the prune boundary.
+    r.zremrangebyscore(REDIS_KEY_WINDOW, "-inf", score - PRUNE_WINDOW_S)
+
+
+def query_window(r: redis.Redis, primary: dict) -> list[dict]:
+    """Return anomalies from other domains within the last CORRELATION_WINDOW_S.
+
+    Filters out same-domain events (correlation is cross-domain by definition).
+    """
+    now = parse_timestamp(primary["timestamp"])
+    start = now - CORRELATION_WINDOW_S
+    primary_domain = primary["domain"]
+
+    raw_members = r.zrangebyscore(REDIS_KEY_WINDOW, start, now)
+    results: list[dict] = []
+    for m in raw_members:
+        try:
+            event = _decode_member(m)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            log.warning("Skipping unparseable window member")
+            continue
+        if event.get("domain") != primary_domain:
+            results.append(event)
+    return results

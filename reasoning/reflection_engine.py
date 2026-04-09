@@ -1,14 +1,16 @@
 """Session reflection engine — self-adjusts Augur parameters after each session.
 
 Triggers on augur.feedback.complete (end of feedback collection) or
-augur.reflect.trigger (manual). Runs three analyses:
+augur.reflect.trigger (manual). Runs four analyses:
 
 1. Precision  — Were anomaly detections accurate? Adjusts sigma threshold.
 2. Utility    — Was the advice useful? May mutate LLM prompt via Ollama.
 3. Counterfactual — Would +-10% threshold variants have been better?
+4. Correlation tuning — Per-rule EWMA confidence with hysteresis to
+   tune the cross-domain escalation matrix.
 
 Publishes a reflection report to augur.reflect.complete and persists
-it in Redis at augur:reflect:<session_id>.
+it via PersistenceManager.save_reflection.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import logging
 import math
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,28 +50,31 @@ SUBJECT_FEEDBACK_COMPLETE = "augur.feedback.complete"
 SUBJECT_REFLECT_TRIGGER = "augur.reflect.trigger"
 SUBJECT_REFLECT_COMPLETE = "augur.reflect.complete"
 
-# Default domain for chess
+# Fallback domain used only when a session's feedback contains no usable
+# standalone advice events. Per-session domain is now derived from
+# feedback.advice_events instead of being hardcoded (ARCH-06 fix). Previous
+# behaviour silently applied chess-domain threshold and prompt tuning to
+# typing-only sessions.
 DEFAULT_DOMAIN = "chess"
 
-# ---------------------------------------------------------------------------
-# Idempotency markers for correlation tuning
-# ---------------------------------------------------------------------------
-TUNING_APPLIED_KEY_PREFIX = "augur:correlation:tuning_applied:"
-TUNING_APPLIED_TTL_S = 7 * 24 * 3600  # 7 days
 
+def _derive_domain(feedback: dict) -> str:
+    """Pick a domain for threshold/prompt tuning from the session's feedback.
 
-def tuning_already_applied(r: redis.Redis, session_id: str) -> bool:
-    """Return True if this session has already been tuned."""
-    return r.exists(f"{TUNING_APPLIED_KEY_PREFIX}{session_id}") > 0
-
-
-def mark_tuning_applied(r: redis.Redis, session_id: str) -> None:
-    """Set the idempotency marker with a 7-day TTL."""
-    r.set(
-        f"{TUNING_APPLIED_KEY_PREFIX}{session_id}",
-        "1",
-        ex=TUNING_APPLIED_TTL_S,
-    )
+    Only standalone (non-correlated) advice events contribute, because the
+    correlation path does not use stored prompts or per-domain sigma
+    thresholds. Returns the most common domain among those events, or
+    ``DEFAULT_DOMAIN`` if the session had no attributable standalone events.
+    """
+    standalone_domains = [
+        ev.get("domain")
+        for ev in feedback.get("advice_events", [])
+        if ev.get("domain") and not ev.get("correlation_found")
+    ]
+    if not standalone_domains:
+        return DEFAULT_DOMAIN
+    most_common, _count = Counter(standalone_domains).most_common(1)[0]
+    return most_common
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +338,7 @@ def analyze_correlation_tuning(
     current_matrix: dict,
     current_confidence_state: dict,
     config: AugurConfig,
-) -> dict:
+) -> dict[str, Any]:
     """Tune the cross-domain escalation matrix via per-rule EWMA confidence.
 
     For each correlated advice event with a valid rule_key, attribute the
@@ -596,10 +602,14 @@ async def run_reflection(
     http_client: httpx.AsyncClient,
     nc: nats.aio.client.Client,
     config: AugurConfig,
-) -> dict:
-    """Execute all three analyses and build the reflection report."""
-    domain = DEFAULT_DOMAIN
-    log.info("Starting reflection for session %s", session_id)
+) -> dict[str, Any]:
+    """Execute all four analyses and build the reflection report."""
+    domain = _derive_domain(feedback)
+    log.info(
+        "Starting reflection for session %s (derived domain=%s)",
+        session_id,
+        domain,
+    )
 
     # Load current thresholds
     stored_thresholds = pm.load_thresholds(domain)
@@ -646,8 +656,8 @@ async def run_reflection(
     log.info("Counterfactual: %s", counterfactual["recommendation"])
 
     # 4. Correlation matrix tuning
-    tuning: dict
-    if tuning_already_applied(redis_client, session_id):
+    tuning: dict[str, Any]
+    if pm.is_tuning_applied(session_id):
         log.info(
             "Skipping correlation tuning — already applied for session %s",
             session_id,
@@ -666,14 +676,26 @@ async def run_reflection(
         log.info("Correlation tuning: %s", tuning.get("reason", "no reason"))
 
         if tuning.get("rules_evaluated", 0) > 0:
+            # BUG-03: save confidence + mark_applied BEFORE the matrix save.
+            # If save_escalation_matrix raises, the confidence update is
+            # already persisted (not losable), and the marker prevents the
+            # next reflect-trigger from double-applying the same EWMA step
+            # to already-updated state. A failed matrix write is recoverable
+            # on the next session; double-updated confidence is not.
             pm.save_rule_confidence(tuning["new_confidence_state"])
+            pm.mark_tuning_applied(session_id)
             if tuning.get("new_matrix") is not None:
-                pm.save_escalation_matrix(tuning["new_matrix"])
-                log.warning(
-                    "Escalation matrix updated by reflection engine: %s",
-                    tuning["reason"],
-                )
-            mark_tuning_applied(redis_client, session_id)
+                try:
+                    pm.save_escalation_matrix(tuning["new_matrix"])
+                    log.info(
+                        "Escalation matrix updated by reflection engine: %s",
+                        tuning["reason"],
+                    )
+                except redis.RedisError as exc:
+                    log.error(
+                        "Matrix save failed (confidence was saved, marker set): %s",
+                        exc,
+                    )
 
     # Build report
     report = {
@@ -697,11 +719,11 @@ async def run_reflection(
     if mutation_result:
         report["adjustments"]["mutation_details"] = mutation_result
 
-    # Persist to Redis
-    reflect_key = f"augur:reflect:{session_id}"
+    # Persist via PersistenceManager (ARCH-03: was a bare redis_client.set
+    # call that bypassed the persistence abstraction).
     try:
-        redis_client.set(reflect_key, json.dumps(report))
-        log.info("Saved reflection to %s", reflect_key)
+        pm.save_reflection(session_id, report)
+        log.info("Saved reflection report for session %s", session_id)
     except redis.RedisError as exc:
         log.error("Failed to persist reflection: %s", exc)
 
@@ -759,8 +781,8 @@ async def run() -> None:
     async def on_feedback_complete(msg: nats.aio.client.Msg) -> None:
         try:
             data = json.loads(msg.data.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            log.warning("Bad feedback complete payload")
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            log.warning("Bad feedback complete payload: %s", exc)
             return
 
         session_id = data.get("session_id", "unknown")
@@ -786,7 +808,8 @@ async def run() -> None:
         """Manual trigger — accepts {session_id} or runs on latest session."""
         try:
             data = json.loads(msg.data.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            log.debug("Trigger payload unparseable, using empty: %s", exc)
             data = {}
 
         session_id = data.get("session_id")
@@ -816,8 +839,12 @@ async def run() -> None:
                 session_id, feedback, pm, redis_client, http_client, nc, config
             )
 
-    await nc.subscribe(SUBJECT_FEEDBACK_COMPLETE, cb=on_feedback_complete)
-    await nc.subscribe(SUBJECT_REFLECT_TRIGGER, cb=on_trigger)
+    # LEAK-06: save subscription handles so we can unsubscribe on shutdown
+    # rather than relying on nc.close() to tear them down abruptly.
+    sub_feedback = await nc.subscribe(
+        SUBJECT_FEEDBACK_COMPLETE, cb=on_feedback_complete
+    )
+    sub_trigger = await nc.subscribe(SUBJECT_REFLECT_TRIGGER, cb=on_trigger)
 
     log.info(
         "Subscribed to: %s, %s", SUBJECT_FEEDBACK_COMPLETE, SUBJECT_REFLECT_TRIGGER
@@ -830,8 +857,16 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        await http_client.aclose()
+        # LEAK-06: close NATS first (stop delivering messages to callbacks)
+        # before closing the HTTP client so an in-flight reflection cannot
+        # see a mid-shutdown "client is closed" error from Ollama.
+        try:
+            await sub_feedback.unsubscribe()
+            await sub_trigger.unsubscribe()
+        except Exception as exc:
+            log.debug("Unsubscribe failed during shutdown: %s", exc)
         await nc.close()
+        await http_client.aclose()
         log.info("Shut down cleanly")
 
 

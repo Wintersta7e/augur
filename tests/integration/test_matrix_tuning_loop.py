@@ -21,10 +21,7 @@ import pytest
 from blackboard.config import AugurConfig
 from blackboard.persistence import PersistenceManager
 from reasoning.correlator import DEFAULT_ESCALATION_MATRIX, ensure_matrix_seeded
-from reasoning.reflection_engine import (
-    TUNING_APPLIED_KEY_PREFIX,
-    run_reflection,
-)
+from reasoning.reflection_engine import run_reflection
 
 pytestmark = pytest.mark.asyncio
 
@@ -202,8 +199,8 @@ async def test_run_reflection_is_idempotent_on_same_session(
     state_after_first = pm.load_rule_confidence()
     assert state_after_first["LOW+LOW"]["confidence"] == 0.84
 
-    # Verify idempotency marker is set
-    assert redis_client.exists(f"{TUNING_APPLIED_KEY_PREFIX}{session_id}") > 0
+    # Verify idempotency marker is set (routed through PersistenceManager now)
+    assert pm.is_tuning_applied(session_id) is True
 
     # Second pass on the same session_id + same feedback
     await _run_reflection_with_feedback(
@@ -238,8 +235,8 @@ async def test_run_reflection_no_correlated_advice_no_writes(
     # No confidence state written
     assert pm.load_rule_confidence() is None
 
-    # No idempotency marker
-    assert redis_client.exists(f"{TUNING_APPLIED_KEY_PREFIX}{session_id}") == 0
+    # No idempotency marker (routed through PersistenceManager now)
+    assert pm.is_tuning_applied(session_id) is False
 
     # Matrix unchanged
     matrix = pm.load_escalation_matrix()

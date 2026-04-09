@@ -311,3 +311,10 @@ async def test_manual_matrix_edit_preserved_through_disable_and_recovery(
     # After recovery, rule should be HIGH again (the manual edit), not MEDIUM (default)
     final_matrix = pm.load_escalation_matrix()
     assert final_matrix["rules"]["LOW+LOW"] == "HIGH"
+
+    # COV-12: verify restore_target is still HIGH after recovery — not
+    # reset to the default "MEDIUM" and not stuck at the pre-disable
+    # snapshot. A subsequent disable-recover cycle should also return
+    # to HIGH, which requires restore_target to still be HIGH here.
+    state_after_recovery = pm.load_rule_confidence()
+    assert state_after_recovery["LOW+LOW"]["restore_target"] == "HIGH"

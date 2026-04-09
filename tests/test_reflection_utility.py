@@ -23,7 +23,13 @@ def _make_feedback(
 ) -> dict:
     events = []
     for i, rating in enumerate(ratings):
-        ev = {"explicit_rating": rating}
+        # COV-06: explicitly set correlation_found=False on every event.
+        # The analyze_utility filter treats missing-key as falsy, but
+        # being explicit protects this fixture against a future tightening
+        # of the filter (e.g., to `e.get("correlation_found") is False`,
+        # which would classify missing-key events as "unknown" and possibly
+        # change their contribution).
+        ev = {"explicit_rating": rating, "correlation_found": False}
         if behavioral_scores and i < len(behavioral_scores):
             ev["behavioral_score"] = behavioral_scores[i]
         events.append(ev)

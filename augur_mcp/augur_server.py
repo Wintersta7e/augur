@@ -662,6 +662,87 @@ def dump_correlation_window() -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+@mcp.tool()
+def get_escalation_matrix() -> dict[str, Any]:
+    """Read the current cross-domain escalation matrix from Redis.
+
+    The correlator reloads this matrix on every event, so any changes
+    made via set_escalation_matrix take effect on the next anomaly
+    without restarting the correlator.
+
+    Returns:
+        The matrix dict (with 'version' and 'rules' keys) or
+        {'error': 'not set'} if the correlator has not yet seeded it.
+    """
+    try:
+        pm = _get_persistence()
+        matrix = pm.load_escalation_matrix()
+        if matrix is None:
+            return {"error": "not set"}
+        return {"matrix": matrix}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+_VALID_SEVERITIES = {"LOW", "MEDIUM", "HIGH"}
+
+
+def _validate_escalation_rules(rules: dict[str, str]) -> str | None:
+    """Return an error message if rules fail shape validation, else None."""
+    if not isinstance(rules, dict):
+        return "rules must be a dict"
+    for key, value in rules.items():
+        if not isinstance(key, str) or "+" not in key:
+            return f"invalid rule key (expected 'A+B'): {key!r}"
+        parts = key.split("+")
+        if not all(p in _VALID_SEVERITIES for p in parts):
+            return (
+                f"invalid severity in rule key {key!r}: "
+                f"each part must be one of {sorted(_VALID_SEVERITIES)}"
+            )
+        if not isinstance(value, str) or value not in _VALID_SEVERITIES:
+            return (
+                f"invalid rule value for {key!r}: "
+                f"must be one of {sorted(_VALID_SEVERITIES)}, got {value!r}"
+            )
+    return None
+
+
+@mcp.tool()
+def set_escalation_matrix(
+    rules: dict[str, str],
+    version: str = "1.0",
+) -> dict[str, Any]:
+    """Write a new escalation matrix to Redis for runtime tuning.
+
+    The correlator will pick up the new matrix on its next event — no
+    restart required. Rules are shape-validated: each key must be of
+    the form 'A+B' (or 'A+B+C' for future N-way matrices) where each
+    severity is one of LOW, MEDIUM, HIGH; each value must also be
+    LOW, MEDIUM, or HIGH.
+
+    Args:
+        rules: Dict mapping severity-pair keys to escalated severities.
+            Example: {"LOW+LOW": "MEDIUM", "LOW+HIGH": "HIGH"}
+        version: Version tag for the matrix. Defaults to "1.0".
+
+    Returns:
+        Dict with 'status' and the stored 'matrix', or
+        {'error': <reason>} if validation failed.
+    """
+    err = _validate_escalation_rules(rules)
+    if err is not None:
+        return {"error": err}
+
+    matrix = {"version": version, "rules": rules}
+    try:
+        pm = _get_persistence()
+        pm.save_escalation_matrix(matrix)
+        return {"status": "saved", "matrix": matrix}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 # ===========================================================================
 # Control tools
 # ===========================================================================

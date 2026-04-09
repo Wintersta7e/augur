@@ -14,6 +14,7 @@ from reasoning.correlator import (
     PRUNE_WINDOW_S,
     SEVERITY_ORDER,
     add_to_window,
+    correlate,
     lookup_escalation,
     normalize_rule_key,
     parse_timestamp,
@@ -253,3 +254,158 @@ class TestQueryWindow:
         results = query_window(mock_redis, primary)
         assert len(results) == 1
         assert results[0]["domain"] == "typing"
+
+
+class TestCorrelate:
+    """End-to-end pure logic test of correlate().
+
+    correlate(primary_anomaly, r, matrix) returns one of:
+      - dict with correlation_found=True  (cross-domain hit)
+      - dict with correlation_found=False (standalone medium/high)
+      - None                              (standalone low — drop)
+    """
+
+    def _setup_window(self, mock_redis: MagicMock, stored_events: list[dict]) -> None:
+        mock_redis.zrangebyscore.return_value = [
+            json.dumps(e).encode() for e in stored_events
+        ]
+
+    def test_two_lows_different_domains_escalate_to_medium(self) -> None:
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        typing_low = _make_anomaly("typing", "user", "low", "2026-03-17T14:29:48+00:00")
+
+        mock_redis = MagicMock()
+        self._setup_window(mock_redis, [typing_low, primary])
+
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+
+        assert result is not None
+        assert result["correlation_found"] is True
+        assert result["combined_severity"] == "MEDIUM"
+        assert result["severity_escalated"] is True
+        assert result["escalation_rule"] == "LOW+LOW→MEDIUM"
+        assert result["escalation_matrix_version"] == "1.0"
+        assert result["primary_anomaly"]["domain"] == "chess"
+        assert len(result["correlated_events"]) == 1
+        assert result["correlated_events"][0]["domain"] == "typing"
+        assert abs(result["temporal_lag_seconds"] - 12.0) < 0.1
+
+    def test_standalone_medium_passes_through(self) -> None:
+        primary = _make_anomaly("chess", "white", "medium", "2026-03-17T14:30:00+00:00")
+        mock_redis = MagicMock()
+        self._setup_window(mock_redis, [primary])  # only itself
+
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+
+        assert result is not None
+        assert result["correlation_found"] is False
+        assert result["combined_severity"] == "MEDIUM"  # uppercased
+        assert result["severity_escalated"] is False
+        assert result["escalation_rule"] is None
+        assert result["escalation_matrix_version"] is None
+        assert result["temporal_lag_seconds"] is None
+        assert result["correlated_events"] == []
+
+    def test_standalone_high_passes_through_uppercased(self) -> None:
+        primary = _make_anomaly("chess", "white", "high", "2026-03-17T14:30:00+00:00")
+        mock_redis = MagicMock()
+        self._setup_window(mock_redis, [primary])
+
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+
+        assert result is not None
+        assert result["correlation_found"] is False
+        assert result["combined_severity"] == "HIGH"
+
+    def test_standalone_low_is_dropped(self) -> None:
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        mock_redis = MagicMock()
+        self._setup_window(mock_redis, [primary])  # only itself in window
+
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+
+        assert result is None
+
+    def test_multi_domain_window_picks_most_recent_per_domain(self) -> None:
+        # Window contains two typing events; correlator must pick the most recent
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        typing_older = _make_anomaly(
+            "typing", "user", "low", "2026-03-17T14:29:35+00:00"
+        )
+        typing_newer = _make_anomaly(
+            "typing", "user", "low", "2026-03-17T14:29:55+00:00"
+        )
+        mock_redis = MagicMock()
+        self._setup_window(mock_redis, [typing_older, typing_newer, primary])
+
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+
+        assert result is not None
+        assert len(result["correlated_events"]) == 1
+        assert (
+            result["correlated_events"][0]["timestamp"] == "2026-03-17T14:29:55+00:00"
+        )
+
+    def test_multi_domain_window_with_different_domains_keeps_one_per_domain(
+        self,
+    ) -> None:
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        typing_ev = _make_anomaly("typing", "user", "low", "2026-03-17T14:29:50+00:00")
+        focus_ev = _make_anomaly("focus", "app", "low", "2026-03-17T14:29:40+00:00")
+        mock_redis = MagicMock()
+        self._setup_window(mock_redis, [typing_ev, focus_ev, primary])
+
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+
+        assert result is not None
+        assert len(result["correlated_events"]) == 2
+        domains = {e["domain"] for e in result["correlated_events"]}
+        assert domains == {"typing", "focus"}
+
+    def test_pairwise_escalation_uses_highest_severity_correlated_event(self) -> None:
+        # LOW primary + MEDIUM correlated should escalate via LOW+MEDIUM rule
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        typing_med = _make_anomaly(
+            "typing", "user", "medium", "2026-03-17T14:29:50+00:00"
+        )
+        mock_redis = MagicMock()
+        self._setup_window(mock_redis, [typing_med, primary])
+
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+
+        assert result is not None
+        assert result["combined_severity"] == "MEDIUM"
+        assert result["escalation_rule"] == "LOW+MEDIUM→MEDIUM"
+
+    def test_window_boundary_30s_inclusive(self) -> None:
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        # Exactly 30 seconds old — must be included
+        on_boundary = _make_anomaly(
+            "typing", "user", "low", "2026-03-17T14:29:30+00:00"
+        )
+        mock_redis = MagicMock()
+        # Simulate: zrangebyscore with max=now and min=now-30 includes it
+        self._setup_window(mock_redis, [on_boundary, primary])
+
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+
+        assert result is not None
+        assert result["correlation_found"] is True
+
+    def test_primary_add_called_before_query(self) -> None:
+        # add_to_window must run before the window query — otherwise primary is missing
+        primary = _make_anomaly("chess", "white", "medium", "2026-03-17T14:30:00+00:00")
+        call_log: list[str] = []
+        mock_redis = MagicMock()
+        mock_redis.zadd.side_effect = lambda *a, **kw: call_log.append("zadd")
+        mock_redis.zremrangebyscore.side_effect = lambda *a, **kw: call_log.append(
+            "prune"
+        )
+        mock_redis.zrangebyscore.side_effect = lambda *a, **kw: (
+            call_log.append("query") or []
+        )
+
+        correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+
+        assert call_log.index("zadd") < call_log.index("query")
+        assert call_log.index("prune") < call_log.index("query")

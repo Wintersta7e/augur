@@ -15,7 +15,7 @@ import asyncio  # noqa: F401 — used in run loop (Task 8)
 import json
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import nats  # noqa: F401 — used in NATS subscriber (Task 7)
@@ -168,3 +168,103 @@ def query_window(r: redis.Redis, primary: dict) -> list[dict]:
         if event.get("domain") != primary_domain:
             results.append(event)
     return results
+
+
+def _pick_most_recent_per_domain(events: list[dict]) -> list[dict]:
+    """Group by domain, keep only the most recent event per domain."""
+    by_domain: dict[str, dict] = {}
+    for ev in events:
+        d = ev["domain"]
+        if d not in by_domain or parse_timestamp(ev["timestamp"]) > parse_timestamp(
+            by_domain[d]["timestamp"]
+        ):
+            by_domain[d] = ev
+    return list(by_domain.values())
+
+
+def _highest_severity(events: list[dict]) -> dict:
+    """Return the event with the highest severity by rank."""
+    return max(
+        events,
+        key=lambda e: SEVERITY_ORDER.get(e["severity"].upper(), -1),
+    )
+
+
+def _build_correlation_payload(
+    primary: dict,
+    correlated: list[dict],
+    matrix: dict,
+) -> dict:
+    """Assemble the correlated-event payload published on augur.correlation.detected."""
+    # Pairwise escalation uses the HIGHEST-severity correlated event
+    driver = _highest_severity(correlated)
+    combined_severity, rule_label = lookup_escalation(
+        primary["severity"], driver["severity"], matrix
+    )
+
+    # Temporal lag = primary - closest correlated event
+    primary_ts = parse_timestamp(primary["timestamp"])
+    closest = min(
+        correlated,
+        key=lambda e: abs(primary_ts - parse_timestamp(e["timestamp"])),
+    )
+    lag = primary_ts - parse_timestamp(closest["timestamp"])
+
+    return {
+        "primary_anomaly": primary,
+        "correlated_events": correlated,
+        "correlation_found": True,
+        "temporal_lag_seconds": round(lag, 3),
+        "combined_severity": combined_severity,
+        "severity_escalated": combined_severity != primary["severity"].upper(),
+        "escalation_rule": rule_label,
+        "escalation_matrix_version": matrix.get("version") if rule_label else None,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _build_passthrough_payload(primary: dict) -> dict:
+    """Assemble the pass-through payload for standalone medium/high events."""
+    return {
+        "primary_anomaly": primary,
+        "correlated_events": [],
+        "correlation_found": False,
+        "temporal_lag_seconds": None,
+        "combined_severity": primary["severity"].upper(),
+        "severity_escalated": False,
+        "escalation_rule": None,
+        "escalation_matrix_version": None,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def correlate(
+    primary: dict,
+    r: redis.Redis,
+    matrix: dict,
+) -> dict | None:
+    """Run the full correlation pipeline for one anomaly.
+
+    Returns:
+      - correlated payload dict  (correlation found across domains)
+      - passthrough payload dict (standalone medium/high — forward as-is)
+      - None                     (standalone low — drop, advisor ignores)
+    """
+    # 1. Add primary to window, prune old entries
+    add_to_window(r, primary)
+
+    # 2. Query for other-domain events in the last 30s
+    other_domain_events = query_window(r, primary)
+
+    # 3. Collapse to one event per domain (most recent)
+    grouped = _pick_most_recent_per_domain(other_domain_events)
+
+    if grouped:
+        return _build_correlation_payload(primary, grouped, matrix)
+
+    # No correlation — gate by severity
+    severity = primary.get("severity", "low").upper()
+    if severity in SEVERITY_GATE_PASSTHROUGH:
+        return _build_passthrough_payload(primary)
+
+    return None  # drop low

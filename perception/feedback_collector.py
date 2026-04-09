@@ -68,6 +68,10 @@ class PendingAdvice:
         severity: str,
         baseline_mean: float,
         timestamp: str,
+        correlation_found: bool = False,
+        correlated_domains: list[str] | None = None,
+        rule_key: str | None = None,
+        escalation_rule: str | None = None,
     ) -> None:
         self.advice_id = advice_id
         self.domain = domain
@@ -79,6 +83,11 @@ class PendingAdvice:
         self.think_times_after: list[float] = []
         self.behavioral_score: float = 0.0
         self.finalized = False
+        # Correlation metadata (added for matrix tuning)
+        self.correlation_found = correlation_found
+        self.correlated_domains = correlated_domains or []
+        self.rule_key = rule_key
+        self.escalation_rule = escalation_rule
 
     def add_post_move(self, value: float) -> None:
         if len(self.think_times_after) < POST_ADVICE_TRACK_MOVES:
@@ -128,6 +137,11 @@ class PendingAdvice:
             "think_times_after": self.think_times_after,
             "baseline_mean_at_time": self.baseline_mean,
             "timestamp": self.timestamp,
+            # Correlation metadata (added for matrix tuning)
+            "correlation_found": self.correlation_found,
+            "correlated_domains": self.correlated_domains,
+            "rule_key": self.rule_key,
+            "escalation_rule": self.escalation_rule,
         }
 
 
@@ -231,6 +245,12 @@ async def run() -> None:
         move = data.get("move", "?")
         think_time = data.get("think_time", 0)
 
+        # Correlation metadata from the advisor (Phase 3B + matrix-tuning follow-up)
+        correlation_found = bool(data.get("correlation_found", False))
+        correlated_domains = data.get("correlated_domains") or []
+        rule_key = data.get("rule_key")
+        escalation_rule = data.get("escalation_rule")
+
         # Read baseline mean from Redis
         baseline_raw = pm.load_baseline(
             "chess",
@@ -248,6 +268,10 @@ async def run() -> None:
             severity=severity,
             baseline_mean=baseline_mean,
             timestamp=datetime.now(timezone.utc).isoformat(),
+            correlation_found=correlation_found,
+            correlated_domains=correlated_domains,
+            rule_key=rule_key,
+            escalation_rule=escalation_rule,
         )
         advice_events.append(pending)
         active_tracking[entity] = pending

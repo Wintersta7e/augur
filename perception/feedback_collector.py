@@ -150,12 +150,37 @@ class PendingAdvice:
 # ---------------------------------------------------------------------------
 
 
+import concurrent.futures
+
+# LEAK-08: use a dedicated single-worker executor for stdin reads so a
+# timed-out read that leaves a thread blocked on sys.stdin.readline does
+# not consume a slot in the default asyncio executor pool (which is shared
+# with every other loop.run_in_executor call). The dedicated executor
+# caps the collateral damage to one leaked thread per pending read.
+# The executor is intentionally module-global so it is reused across
+# multiple read_stdin_with_timeout calls and cleaned up at process exit.
+_stdin_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="augur-stdin"
+)
+
+
 async def read_stdin_with_timeout(timeout: float) -> str | None:
-    """Non-blocking stdin read with timeout. Returns None on timeout."""
+    """Non-blocking stdin read with timeout. Returns None on timeout.
+
+    NOTE: On Linux there is no portable way to cancel a blocking
+    ``sys.stdin.readline`` call once it has started. If this function
+    times out, the underlying thread remains blocked on readline until
+    the user eventually types something. We contain the damage by using
+    a dedicated single-worker executor (LEAK-08) so a stalled read does
+    not consume slots from the shared default pool; the next call will
+    queue behind the blocked thread if one is already outstanding, but
+    in practice users respond to at most one prompt at a time so queuing
+    is never observed during normal operation.
+    """
     loop = asyncio.get_event_loop()
     try:
         result = await asyncio.wait_for(
-            loop.run_in_executor(None, sys.stdin.readline),
+            loop.run_in_executor(_stdin_executor, sys.stdin.readline),
             timeout=timeout,
         )
         return result.strip().lower() if result else None
@@ -274,6 +299,20 @@ async def run() -> None:
             escalation_rule=escalation_rule,
         )
         advice_events.append(pending)
+
+        # BUG-04: if there is already a pending advice tracked for this
+        # entity, finalize its behavioural score before replacing it.
+        # Without this, the displaced advice would stay at behavioural=0.0
+        # and finalized=False for the lifetime of the session, silently
+        # corrupting the feedback record used by the reflection engine.
+        displaced = active_tracking.get(entity)
+        if displaced is not None and not displaced.finalized:
+            displaced._compute_behavioral_score()
+            log.debug(
+                "Finalized displaced pending advice %s before overwriting %s",
+                displaced.advice_id,
+                entity,
+            )
         active_tracking[entity] = pending
 
         log.info(

@@ -591,6 +591,77 @@ def get_config() -> dict[str, Any]:
     return _config.as_dict()
 
 
+@mcp.tool()
+def get_correlation_graph(session_id: str) -> dict[str, Any]:
+    """Read a persisted cross-domain correlation graph from Redis.
+
+    Args:
+        session_id: Session whose graph was flushed on augur.session.end.
+
+    Returns:
+        Dict in networkx node_link_data format with 'directed', 'nodes',
+        'edges' keys (NetworkX 3.4+ uses 'edges'; 3.3 and older used
+        'links'), or {'error': 'not found'} if the session has no
+        persisted graph.
+    """
+    try:
+        pm = _get_persistence()
+        graph = pm.load_correlation_graph(session_id)
+        if graph is None:
+            return {"error": "not found", "session_id": session_id}
+        return {"session_id": session_id, "graph": graph}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def list_correlation_graphs(limit: int = 50) -> dict[str, Any]:
+    """List recent session ids that have persisted correlation graphs.
+
+    Args:
+        limit: Maximum number of session ids to return (most recent first).
+
+    Returns:
+        Dict with 'session_ids' list and 'count'.
+    """
+    try:
+        pm = _get_persistence()
+        ids = pm.list_correlation_graphs(limit=limit)
+        return {"session_ids": ids, "count": len(ids)}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def dump_correlation_window() -> dict[str, Any]:
+    """Return the current contents of the correlator's sliding window.
+
+    Reads the augur:correlation:window sorted set directly and returns
+    one entry per member: {anomaly: dict, score: unix_timestamp}.
+    Useful for verifying what the correlator currently sees as "recent"
+    when debugging correlation misses.
+
+    Returns:
+        Dict with 'window' list (newest-first by score) and 'count'.
+    """
+    try:
+        r = _get_redis()
+        raw_members = r.zrevrangebyscore(
+            "augur:correlation:window", "+inf", "-inf", withscores=True
+        )
+        window: list[dict[str, Any]] = []
+        for member, score in raw_members:
+            member_str = member.decode() if isinstance(member, bytes) else member
+            try:
+                anomaly = json.loads(member_str)
+            except json.JSONDecodeError:
+                continue
+            window.append({"anomaly": anomaly, "score": float(score)})
+        return {"window": window, "count": len(window)}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 # ===========================================================================
 # Control tools
 # ===========================================================================

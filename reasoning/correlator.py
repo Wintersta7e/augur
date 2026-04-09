@@ -51,6 +51,13 @@ REDIS_KEY_MATRIX = "augur:config:escalation_matrix"
 CORRELATION_WINDOW_S = 30  # query window (seconds back from primary)
 PRUNE_WINDOW_S = 2 * CORRELATION_WINDOW_S  # derived: 60s buffer for clock skew
 
+# Safety valve for an in-memory session graph that never receives a
+# session.end message (e.g., publisher crash, network partition). Once a
+# session accumulates this many nodes, the correlator flushes the graph
+# under a synthetic "orphaned-<unix_ts>" session id and resets in-memory
+# state. Prevents the DiGraph from growing unbounded (LEAK-09).
+MAX_SESSION_GRAPH_NODES = 10_000
+
 SEVERITY_ORDER: dict[str, int] = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
 
 DEFAULT_ESCALATION_MATRIX: dict = {
@@ -431,8 +438,12 @@ async def run() -> None:
     log.info("NATS connected (%s)", config.nats_url)
 
     session_graph = new_session_graph()
+    # BUG-05: dedup marker so a duplicate session.end for the same id
+    # cannot flush a freshly-emptied graph over the real persisted one.
+    last_flushed_session_id: str | None = None
 
     async def on_anomaly(msg: nats.aio.client.Msg) -> None:
+        nonlocal session_graph
         try:
             anomaly = json.loads(msg.data.decode())
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -466,7 +477,10 @@ async def run() -> None:
                 combined_severity=payload["combined_severity"],
                 rule_label=payload["escalation_rule"],
             )
-            log.warning(
+            # ARCH-12: correlation events are normal operation, not warnings.
+            # Use INFO with a ★ prefix for visibility without conflating
+            # the log level with genuine warnings/errors.
+            log.info(
                 "  \u2605 CORRELATION [%s] %s + %s  (rule=%s, lag=%.1fs)",
                 payload["combined_severity"],
                 payload["primary_anomaly"]["domain"],
@@ -474,6 +488,23 @@ async def run() -> None:
                 payload["escalation_rule"],
                 payload["temporal_lag_seconds"],
             )
+
+            # LEAK-09: safety valve. If session.end never arrives, the
+            # in-memory graph grows unbounded. Once nodes exceed the cap,
+            # flush under a synthetic session id and reset.
+            if len(session_graph.nodes) >= MAX_SESSION_GRAPH_NODES:
+                synthetic_id = f"orphaned-{int(datetime.now(timezone.utc).timestamp())}"
+                log.warning(
+                    "Session graph exceeded %d nodes without session.end; "
+                    "auto-flushing under %s to prevent unbounded growth",
+                    MAX_SESSION_GRAPH_NODES,
+                    synthetic_id,
+                )
+                try:
+                    flush_graph_to_redis(session_graph, pm, synthetic_id)
+                except Exception as exc:
+                    log.error("Safety-valve flush failed: %s", exc, exc_info=True)
+                session_graph = new_session_graph()
         else:
             log.info(
                 "  Pass-through [%s] %s/%s",
@@ -492,28 +523,58 @@ async def run() -> None:
         dump_graph(session_graph)
 
     async def on_session_end(msg: nats.aio.client.Msg) -> None:
-        nonlocal session_graph
+        nonlocal session_graph, last_flushed_session_id
         try:
             payload = json.loads(msg.data.decode())
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             log.warning("Bad session.end payload: %s", exc)
+            # BUG-02: reset the graph even on parse failure so a malformed
+            # session.end cannot contaminate future sessions with carried-
+            # over correlations from the current session.
+            session_graph = new_session_graph()
             return
+
         session_id = payload.get("session_id")
         if not session_id:
             log.warning("session.end payload missing session_id: %s", payload)
+            # BUG-02: same reset for missing session_id.
+            session_graph = new_session_graph()
             return
+
+        # BUG-05: skip re-flush when the same session.end arrives twice
+        # (duplicate publish, retry, replay). Without this guard, the second
+        # flush would overwrite the real persisted graph with an empty one.
+        if session_id == last_flushed_session_id:
+            log.warning(
+                "Duplicate session.end for %s — skipping re-flush",
+                session_id,
+            )
+            return
+
         try:
             flush_graph_to_redis(session_graph, pm, session_id)
+            last_flushed_session_id = session_id
+            log.info("Session graph flushed (session_id=%s)", session_id)
         except Exception as exc:
-            log.error("Failed to flush correlation graph: %s", exc, exc_info=True)
-            return
-        # Reset to a fresh empty DiGraph for the next session
-        session_graph = new_session_graph()
-        log.info("Session graph reset after flush (session_id=%s)", session_id)
+            log.error(
+                "Failed to flush correlation graph for %s: %s",
+                session_id,
+                exc,
+                exc_info=True,
+            )
+            # Don't set last_flushed_session_id on failure — the caller may
+            # retry the session.end and should be allowed to re-attempt.
+        finally:
+            # BUG-01: always reset the graph, even on flush failure. Leaving
+            # the failed session's state in memory would contaminate every
+            # subsequent session with stale correlations until process restart.
+            session_graph = new_session_graph()
 
-    await nc.subscribe(SUBSCRIBE_ANOMALY, cb=on_anomaly)
-    await nc.subscribe(SUBSCRIBE_DEBUG_DUMP, cb=on_debug_dump)
-    await nc.subscribe(SUBSCRIBE_SESSION_END, cb=on_session_end)
+    # LEAK-05: save subscription handles so unsubscribe() is called on
+    # shutdown rather than relying on nc.close() to tear them down abruptly.
+    sub_anomaly = await nc.subscribe(SUBSCRIBE_ANOMALY, cb=on_anomaly)
+    sub_debug = await nc.subscribe(SUBSCRIBE_DEBUG_DUMP, cb=on_debug_dump)
+    sub_session = await nc.subscribe(SUBSCRIBE_SESSION_END, cb=on_session_end)
 
     log.info("Subscribed to %s", SUBSCRIBE_ANOMALY)
     log.info("Subscribed to %s (debug graph dump)", SUBSCRIBE_DEBUG_DUMP)
@@ -531,6 +592,12 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        try:
+            await sub_anomaly.unsubscribe()
+            await sub_debug.unsubscribe()
+            await sub_session.unsubscribe()
+        except Exception as exc:
+            log.debug("Unsubscribe failed during shutdown: %s", exc)
         await nc.close()
         log.info("Shut down cleanly")
 

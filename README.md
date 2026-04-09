@@ -155,9 +155,19 @@ pytest, pytest-asyncio
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+The Augur codebase is licensed under **MIT** — see [`LICENSE`](LICENSE).
 
-**Note on `python-chess`:** this transitive dependency is GPL-3.0. Augur itself is MIT-licensed; the chess board perception module imports `python-chess` for move validation. If you derive a distributable binary from Augur, the GPL terms of `python-chess` may apply to the combined work. For personal use and research, this is not a practical concern. If you need to avoid GPL entirely, use only the non-chess perception domains (typing, or your own).
+**Important note on the chess perception module and `python-chess`:**
+
+- `perception/chess_board.py` imports `python-chess`, which is licensed under **GPL-3.0**.
+- The rest of the Augur codebase (detection, correlator, advisor, reflection engine, MCP server, persistence, blackboard, typing monitor, console display, tests, infrastructure) does **not** depend on `python-chess` and is cleanly MIT.
+- If you redistribute a combined work that includes `chess_board.py` together with `python-chess`, the GPL-3.0 terms of `python-chess` may apply to that combined work under a conservative reading of the GPL. This is a longstanding grey area for Python's dynamic imports and has not historically been enforced against hobby projects, but it is worth knowing.
+- **If you need a strictly MIT codebase**, simply exclude `perception/chess_board.py` from your build — the typing monitor and your own perception sources are unaffected and the rest of the system works without it.
+- For personal use, research, and non-redistributed deployments, none of this is a practical concern.
+
+## Acknowledgments
+
+Augur was built as a personal research project with substantial AI-assisted development using [Claude Code](https://claude.com/claude-code) (Anthropic). Architecture decisions, design direction, code review, and refactoring were driven by the author; implementation was iteratively produced and reviewed through extended Claude Code sessions. The MIT license reflects permissions granted by the author over their directed contributions.
 
 ## Security notes
 

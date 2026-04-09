@@ -487,3 +487,29 @@ class TestSessionGraph:
         assert isinstance(g, nx.DiGraph)
         assert len(g.nodes) == 0
         assert len(g.edges) == 0
+
+
+from reasoning.correlator import ensure_matrix_seeded
+
+
+class TestEnsureMatrixSeeded:
+    def test_seeds_default_when_missing(self) -> None:
+        mock_pm = MagicMock()
+        mock_pm.load_escalation_matrix.return_value = None
+
+        result = ensure_matrix_seeded(mock_pm)
+
+        mock_pm.save_escalation_matrix.assert_called_once_with(
+            DEFAULT_ESCALATION_MATRIX
+        )
+        assert result == DEFAULT_ESCALATION_MATRIX
+
+    def test_leaves_existing_matrix_alone(self) -> None:
+        existing = {"version": "1.5", "rules": {"LOW+LOW": "HIGH"}}
+        mock_pm = MagicMock()
+        mock_pm.load_escalation_matrix.return_value = existing
+
+        result = ensure_matrix_seeded(mock_pm)
+
+        mock_pm.save_escalation_matrix.assert_not_called()
+        assert result == existing

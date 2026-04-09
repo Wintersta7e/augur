@@ -11,20 +11,21 @@ neither signal would trigger individually.
 
 from __future__ import annotations
 
-import asyncio  # noqa: F401 — used in run loop (Task 8)
+import asyncio
 import json
 import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import nats  # noqa: F401 — used in NATS subscriber (Task 7)
+import nats
+import nats.aio.client
 import networkx as nx
 import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from blackboard.config import AugurConfig  # noqa: F401 — used in run loop (Task 8)
-from blackboard.persistence import PersistenceManager  # noqa: F401 — used in matrix load (Task 5)
+from blackboard.config import AugurConfig
+from blackboard.persistence import PersistenceManager
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -349,3 +350,145 @@ def dump_graph(graph: nx.DiGraph) -> None:
             data.get("combined_severity"),
         )
     log.info("=== End graph dump ===")
+
+
+# ---------------------------------------------------------------------------
+# Redis helper
+# ---------------------------------------------------------------------------
+
+
+def connect_redis(config: AugurConfig) -> redis.Redis:
+    client = redis.Redis(
+        host=config.redis_host,
+        port=config.redis_port,
+        socket_connect_timeout=config.redis_connect_timeout,
+    )
+    client.ping()
+    log.info("Redis connected")
+    return client
+
+
+def ensure_matrix_seeded(pm: PersistenceManager) -> dict:
+    """Write the default escalation matrix if absent; return the active matrix."""
+    existing = pm.load_escalation_matrix()
+    if existing is None:
+        pm.save_escalation_matrix(DEFAULT_ESCALATION_MATRIX)
+        log.info("Seeded default escalation matrix (version=1.0)")
+        return DEFAULT_ESCALATION_MATRIX
+    log.info(
+        "Loaded existing escalation matrix (version=%s)",
+        existing.get("version", "unknown"),
+    )
+    return existing
+
+
+# ---------------------------------------------------------------------------
+# Core loop
+# ---------------------------------------------------------------------------
+
+
+async def run() -> None:
+    config = AugurConfig.from_env()
+
+    redis_client = connect_redis(config)
+    pm = PersistenceManager(redis_client)
+
+    ensure_matrix_seeded(pm)  # write default if absent
+
+    nc = await nats.connect(
+        config.nats_url, connect_timeout=config.nats_connect_timeout
+    )
+    log.info("NATS connected (%s)", config.nats_url)
+
+    session_graph = new_session_graph()
+
+    async def on_anomaly(msg: nats.aio.client.Msg) -> None:
+        try:
+            anomaly = json.loads(msg.data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            log.warning("Bad anomaly payload: %s", exc)
+            return
+
+        # Load matrix fresh on every event so reflection-engine tuning takes
+        # effect without restarting the correlator.
+        matrix = pm.load_escalation_matrix() or DEFAULT_ESCALATION_MATRIX
+
+        try:
+            payload = correlate(anomaly, redis_client, matrix)
+        except Exception as exc:
+            log.error("correlate() failed: %s", exc, exc_info=True)
+            return
+
+        if payload is None:
+            log.debug(
+                "Dropped standalone low %s/%s",
+                anomaly.get("domain"),
+                anomaly.get("entity"),
+            )
+            return
+
+        # Accumulate into session graph (only when correlation actually found)
+        if payload["correlation_found"]:
+            add_correlation_to_graph(
+                session_graph,
+                primary=payload["primary_anomaly"],
+                correlated=payload["correlated_events"],
+                combined_severity=payload["combined_severity"],
+                rule_label=payload["escalation_rule"],
+            )
+            log.warning(
+                "  \u2605 CORRELATION [%s] %s + %s  (rule=%s, lag=%.1fs)",
+                payload["combined_severity"],
+                payload["primary_anomaly"]["domain"],
+                ", ".join(e["domain"] for e in payload["correlated_events"]),
+                payload["escalation_rule"],
+                payload["temporal_lag_seconds"],
+            )
+        else:
+            log.info(
+                "  Pass-through [%s] %s/%s",
+                payload["combined_severity"],
+                payload["primary_anomaly"]["domain"],
+                payload["primary_anomaly"]["entity"],
+            )
+
+        try:
+            await nc.publish(PUBLISH_CORRELATION, json.dumps(payload).encode())
+            log.info("Published correlation to %s", PUBLISH_CORRELATION)
+        except Exception as exc:
+            log.error("NATS publish failed: %s", exc)
+
+    async def on_debug_dump(_msg: nats.aio.client.Msg) -> None:
+        dump_graph(session_graph)
+
+    await nc.subscribe(SUBSCRIBE_ANOMALY, cb=on_anomaly)
+    await nc.subscribe(SUBSCRIBE_DEBUG_DUMP, cb=on_debug_dump)
+
+    log.info("Subscribed to %s", SUBSCRIBE_ANOMALY)
+    log.info("Subscribed to %s (debug graph dump)", SUBSCRIBE_DEBUG_DUMP)
+    log.info(
+        "Window: %ds query / %ds prune buffer",
+        CORRELATION_WINDOW_S,
+        PRUNE_WINDOW_S,
+    )
+    log.info("Waiting for anomalies...")
+
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await nc.close()
+        log.info("Shut down cleanly")
+
+
+def main() -> None:
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        log.info("Interrupted")
+
+
+if __name__ == "__main__":
+    main()

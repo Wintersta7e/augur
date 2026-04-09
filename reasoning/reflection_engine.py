@@ -24,6 +24,7 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any  # noqa: F401 — used in PEP-563 deferred annotations
 
 import httpx
 import nats

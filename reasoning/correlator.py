@@ -551,8 +551,17 @@ async def run() -> None:
                 exc,
                 exc_info=True,
             )
-            # Don't set last_flushed_session_id on failure — the caller may
-            # retry the session.end and should be allowed to re-attempt.
+            # last_flushed_session_id is intentionally NOT set on failure.
+            # R2-BUG-03: a retry of the same session.end will hit the
+            # finally-reset below with an empty graph, so the correlation
+            # data from this session is not recoverable from in-memory
+            # state. A retry will flush an empty graph and overwrite any
+            # partial data that made it to Redis during the failed first
+            # attempt. This is an acceptable trade-off: leaving the full
+            # graph in memory (the alternative) would contaminate all
+            # subsequent sessions with stale correlations — BUG-01. Losing
+            # one session's correlations is better than cross-session
+            # state corruption.
         finally:
             # BUG-01: always reset the graph, even on flush failure. Leaving
             # the failed session's state in memory would contaminate every

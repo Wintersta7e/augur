@@ -472,7 +472,10 @@ async def inject_sequence(
             if i < len(events) - 1:
                 await asyncio.sleep(delay_s)
     finally:
-        await nc.close()
+        try:
+            await nc.close()
+        except Exception as exc:
+            log.debug("NATS close failed after inject_sequence: %s", exc)
 
     return {
         "session_id": shared_sid,
@@ -540,10 +543,10 @@ def get_session(session_id: str | None = None) -> dict[str, Any]:
     try:
         with _persistence_ctx() as pm:
             if session_id is None:
-                raw = pm._r.get("augur:session:current")
-                if raw is None:
+                current = pm.load_current_session()
+                if current is None:
                     return {"error": "no current session"}
-                return json.loads(raw)
+                return current
             report = pm.load_reflection(session_id)
         if report is None:
             return {"error": "not found", "session_id": session_id}
@@ -562,10 +565,9 @@ def get_reflection(session_id: str | None = None) -> dict[str, Any]:
         with _persistence_ctx() as pm:
             sid = session_id
             if sid is None:
-                raw_session = pm._r.get("augur:session:current")
-                if raw_session is not None:
-                    session_data = json.loads(raw_session)
-                    sid = session_data.get("session_id")
+                current = pm.load_current_session()
+                if current is not None:
+                    sid = current.get("session_id")
             if sid is None:
                 return {"error": "no session_id available"}
             report = pm.load_reflection(sid)
@@ -717,6 +719,7 @@ _VALID_SEVERITIES = {"LOW", "MEDIUM", "HIGH"}
 # (there are only 6 unique combinations in the default matrix).
 MAX_ESCALATION_RULES = 20
 MAX_ESCALATION_RULE_KEY_LEN = 32
+MAX_ESCALATION_VERSION_LEN = 32
 
 
 def _validate_escalation_rules(rules: dict[str, str]) -> str | None:
@@ -753,6 +756,20 @@ def set_escalation_matrix(
     version: str = "1.0",
 ) -> dict[str, Any]:
     """Write a new escalation matrix to Redis for runtime tuning."""
+    # R2-SEC-01: the version string is written to Redis as part of the
+    # matrix JSON and the correlator re-reads the matrix on every anomaly
+    # event. An unbounded version string would amplify the per-event
+    # Redis read+deserialize cost. Cap it.
+    if not isinstance(version, str):
+        return {"error": f"version must be a string, got {type(version).__name__}"}
+    if len(version) > MAX_ESCALATION_VERSION_LEN:
+        return {
+            "error": (
+                f"version string too long: {len(version)} chars "
+                f"(max {MAX_ESCALATION_VERSION_LEN})"
+            )
+        }
+
     err = _validate_escalation_rules(rules)
     if err is not None:
         return {"error": err}
@@ -785,11 +802,10 @@ async def trigger_reflection(session_id: str | None = None) -> dict[str, Any]:
     sid = session_id
     if sid is None:
         try:
-            with _redis_ctx() as r:
-                raw_session = r.get("augur:session:current")
-            if raw_session is not None:
-                session_data = json.loads(raw_session)
-                sid = session_data.get("session_id")
+            with _persistence_ctx() as pm:
+                current = pm.load_current_session()
+            if current is not None:
+                sid = current.get("session_id")
         except Exception as exc:
             return {"status": "error", "error": f"Redis read failed: {exc}"}
 

@@ -32,3 +32,7 @@ logs/
 
 # Local design specs and plans (not for remote)
 docs/superpowers/
+
+# Local Claude Code instructions (never commit)
+CLAUDE.md
+**/CLAUDE.md

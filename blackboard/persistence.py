@@ -283,6 +283,21 @@ class PersistenceManager:
             return None
         return json.loads(raw)
 
+    # -- Current session --------------------------------------------------
+
+    def load_current_session(self) -> dict | None:
+        """Return the current session dict written by SessionManager.
+
+        R2-ARCH-01: previously MCP tools reached through ``pm._r`` to read
+        ``augur:session:current`` directly. Expose it as a proper PM
+        method so the key namespace is discoverable and the private
+        client is not leaking.
+        """
+        raw = self._r.get("augur:session:current")
+        if raw is None:
+            return None
+        return json.loads(raw)
+
     # -- Correlation tuning idempotency marker ------------------------------
 
     def mark_tuning_applied(self, session_id: str) -> None:

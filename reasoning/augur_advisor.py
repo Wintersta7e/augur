@@ -17,6 +17,7 @@ import json
 import logging
 import sys
 import time
+from collections.abc import Callable  # noqa: F401 — PEP-563 deferred annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -530,8 +531,11 @@ async def run() -> None:
                 log.error("NATS publish failed: %s", exc)
 
             try:
-                redis_client.set(REDIS_KEY_ADVICE, json.dumps(advice_payload))
-                log.info("Wrote advice to Redis key %s", REDIS_KEY_ADVICE)
+                # R2-ARCH-02: routed through PersistenceManager rather than
+                # a bare redis_client.set so the write path matches the
+                # read path (pm.load_last_advice).
+                pm.save_last_advice(advice_payload)
+                log.info("Wrote advice to Redis via PersistenceManager")
             except redis.RedisError as exc:
                 log.error("Redis write failed: %s", exc)
 

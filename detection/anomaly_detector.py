@@ -351,8 +351,11 @@ async def run() -> None:
             log.error("  NATS publish failed: %s", exc)
 
         try:
-            redis_client.set(REDIS_KEY_ANOMALY, json.dumps(anomaly_payload))
-            log.info("  Wrote anomaly to Redis key %s", REDIS_KEY_ANOMALY)
+            # R2-ARCH-02: routed through PersistenceManager rather than
+            # a bare redis_client.set so the write path matches the
+            # read path (pm.load_last_anomaly).
+            pm.save_last_anomaly(anomaly_payload)
+            log.info("  Wrote anomaly to Redis via PersistenceManager")
         except redis.RedisError as exc:
             log.error("  Redis write failed: %s", exc)
 

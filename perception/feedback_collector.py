@@ -419,9 +419,14 @@ async def run() -> None:
             log.error("Failed to publish feedback complete: %s", exc)
 
     # -- Subscribe -----------------------------------------------------------
-    await nc.subscribe(SUBJECT_ADVICE, cb=on_advice)
-    await nc.subscribe(SUBJECT_PERCEPTION, cb=on_perception)
-    await nc.subscribe(SUBJECT_SESSION_END, cb=on_session_end)
+    # R2-LEAK-01: save subscription handles so unsubscribe() is called on
+    # shutdown rather than relying on nc.close() to tear them down abruptly.
+    # This matches the pattern in correlator.py, reflection_engine.py,
+    # console_display.py, and anomaly_detector.py — feedback_collector was
+    # missed in Round 1's LEAK-05/06/07 batch.
+    sub_advice = await nc.subscribe(SUBJECT_ADVICE, cb=on_advice)
+    sub_perception = await nc.subscribe(SUBJECT_PERCEPTION, cb=on_perception)
+    sub_session_end = await nc.subscribe(SUBJECT_SESSION_END, cb=on_session_end)
 
     log.info(
         "Subscribed to: %s, %s, %s",
@@ -437,6 +442,12 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        try:
+            await sub_advice.unsubscribe()
+            await sub_perception.unsubscribe()
+            await sub_session_end.unsubscribe()
+        except Exception as exc:
+            log.debug("Unsubscribe failed during shutdown: %s", exc)
         await nc.close()
         log.info("Shut down cleanly")
 

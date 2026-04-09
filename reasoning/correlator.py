@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import nats  # noqa: F401 — used in NATS subscriber (Task 7)
-import networkx as nx  # noqa: F401 — used in correlation graph (Task 6)
+import networkx as nx
 import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -268,3 +268,84 @@ def correlate(
         return _build_passthrough_payload(primary)
 
     return None  # drop low
+
+
+# ---------------------------------------------------------------------------
+# Session graph (in-memory NetworkX DiGraph — not persisted in this phase)
+# ---------------------------------------------------------------------------
+
+
+def new_session_graph() -> nx.DiGraph:
+    """Return a fresh empty DiGraph for a new session."""
+    return nx.DiGraph()
+
+
+def node_key(anomaly: dict) -> str:
+    """Unique node key: ``{domain}:{entity}:{timestamp}``."""
+    return f"{anomaly['domain']}:{anomaly['entity']}:{anomaly['timestamp']}"
+
+
+def _add_anomaly_node(graph: nx.DiGraph, anomaly: dict) -> str:
+    """Add an anomaly as a node; return the node key."""
+    key = node_key(anomaly)
+    graph.add_node(
+        key,
+        domain=anomaly["domain"],
+        entity=anomaly["entity"],
+        severity=anomaly["severity"],
+        timestamp=anomaly["timestamp"],
+    )
+    return key
+
+
+def add_correlation_to_graph(
+    graph: nx.DiGraph,
+    primary: dict,
+    correlated: list[dict],
+    combined_severity: str,
+    rule_label: str | None,
+) -> None:
+    """Add nodes for primary + correlated events and directed edges primary→correlated.
+
+    Each edge carries ``temporal_lag``, ``escalation_rule``, ``combined_severity``,
+    and a ``domains`` tuple describing the cross-domain pair. ``temporal_lag`` is
+    always positive (primary timestamp minus correlated timestamp).
+    """
+    pk = _add_anomaly_node(graph, primary)
+    primary_ts = parse_timestamp(primary["timestamp"])
+
+    for ev in correlated:
+        ck = _add_anomaly_node(graph, ev)
+        lag = primary_ts - parse_timestamp(ev["timestamp"])
+        graph.add_edge(
+            pk,
+            ck,
+            temporal_lag=round(lag, 3),
+            escalation_rule=rule_label,
+            combined_severity=combined_severity,
+            domains=(primary["domain"], ev["domain"]),
+        )
+
+
+def dump_graph(graph: nx.DiGraph) -> None:
+    """Log all nodes and edges of the session graph at INFO level."""
+    log.info("=== Session graph dump ===")
+    log.info("Nodes (%d):", len(graph.nodes))
+    for k, data in graph.nodes(data=True):
+        log.info(
+            "  %s  severity=%s  domain=%s",
+            k,
+            data.get("severity"),
+            data.get("domain"),
+        )
+    log.info("Edges (%d):", len(graph.edges))
+    for u, v, data in graph.edges(data=True):
+        log.info(
+            "  %s → %s  lag=%.1fs  rule=%s  severity=%s",
+            u,
+            v,
+            data.get("temporal_lag", 0),
+            data.get("escalation_rule"),
+            data.get("combined_severity"),
+        )
+    log.info("=== End graph dump ===")

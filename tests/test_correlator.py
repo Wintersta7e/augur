@@ -409,3 +409,81 @@ class TestCorrelate:
 
         assert call_log.index("zadd") < call_log.index("query")
         assert call_log.index("prune") < call_log.index("query")
+
+
+import networkx as nx
+import pytest
+
+from reasoning.correlator import (
+    add_correlation_to_graph,
+    new_session_graph,
+    node_key,
+)
+
+
+class TestSessionGraph:
+    def test_node_key_uses_domain_entity_timestamp(self) -> None:
+        ev = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        assert node_key(ev) == "chess:white:2026-03-17T14:30:00+00:00"
+
+    def test_add_correlation_adds_primary_and_correlated_nodes(self) -> None:
+        g = new_session_graph()
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        correlated = _make_anomaly("typing", "user", "low", "2026-03-17T14:29:48+00:00")
+
+        add_correlation_to_graph(
+            g,
+            primary=primary,
+            correlated=[correlated],
+            combined_severity="MEDIUM",
+            rule_label="LOW+LOW→MEDIUM",
+        )
+
+        assert node_key(primary) in g.nodes
+        assert node_key(correlated) in g.nodes
+        assert g.nodes[node_key(primary)]["severity"] == "low"
+        assert g.nodes[node_key(primary)]["domain"] == "chess"
+
+    def test_edge_direction_primary_to_correlated(self) -> None:
+        # Edge points from primary (newly arrived) → correlated (older)
+        g = new_session_graph()
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        correlated = _make_anomaly("typing", "user", "low", "2026-03-17T14:29:48+00:00")
+
+        add_correlation_to_graph(
+            g,
+            primary=primary,
+            correlated=[correlated],
+            combined_severity="MEDIUM",
+            rule_label="LOW+LOW→MEDIUM",
+        )
+
+        pk = node_key(primary)
+        ck = node_key(correlated)
+        assert g.has_edge(pk, ck)
+        assert not g.has_edge(ck, pk)  # directed
+
+    def test_edge_attributes_include_lag_rule_severity(self) -> None:
+        g = new_session_graph()
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        correlated = _make_anomaly("typing", "user", "low", "2026-03-17T14:29:48+00:00")
+
+        add_correlation_to_graph(
+            g,
+            primary=primary,
+            correlated=[correlated],
+            combined_severity="MEDIUM",
+            rule_label="LOW+LOW→MEDIUM",
+        )
+
+        edge = g.edges[node_key(primary), node_key(correlated)]
+        assert edge["escalation_rule"] == "LOW+LOW→MEDIUM"
+        assert edge["combined_severity"] == "MEDIUM"
+        assert edge["domains"] == ("chess", "typing")
+        assert edge["temporal_lag"] == pytest.approx(12.0, abs=0.01)
+
+    def test_new_session_graph_returns_empty_digraph(self) -> None:
+        g = new_session_graph()
+        assert isinstance(g, nx.DiGraph)
+        assert len(g.nodes) == 0
+        assert len(g.edges) == 0

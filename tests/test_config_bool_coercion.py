@@ -12,9 +12,11 @@ bool field in AugurConfig.
 
 from __future__ import annotations
 
+import os
 import pytest
+from unittest.mock import patch
 
-from blackboard.config import _coerce_bool
+from blackboard.config import AugurConfig, _coerce_bool
 
 
 class TestCoerceBoolTrueValues:
@@ -55,3 +57,61 @@ class TestCoerceBoolFalseValues:
 
     def test_whitespace_around_falsy_is_stripped(self) -> None:
         assert _coerce_bool(" false ") is False
+
+
+
+
+class TestCorrelationTuningFieldsFromEnv:
+    """Exercise the _coerce_bool fix through a real bool field."""
+
+    def test_default_values_match_spec(self) -> None:
+        cfg = AugurConfig()
+        assert cfg.correlation_tuning_enabled is True
+        assert cfg.correlation_tuning_alpha == 0.2
+        assert cfg.correlation_tuning_enable_threshold == 0.6
+        assert cfg.correlation_tuning_disable_threshold == 0.3
+
+    def test_from_env_false_disables_tuning(self) -> None:
+        with patch.dict(os.environ, {"AUGUR_CORRELATION_TUNING_ENABLED": "false"}):
+            cfg = AugurConfig.from_env()
+            assert cfg.correlation_tuning_enabled is False
+
+    def test_from_env_true_keeps_enabled(self) -> None:
+        with patch.dict(os.environ, {"AUGUR_CORRELATION_TUNING_ENABLED": "true"}):
+            cfg = AugurConfig.from_env()
+            assert cfg.correlation_tuning_enabled is True
+
+    def test_from_env_zero_disables_tuning(self) -> None:
+        with patch.dict(os.environ, {"AUGUR_CORRELATION_TUNING_ENABLED": "0"}):
+            cfg = AugurConfig.from_env()
+            assert cfg.correlation_tuning_enabled is False
+
+    def test_from_env_unset_uses_default_true(self) -> None:
+        # Ensure the env var is not set
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k != "AUGUR_CORRELATION_TUNING_ENABLED"
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = AugurConfig.from_env()
+            assert cfg.correlation_tuning_enabled is True
+
+    def test_from_env_alpha_override(self) -> None:
+        with patch.dict(os.environ, {"AUGUR_CORRELATION_TUNING_ALPHA": "0.05"}):
+            cfg = AugurConfig.from_env()
+            assert cfg.correlation_tuning_alpha == 0.05
+
+    def test_from_env_enable_threshold_override(self) -> None:
+        with patch.dict(
+            os.environ, {"AUGUR_CORRELATION_TUNING_ENABLE_THRESHOLD": "0.8"}
+        ):
+            cfg = AugurConfig.from_env()
+            assert cfg.correlation_tuning_enable_threshold == 0.8
+
+    def test_from_env_disable_threshold_override(self) -> None:
+        with patch.dict(
+            os.environ, {"AUGUR_CORRELATION_TUNING_DISABLE_THRESHOLD": "0.2"}
+        ):
+            cfg = AugurConfig.from_env()
+            assert cfg.correlation_tuning_disable_threshold == 0.2

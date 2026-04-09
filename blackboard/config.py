@@ -68,6 +68,12 @@ class AugurConfig:
     sigma_max: float = 5.0
     utility_mutation_threshold: float = 0.4
 
+    # ── Reflection: cross-domain matrix tuning ─────────────────────────────
+    correlation_tuning_enabled: bool = True
+    correlation_tuning_alpha: float = 0.2
+    correlation_tuning_enable_threshold: float = 0.6
+    correlation_tuning_disable_threshold: float = 0.3
+
     # ── Constructors ───────────────────────────────────────────────────────
 
     @classmethod

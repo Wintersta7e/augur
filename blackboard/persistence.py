@@ -167,3 +167,38 @@ class PersistenceManager:
         if raw is None:
             return None
         return json.loads(raw)
+
+    # -- Correlation graph (cross-domain correlator) -------------------------
+
+    def save_correlation_graph(self, session_id: str, graph_data: dict) -> None:
+        """Persist a session's correlation DiGraph as node_link_data JSON.
+
+        Also maintains an ordered index list so list_correlation_graphs
+        can return session ids without scanning keyspace.
+        """
+        key = f"augur:correlation:graph:{session_id}"
+        self._r.set(key, json.dumps(graph_data))
+        self._r.lpush("augur:correlation:graph:_index", session_id)
+        self._r.ltrim("augur:correlation:graph:_index", 0, 999)
+        log.debug(
+            "Saved correlation graph for session %s (%d nodes, %d links)",
+            session_id,
+            len(graph_data.get("nodes", [])),
+            len(graph_data.get("links", [])),
+        )
+
+    def load_correlation_graph(self, session_id: str) -> dict | None:
+        """Load a persisted correlation graph or return None if absent."""
+        key = f"augur:correlation:graph:{session_id}"
+        raw = self._r.get(key)
+        if raw is None:
+            return None
+        return json.loads(raw)
+
+    def list_correlation_graphs(self, limit: int = 50) -> list[str]:
+        """Return recent session ids that have persisted correlation graphs.
+
+        Ordered newest-first (lpush index order).
+        """
+        raw_ids = self._r.lrange("augur:correlation:graph:_index", 0, limit - 1)
+        return [sid.decode() if isinstance(sid, bytes) else sid for sid in raw_ids]

@@ -29,6 +29,7 @@ import redis
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from blackboard.config import AugurConfig
 from blackboard.persistence import PersistenceManager
+from reasoning.correlator import DEFAULT_ESCALATION_MATRIX
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -48,6 +49,27 @@ SUBJECT_REFLECT_COMPLETE = "augur.reflect.complete"
 
 # Default domain for chess
 DEFAULT_DOMAIN = "chess"
+
+# ---------------------------------------------------------------------------
+# Idempotency markers for correlation tuning
+# ---------------------------------------------------------------------------
+TUNING_APPLIED_KEY_PREFIX = "augur:correlation:tuning_applied:"
+TUNING_APPLIED_TTL_S = 7 * 24 * 3600  # 7 days
+
+
+def tuning_already_applied(r: redis.Redis, session_id: str) -> bool:
+    """Return True if this session has already been tuned."""
+    return r.exists(f"{TUNING_APPLIED_KEY_PREFIX}{session_id}") > 0
+
+
+def mark_tuning_applied(r: redis.Redis, session_id: str) -> None:
+    """Set the idempotency marker with a 7-day TTL."""
+    r.set(
+        f"{TUNING_APPLIED_KEY_PREFIX}{session_id}",
+        "1",
+        ex=TUNING_APPLIED_TTL_S,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Precision analysis
@@ -623,6 +645,36 @@ async def run_reflection(
     counterfactual = analyze_counterfactual(pm, domain, current_thresholds)
     log.info("Counterfactual: %s", counterfactual["recommendation"])
 
+    # 4. Correlation matrix tuning
+    tuning: dict
+    if tuning_already_applied(redis_client, session_id):
+        log.info(
+            "Skipping correlation tuning — already applied for session %s",
+            session_id,
+        )
+        tuning = {
+            "analysis": "correlation_tuning",
+            "skipped": True,
+            "reason": "already_applied_for_session",
+        }
+    else:
+        current_matrix = pm.load_escalation_matrix() or DEFAULT_ESCALATION_MATRIX
+        current_confidence_state = pm.load_rule_confidence() or {}
+        tuning = analyze_correlation_tuning(
+            feedback, current_matrix, current_confidence_state, config
+        )
+        log.info("Correlation tuning: %s", tuning.get("reason", "no reason"))
+
+        if tuning.get("rules_evaluated", 0) > 0:
+            pm.save_rule_confidence(tuning["new_confidence_state"])
+            if tuning.get("new_matrix") is not None:
+                pm.save_escalation_matrix(tuning["new_matrix"])
+                log.warning(
+                    "Escalation matrix updated by reflection engine: %s",
+                    tuning["reason"],
+                )
+            mark_tuning_applied(redis_client, session_id)
+
     # Build report
     report = {
         "session_id": session_id,
@@ -631,12 +683,14 @@ async def run_reflection(
             "precision": precision,
             "utility": utility,
             "counterfactual": counterfactual,
+            "correlation_tuning": tuning,
         },
         "adjustments": {
             "sigma_adjusted": precision["action"] != "none",
             "sigma_value": precision["sigma_after"],
             "prompt_mutated": mutation_result is not None
             and mutation_result.get("mutated", False),
+            "matrix_mutated": tuning.get("new_matrix") is not None,
         },
     }
 

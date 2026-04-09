@@ -141,3 +141,48 @@ class TestBuildCorrelationPrompt:
         assert "CHESS" in prompt
         assert "TYPING" in prompt
         assert "FOCUS" in prompt
+
+
+from reasoning.augur_advisor import SUBSCRIBE_SUBJECT, SEVERITY_GATE
+
+
+class TestAdvisorSubscriptionAndGate:
+    def test_subscribes_to_correlation_subject(self) -> None:
+        assert SUBSCRIBE_SUBJECT == "augur.correlation.detected"
+
+    def test_severity_gate_is_lowercase(self) -> None:
+        # The gate itself stays lowercase; the advisor lowercases
+        # the uppercase combined_severity before comparing.
+        assert "medium" in SEVERITY_GATE
+        assert "high" in SEVERITY_GATE
+        assert "low" not in SEVERITY_GATE
+
+
+class TestResolveAdvisorPath:
+    """Tests the routing branch used by the advisor's on_message callback.
+
+    We test a pure helper — resolve_advisor_path(payload) — that returns
+    either 'correlation' or 'single' so the async callback logic is unit-
+    testable without NATS.
+    """
+
+    def test_correlation_found_true_routes_to_correlation(self) -> None:
+        from reasoning.augur_advisor import resolve_advisor_path
+
+        assert (
+            resolve_advisor_path({"correlation_found": True, "primary_anomaly": {}})
+            == "correlation"
+        )
+
+    def test_correlation_found_false_routes_to_single(self) -> None:
+        from reasoning.augur_advisor import resolve_advisor_path
+
+        assert (
+            resolve_advisor_path({"correlation_found": False, "primary_anomaly": {}})
+            == "single"
+        )
+
+    def test_missing_flag_defaults_to_single(self) -> None:
+        from reasoning.augur_advisor import resolve_advisor_path
+
+        assert resolve_advisor_path({"primary_anomaly": {}}) == "single"

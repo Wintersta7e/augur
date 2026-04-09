@@ -40,7 +40,7 @@ log = logging.getLogger("augur_advisor")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SUBSCRIBE_SUBJECT = "augur.detection.anomaly"
+SUBSCRIBE_SUBJECT = "augur.correlation.detected"
 PUBLISH_SUBJECT = "augur.reasoning.advice"
 
 REDIS_KEY_LAST_MOVE = "augur:chess:last_move"
@@ -65,6 +65,12 @@ DEFAULT_PROMPTS = {
         "this might indicate about their mental state and provide a helpful suggestion."
     ),
 }
+
+
+def resolve_advisor_path(payload: dict) -> str:
+    """Return 'correlation' if payload.correlation_found else 'single'."""
+    return "correlation" if payload.get("correlation_found") else "single"
+
 
 # ---------------------------------------------------------------------------
 # Redis helpers
@@ -400,77 +406,85 @@ async def run() -> None:
     # Track in-flight requests to avoid piling up during slow LLM responses
     reasoning_lock = asyncio.Lock()
 
-    async def on_anomaly(msg: nats.aio.client.Msg) -> None:
+    async def on_message(msg: nats.aio.client.Msg) -> None:
         try:
-            anomaly = json.loads(msg.data.decode())
+            payload = json.loads(msg.data.decode())
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            log.warning("Bad anomaly payload: %s", exc)
+            log.warning("Bad correlation payload: %s", exc)
             return
 
-        severity = anomaly.get("severity", "low")
-        domain = anomaly.get("domain", "unknown")
-        entity = anomaly.get("entity", anomaly.get("player", "?"))
-        value = anomaly.get("value", anomaly.get("think_time", 0))
-
+        # Gate on combined_severity (uppercase from correlator) — compare lowercase
+        severity = str(payload.get("combined_severity", "low")).lower()
         if severity not in SEVERITY_GATE:
+            primary = payload.get("primary_anomaly", {})
             log.info(
-                "Ignoring %s severity anomaly for %s/%s (%.2f)",
+                "Ignoring %s severity event for %s/%s",
                 severity,
-                domain,
-                entity,
-                value,
+                primary.get("domain", "?"),
+                primary.get("entity", "?"),
             )
             return
 
+        path = resolve_advisor_path(payload)
+
+        if path == "correlation":
+            domain = "multi"
+            entity = (
+                "+".join(
+                    e.get("domain", "?") for e in payload.get("correlated_events", [])
+                )
+                or "?"
+            )
+            value = payload.get("temporal_lag_seconds", 0) or 0
+        else:
+            primary = payload["primary_anomaly"]
+            domain = primary.get("domain", "unknown")
+            entity = primary.get("entity", primary.get("player", "?"))
+            value = primary.get("value", primary.get("think_time", 0))
+
         log.info(
-            "Anomaly received [%s] %s/%s value=%.2f — querying LLM",
+            "Event received [%s] path=%s domain=%s entity=%s — querying LLM",
             severity.upper(),
+            path,
             domain,
             entity,
-            value,
         )
 
         if reasoning_lock.locked():
-            log.warning("LLM reasoning already in progress, skipping this anomaly")
+            log.warning("LLM reasoning already in progress, skipping")
             return
 
         async with reasoning_lock:
-            # Load domain-specific prompt from persistence, or use default
-            stored_prompt = pm.load_prompt(domain)
-            if stored_prompt:
-                system_prompt = stored_prompt
-                log.info("Using stored prompt for domain '%s'", domain)
+            if path == "correlation":
+                prompt = build_correlation_prompt(payload)
+                system_prompt = None  # correlation prompt is self-contained
             else:
-                system_prompt = DEFAULT_PROMPTS.get(
-                    domain,
-                    f"You are an analyst monitoring '{domain}' data. An anomaly was detected.",
-                )
-                log.info("Using default prompt for domain '%s'", domain)
-
-            # Select prompt builder
-            builder = DOMAIN_HANDLERS.get(domain, build_generic_prompt)
-            try:
-                prompt = builder(anomaly, redis_client, system_prompt)
-            except Exception as exc:
-                log.error("Prompt build failed for domain '%s': %s", domain, exc)
-                return
+                primary = payload["primary_anomaly"]
+                stored_prompt = pm.load_prompt(domain)
+                if stored_prompt:
+                    system_prompt = stored_prompt
+                    log.info("Using stored prompt for domain '%s'", domain)
+                else:
+                    system_prompt = DEFAULT_PROMPTS.get(
+                        domain,
+                        f"You are an analyst monitoring '{domain}' data. An anomaly was detected.",
+                    )
+                builder = DOMAIN_HANDLERS.get(domain, build_generic_prompt)
+                try:
+                    prompt = builder(primary, redis_client, system_prompt)
+                except Exception as exc:
+                    log.error("Prompt build failed for '%s': %s", domain, exc)
+                    return
 
             log.debug("Prompt:\n%s", prompt)
 
-            # Query Ollama
             try:
                 advice, latency_ms = await query_ollama(prompt, http_client, config)
             except httpx.ConnectError:
-                log.error(
-                    "Ollama unreachable at %s — is it running?",
-                    config.ollama_url,
-                )
+                log.error("Ollama unreachable at %s", config.ollama_url)
                 return
             except httpx.TimeoutException:
-                log.error(
-                    "Ollama timed out after %ds",
-                    config.ollama_timeout,
-                )
+                log.error("Ollama timed out after %ds", config.ollama_timeout)
                 return
             except httpx.HTTPStatusError as exc:
                 log.error("Ollama HTTP error: %s", exc.response.status_code)
@@ -486,7 +500,8 @@ async def run() -> None:
             )
             log.info("Advice for %s/%s:\n%s", domain, entity, advice)
 
-            # Build output payload — include domain + compat fields
+            # Build advice payload — include correlation fields for downstream
+            primary_compat = payload.get("primary_anomaly", {})
             advice_payload = {
                 "domain": domain,
                 "entity": entity,
@@ -496,15 +511,19 @@ async def run() -> None:
                 "model": config.ollama_model,
                 "latency_ms": round(latency_ms, 1),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                # Compat aliases for console_display and downstream
-                "player": entity,
-                "move": anomaly.get(
-                    "move", anomaly.get("context", {}).get("label", "?")
+                # Correlation metadata
+                "correlation_found": bool(payload.get("correlation_found")),
+                "correlated_domains": [
+                    e.get("domain") for e in payload.get("correlated_events", [])
+                ],
+                # Compat aliases for console_display and feedback_collector
+                "player": primary_compat.get("entity", entity),
+                "move": primary_compat.get(
+                    "move", primary_compat.get("context", {}).get("label", "?")
                 ),
-                "think_time": value,
+                "think_time": primary_compat.get("value", value),
             }
 
-            # Publish to NATS
             try:
                 await nc.publish(
                     PUBLISH_SUBJECT,
@@ -514,14 +533,13 @@ async def run() -> None:
             except Exception as exc:
                 log.error("NATS publish failed: %s", exc)
 
-            # Write to Redis
             try:
                 redis_client.set(REDIS_KEY_ADVICE, json.dumps(advice_payload))
                 log.info("Wrote advice to Redis key %s", REDIS_KEY_ADVICE)
             except redis.RedisError as exc:
                 log.error("Redis write failed: %s", exc)
 
-    sub = await nc.subscribe(SUBSCRIBE_SUBJECT, cb=on_anomaly)
+    sub = await nc.subscribe(SUBSCRIBE_SUBJECT, cb=on_message)
     log.info("Subscribed to %s", SUBSCRIBE_SUBJECT)
     log.info("Severity gate: only processing %s", SEVERITY_GATE)
     log.info("Supported domains: %s (+ generic fallback)", list(DOMAIN_HANDLERS.keys()))

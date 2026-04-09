@@ -42,6 +42,7 @@ log = logging.getLogger("correlator")
 # ---------------------------------------------------------------------------
 SUBSCRIBE_ANOMALY = "augur.detection.anomaly"
 SUBSCRIBE_DEBUG_DUMP = "augur.debug.graph_dump"
+SUBSCRIBE_SESSION_END = "augur.session.end"
 PUBLISH_CORRELATION = "augur.correlation.detected"
 
 REDIS_KEY_WINDOW = "augur:correlation:window"
@@ -484,11 +485,33 @@ async def run() -> None:
     async def on_debug_dump(_msg: nats.aio.client.Msg) -> None:
         dump_graph(session_graph)
 
+    async def on_session_end(msg: nats.aio.client.Msg) -> None:
+        nonlocal session_graph
+        try:
+            payload = json.loads(msg.data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            log.warning("Bad session.end payload: %s", exc)
+            return
+        session_id = payload.get("session_id")
+        if not session_id:
+            log.warning("session.end payload missing session_id: %s", payload)
+            return
+        try:
+            flush_graph_to_redis(session_graph, pm, session_id)
+        except Exception as exc:
+            log.error("Failed to flush correlation graph: %s", exc, exc_info=True)
+            return
+        # Reset to a fresh empty DiGraph for the next session
+        session_graph = new_session_graph()
+        log.info("Session graph reset after flush (session_id=%s)", session_id)
+
     await nc.subscribe(SUBSCRIBE_ANOMALY, cb=on_anomaly)
     await nc.subscribe(SUBSCRIBE_DEBUG_DUMP, cb=on_debug_dump)
+    await nc.subscribe(SUBSCRIBE_SESSION_END, cb=on_session_end)
 
     log.info("Subscribed to %s", SUBSCRIBE_ANOMALY)
     log.info("Subscribed to %s (debug graph dump)", SUBSCRIBE_DEBUG_DUMP)
+    log.info("Subscribed to %s (session end graph flush)", SUBSCRIBE_SESSION_END)
     log.info(
         "Window: %ds query / %ds prune buffer",
         CORRELATION_WINDOW_S,

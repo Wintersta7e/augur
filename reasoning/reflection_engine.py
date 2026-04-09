@@ -301,6 +301,190 @@ def analyze_counterfactual(
 
 
 # ---------------------------------------------------------------------------
+# Correlation matrix tuning (cross-domain escalation rule tuning)
+# ---------------------------------------------------------------------------
+
+
+def analyze_correlation_tuning(
+    feedback: dict,
+    current_matrix: dict,
+    current_confidence_state: dict,
+    config: AugurConfig,
+) -> dict:
+    """Tune the cross-domain escalation matrix via per-rule EWMA confidence.
+
+    For each correlated advice event with a valid rule_key, attribute the
+    feedback utility to that rule. Update a per-rule confidence state via
+    EWMA across sessions. Use two hysteresis thresholds to decide whether
+    to keep a rule at its current target, disable it (target=LOW), or
+    re-enable it (restore to snapshotted target).
+
+    Pure function: no Redis or NATS I/O. See design doc at
+    docs/superpowers/specs/2026-04-09-reflection-matrix-tuning-design.md
+    for the full algorithm specification.
+    """
+    if not config.correlation_tuning_enabled:
+        return {
+            "analysis": "correlation_tuning",
+            "disabled": True,
+            "reason": "Tuning disabled via AUGUR_CORRELATION_TUNING_ENABLED=false",
+        }
+
+    # Filter to correlated events with a valid rule_key
+    all_events = feedback.get("advice_events", [])
+    events_with_rule = [
+        e
+        for e in all_events
+        if e.get("correlation_found") is True and e.get("rule_key") is not None
+    ]
+
+    if not events_with_rule:
+        return {
+            "analysis": "correlation_tuning",
+            "rules_evaluated": 0,
+            "per_rule": {},
+            "new_confidence_state": dict(current_confidence_state),
+            "new_matrix": None,
+            "reason": "No correlated advice events with rule attribution",
+        }
+
+    # Group by rule_key
+    events_per_rule: dict[str, list[dict]] = {}
+    for ev in events_with_rule:
+        rk = ev["rule_key"]
+        events_per_rule.setdefault(rk, []).append(ev)
+
+    alpha = config.correlation_tuning_alpha
+    enable_t = config.correlation_tuning_enable_threshold
+    disable_t = config.correlation_tuning_disable_threshold
+
+    # Start with a shallow copy of the existing state so unchanged rules pass through.
+    updated_state: dict = {k: dict(v) for k, v in current_confidence_state.items()}
+    new_matrix_rules = dict(current_matrix.get("rules", {}))
+    per_rule_result: dict = {}
+    matrix_changed = False
+
+    explicit_map = {"y": 1.0, "n": 0.0, "no_response": 0.5}
+
+    for rule_key, events in events_per_rule.items():
+        # Per-rule session utility (60/40 explicit/behavioral)
+        explicit_scores = [
+            explicit_map.get(ev.get("explicit_rating", "no_response"), 0.5)
+            for ev in events
+        ]
+        explicit_avg = sum(explicit_scores) / len(explicit_scores)
+
+        behavioral_scores = [
+            ev.get("behavioral_score", 0.0)
+            for ev in events
+            if ev.get("behavioral_score", 0.0) > 0
+        ]
+        behavioral_avg = (
+            sum(behavioral_scores) / len(behavioral_scores)
+            if behavioral_scores
+            else 0.5
+        )
+
+        session_utility = 0.6 * explicit_avg + 0.4 * behavioral_avg
+
+        # Load previous state or initialize to 1.0 (presumed useful)
+        prev_state = updated_state.get(
+            rule_key, {"confidence": 1.0, "restore_target": None}
+        )
+        prev_conf = prev_state["confidence"]
+        prev_restore = prev_state.get("restore_target")
+
+        # EWMA update, rounded to 3 decimals for deterministic comparison
+        new_conf = round((1 - alpha) * prev_conf + alpha * session_utility, 3)
+
+        # Current target in the matrix (may differ from default due to past tuning
+        # or manual MCP edits). "LOW" fallback for rules not in the matrix.
+        current_target = new_matrix_rules.get(rule_key, "LOW")
+
+        # Derive new target via hysteresis + restore_target snapshot
+        if new_conf >= enable_t:
+            if current_target == "LOW":
+                # Recovering from disabled — restore to snapshot (or current if no snapshot)
+                new_target = (
+                    prev_restore if prev_restore is not None else current_target
+                )
+            else:
+                # Already enabled — track the live matrix value so manual edits propagate
+                new_target = current_target
+            # Refresh the snapshot to track the current live target
+            new_restore = new_target
+        elif new_conf < disable_t:
+            # Disable
+            new_target = "LOW"
+            if prev_restore is not None:
+                new_restore = prev_restore
+            else:
+                # First-ever disable — capture current_target (unless it's already LOW)
+                new_restore = current_target if current_target != "LOW" else None
+        else:
+            # Hysteresis band — freeze target and restore_target
+            new_target = current_target
+            new_restore = prev_restore
+
+        # Classify action based on target change
+        if current_target == "LOW" and new_target != "LOW":
+            action = "re-enabled"
+        elif current_target != "LOW" and new_target == "LOW":
+            action = "disabled"
+        else:
+            action = "tracked"
+
+        # Track matrix mutation
+        if new_target != current_target:
+            new_matrix_rules[rule_key] = new_target
+            matrix_changed = True
+
+        # Update state
+        updated_state[rule_key] = {
+            "confidence": new_conf,
+            "restore_target": new_restore,
+        }
+
+        per_rule_result[rule_key] = {
+            "session_utility": round(session_utility, 3),
+            "event_count": len(events),
+            "confidence_before": prev_conf,
+            "confidence_after": new_conf,
+            "target_before": current_target,
+            "target_after": new_target,
+            "restore_target_before": prev_restore,
+            "restore_target_after": new_restore,
+            "action": action,
+        }
+
+    # Build the new_matrix dict if anything changed
+    if matrix_changed:
+        new_matrix: dict | None = {
+            "version": current_matrix.get("version", "1.0"),
+            "rules": new_matrix_rules,
+        }
+    else:
+        new_matrix = None
+
+    # Build a summary reason string
+    reason_parts = [
+        f"{rk} conf {r['confidence_before']}->{r['confidence_after']}, "
+        f"{r['target_before']}->{r['target_after']} ({r['action']})"
+        for rk, r in per_rule_result.items()
+    ]
+    reason = "; ".join(reason_parts) if reason_parts else "No rules updated"
+
+    return {
+        "analysis": "correlation_tuning",
+        "rules_evaluated": len(events_per_rule),
+        "per_rule": per_rule_result,
+        "new_confidence_state": updated_state,
+        "new_matrix": new_matrix,
+        "reason": reason,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Prompt mutation via Ollama
 # ---------------------------------------------------------------------------
 

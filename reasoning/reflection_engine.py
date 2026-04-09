@@ -133,11 +133,20 @@ def analyze_utility(feedback: dict, config: AugurConfig) -> dict:
 
     Weighted score: 60% explicit, 40% behavioral.
     If utility < config.utility_mutation_threshold, flags for prompt mutation.
+
+    Excludes correlated advice events (correlation_found=True) because
+    prompt mutation only affects the single-domain DOMAIN_HANDLERS path;
+    the correlation path uses build_correlation_prompt which is
+    self-contained and not managed by PersistenceManager.save_prompt.
     """
-    advice_events = feedback.get("advice_events", [])
+    # Filter out correlated advice before computing the score that drives
+    # prompt mutation. The correlation path is tuned by the matrix tuning
+    # analysis in a later step of run_reflection, not by prompt mutation.
+    all_events = feedback.get("advice_events", [])
+    advice_events = [e for e in all_events if not e.get("correlation_found")]
     summary = feedback.get("session_summary", {})
 
-    total = summary.get("total_advice", len(advice_events))
+    total = len(advice_events)
     if total == 0:
         return {
             "analysis": "utility",

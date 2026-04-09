@@ -8,3 +8,4 @@ keyboard
 pytest
 pytest-asyncio
 fastmcp
+networkx

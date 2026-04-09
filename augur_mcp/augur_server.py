@@ -1,5 +1,6 @@
-"""Augur MCP server — 16 tools for pipeline lifecycle, event injection,
-state inspection, and control.
+"""Augur MCP server — tools for pipeline lifecycle, event injection,
+state inspection, and control. All Redis I/O is routed through
+PersistenceManager via context managers that close sockets on exit.
 """
 
 from __future__ import annotations
@@ -7,14 +8,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
+import re
 import signal
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import nats as nats_client
 import redis
@@ -41,28 +43,75 @@ _processes: dict[str, dict[str, Any]] = {}
 
 COMPONENT_COMMANDS: dict[str, list[str]] = {
     "detector": [sys.executable, "-m", "detection.anomaly_detector"],
+    "correlator": [sys.executable, "-m", "reasoning.correlator"],
     "advisor": [sys.executable, "-m", "reasoning.augur_advisor"],
     "feedback": [sys.executable, "-m", "perception.feedback_collector"],
     "reflection": [sys.executable, "-m", "reasoning.reflection_engine"],
     "display": [sys.executable, "-m", "output.console_display"],
 }
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# SEC-02: allowlist for domain / entity / stream_id values received through
+# MCP tool arguments. Unsanitized values would land in NATS subjects
+# (f"augur.perception.{domain}") and Redis keys (f"augur:profile:{domain}:{entity}"),
+# where a ":" or "." or wildcard character can break downstream parsing or
+# reach unintended keyspace. Keep it narrow.
+_SAFE_LABEL_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 
 
-def _get_redis() -> redis.Redis:
+def _validate_label(value: str, field: str) -> str | None:
+    """Return an error message if value fails the safe-label check, else None."""
+    if not isinstance(value, str):
+        return f"{field} must be a string, got {type(value).__name__}"
+    if not _SAFE_LABEL_RE.match(value):
+        return (
+            f"{field} must match {_SAFE_LABEL_RE.pattern} "
+            f"(lowercase letters, digits, underscore; 1-64 chars)"
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Redis + PersistenceManager context managers
+# ---------------------------------------------------------------------------
+#
+# LEAK-01 / LEAK-02: every MCP tool that needs a Redis client must close
+# it on exit, otherwise each call orphans a socket on the underlying
+# connection pool. The context managers below make the correct pattern
+# concise enough that every tool can opt into it with a single `with`.
+#
+# ARCH-07: `decode_responses=True` was previously set on these clients
+# while PersistenceManager uses bytes internally. Mismatching decode
+# modes made it impossible to share a client between MCP tools and PM
+# without surprises, so the decode flag is now off and json.loads
+# handles both str and bytes uniformly.
+
+
+def _new_redis() -> redis.Redis:
     return redis.Redis(
         host=_config.redis_host,
         port=_config.redis_port,
         socket_connect_timeout=_config.redis_connect_timeout,
-        decode_responses=True,
     )
 
 
-def _get_persistence() -> PersistenceManager:
-    return PersistenceManager(_get_redis())
+@contextmanager
+def _redis_ctx() -> Iterator[redis.Redis]:
+    """Context-managed Redis client that always closes on exit."""
+    client = _new_redis()
+    try:
+        yield client
+    finally:
+        try:
+            client.close()
+        except Exception as exc:
+            log.debug("Redis client close failed: %s", exc)
+
+
+@contextmanager
+def _persistence_ctx() -> Iterator[PersistenceManager]:
+    """Context-managed PersistenceManager that closes the Redis client."""
+    with _redis_ctx() as client:
+        yield PersistenceManager(client)
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +154,9 @@ async def start_pipeline(components: list[str] | None = None) -> dict[str, Any]:
                     "pid": proc.pid,
                 }
                 continue
+            # LEAK-11: dead entry — pop it so a stale Process object does
+            # not linger in the dict after we replace it below.
+            _processes.pop(name, None)
 
         cmd = COMPONENT_COMMANDS[name]
         try:
@@ -215,10 +267,10 @@ async def check_infrastructure() -> dict[str, Any]:
 
     result: dict[str, Any] = {}
 
-    # Redis ping
+    # Redis ping — LEAK-01: context manager guarantees close on exit
     try:
-        r = _get_redis()
-        r.ping()
+        with _redis_ctx() as r:
+            r.ping()
         result["redis"] = {"status": "ok", "url": _config.redis_url}
     except Exception as exc:
         result["redis"] = {"status": "fail", "error": str(exc)}
@@ -288,6 +340,17 @@ async def inject_event(
     Returns:
         Dict with 'status', 'subject', 'session_id', and 'event' keys.
     """
+    # SEC-02: validate caller-supplied labels before they reach NATS
+    # subjects or Redis keys.
+    for field, value_ in (
+        ("domain", domain),
+        ("entity", entity),
+        ("event_type", event_type),
+    ):
+        err = _validate_label(value_, field)
+        if err is not None:
+            return {"status": "error", "error": err}
+
     sid = session_id or str(uuid.uuid4())
     event = PerceptionEvent(
         domain=domain,
@@ -302,6 +365,8 @@ async def inject_event(
     )
     subject = f"augur.perception.{domain}"
 
+    # LEAK-03: try/finally guarantees the NATS connection is closed even
+    # if nc.publish raises.
     try:
         nc = await asyncio.wait_for(
             nats_client.connect(
@@ -310,8 +375,11 @@ async def inject_event(
             ),
             timeout=_config.nats_connect_timeout + 1,
         )
+    except Exception as exc:
+        return {"status": "error", "error": f"NATS connect failed: {exc}"}
+
+    try:
         await nc.publish(subject, event.to_bytes())
-        await nc.close()
         return {
             "status": "published",
             "subject": subject,
@@ -320,6 +388,11 @@ async def inject_event(
         }
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
+    finally:
+        try:
+            await nc.close()
+        except Exception as exc:
+            log.debug("NATS close failed after inject_event: %s", exc)
 
 
 @mcp.tool()
@@ -369,6 +442,16 @@ async def inject_sequence(
                 context = ev.get("context") or {}
                 sid = ev.get("session_id") or shared_sid
 
+                # SEC-02: validate caller-supplied labels per event
+                for field, value_ in (
+                    ("domain", domain),
+                    ("entity", entity),
+                    ("event_type", event_type),
+                ):
+                    err = _validate_label(value_, field)
+                    if err is not None:
+                        raise ValueError(err)
+
                 event = PerceptionEvent(
                     domain=domain,
                     stream_id=f"{domain}_injected",
@@ -389,7 +472,10 @@ async def inject_sequence(
             if i < len(events) - 1:
                 await asyncio.sleep(delay_s)
     finally:
-        await nc.close()
+        try:
+            await nc.close()
+        except Exception as exc:
+            log.debug("NATS close failed after inject_sequence: %s", exc)
 
     return {
         "session_id": shared_sid,
@@ -406,18 +492,10 @@ async def inject_sequence(
 
 @mcp.tool()
 def get_baseline(domain: str, entity: str) -> dict[str, Any]:
-    """Read the persisted EWMA baseline for a domain/entity pair.
-
-    Args:
-        domain: Perception domain, e.g. "chess".
-        entity: Named entity, e.g. "white".
-
-    Returns:
-        Baseline dict or {'error': 'not found'}.
-    """
+    """Read the persisted EWMA baseline for a domain/entity pair."""
     try:
-        pm = _get_persistence()
-        baseline = pm.load_baseline(domain, entity)
+        with _persistence_ctx() as pm:
+            baseline = pm.load_baseline(domain, entity)
         if baseline is None:
             return {"error": "not found", "domain": domain, "entity": entity}
         return {"domain": domain, "entity": entity, "baseline": baseline}
@@ -427,20 +505,12 @@ def get_baseline(domain: str, entity: str) -> dict[str, Any]:
 
 @mcp.tool()
 def get_last_anomaly(domain: str | None = None) -> dict[str, Any]:
-    """Read the last anomaly event from Redis.
-
-    Args:
-        domain: Optional domain filter. If provided, only return if matching.
-
-    Returns:
-        Last anomaly dict or {'error': 'not found'}.
-    """
+    """Read the last anomaly event from Redis (ARCH-07: via PersistenceManager)."""
     try:
-        r = _get_redis()
-        raw = r.get("augur:detection:last_anomaly")
-        if raw is None:
+        with _persistence_ctx() as pm:
+            data = pm.load_last_anomaly()
+        if data is None:
             return {"error": "not found"}
-        data = json.loads(raw)
         if domain is not None and data.get("domain") != domain:
             return {"error": "not found", "requested_domain": domain}
         return data
@@ -450,20 +520,12 @@ def get_last_anomaly(domain: str | None = None) -> dict[str, Any]:
 
 @mcp.tool()
 def get_last_advice(domain: str | None = None) -> dict[str, Any]:
-    """Read the last LLM advice from Redis.
-
-    Args:
-        domain: Optional domain filter. If provided, only return if matching.
-
-    Returns:
-        Last advice dict or {'error': 'not found'}.
-    """
+    """Read the last LLM advice from Redis (ARCH-07: via PersistenceManager)."""
     try:
-        r = _get_redis()
-        raw = r.get("augur:reasoning:last_advice")
-        if raw is None:
+        with _persistence_ctx() as pm:
+            data = pm.load_last_advice()
+        if data is None:
             return {"error": "not found"}
-        data = json.loads(raw)
         if domain is not None and data.get("domain") != domain:
             return {"error": "not found", "requested_domain": domain}
         return data
@@ -475,70 +537,53 @@ def get_last_advice(domain: str | None = None) -> dict[str, Any]:
 def get_session(session_id: str | None = None) -> dict[str, Any]:
     """Read session info from Redis.
 
-    Args:
-        session_id: Specific session to look up. Reads augur:reflect:{session_id}.
-            If None, reads augur:session:current.
-
-    Returns:
-        Session dict or {'error': 'not found'}.
+    If ``session_id`` is None, returns the current session metadata.
+    Otherwise returns the reflection report for that session.
     """
     try:
-        r = _get_redis()
-        if session_id is None:
-            raw = r.get("augur:session:current")
-            if raw is None:
-                return {"error": "no current session"}
-            return json.loads(raw)
-        raw = r.get(f"augur:reflect:{session_id}")
-        if raw is None:
+        with _persistence_ctx() as pm:
+            if session_id is None:
+                current = pm.load_current_session()
+                if current is None:
+                    return {"error": "no current session"}
+                return current
+            report = pm.load_reflection(session_id)
+        if report is None:
             return {"error": "not found", "session_id": session_id}
-        return json.loads(raw)
+        return report
     except Exception as exc:
         return {"error": str(exc)}
 
 
 @mcp.tool()
 def get_reflection(session_id: str | None = None) -> dict[str, Any]:
-    """Read reflection report from Redis.
+    """Read reflection report (ARCH-07: via PersistenceManager).
 
-    Args:
-        session_id: Session to read. If None, reads current session first,
-            then looks up its reflection.
-
-    Returns:
-        Reflection dict or {'error': 'not found'}.
+    If session_id is None, falls back to the current session from Redis.
     """
     try:
-        r = _get_redis()
-        sid = session_id
-        if sid is None:
-            raw_session = r.get("augur:session:current")
-            if raw_session is not None:
-                session_data = json.loads(raw_session)
-                sid = session_data.get("session_id")
-        if sid is None:
-            return {"error": "no session_id available"}
-        raw = r.get(f"augur:reflect:{sid}")
-        if raw is None:
+        with _persistence_ctx() as pm:
+            sid = session_id
+            if sid is None:
+                current = pm.load_current_session()
+                if current is not None:
+                    sid = current.get("session_id")
+            if sid is None:
+                return {"error": "no session_id available"}
+            report = pm.load_reflection(sid)
+        if report is None:
             return {"error": "not found", "session_id": sid}
-        return json.loads(raw)
+        return report
     except Exception as exc:
         return {"error": str(exc)}
 
 
 @mcp.tool()
 def list_sessions(limit: int = 10) -> dict[str, Any]:
-    """List recent sessions using feedback records.
-
-    Args:
-        limit: Maximum number of sessions to return.
-
-    Returns:
-        Dict with 'sessions' list and 'count'.
-    """
+    """List recent sessions using feedback records."""
     try:
-        pm = _get_persistence()
-        sessions = pm.get_all_feedback(limit=limit)
+        with _persistence_ctx() as pm:
+            sessions = pm.get_all_feedback(limit=limit)
         return {"sessions": sessions, "count": len(sessions)}
     except Exception as exc:
         return {"error": str(exc)}
@@ -564,8 +609,8 @@ def get_thresholds(domain: str | None = None) -> dict[str, Any]:
                 "severity_high_sigma": _config.severity_high_sigma,
                 "min_observations": _config.min_observations,
             }
-        pm = _get_persistence()
-        thresholds = pm.load_thresholds(domain)
+        with _persistence_ctx() as pm:
+            thresholds = pm.load_thresholds(domain)
         if thresholds is None:
             return {
                 "source": "config_defaults",
@@ -591,6 +636,153 @@ def get_config() -> dict[str, Any]:
     return _config.as_dict()
 
 
+@mcp.tool()
+def get_correlation_graph(session_id: str) -> dict[str, Any]:
+    """Read a persisted cross-domain correlation graph from Redis.
+
+    Args:
+        session_id: Session whose graph was flushed on augur.session.end.
+
+    Returns:
+        Dict in networkx node_link_data format with 'directed', 'nodes',
+        'edges' keys (NetworkX 3.4+ uses 'edges'; 3.3 and older used
+        'links'), or {'error': 'not found'} if the session has no
+        persisted graph.
+    """
+    try:
+        with _persistence_ctx() as pm:
+            graph = pm.load_correlation_graph(session_id)
+        if graph is None:
+            return {"error": "not found", "session_id": session_id}
+        return {"session_id": session_id, "graph": graph}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def list_correlation_graphs(limit: int = 50) -> dict[str, Any]:
+    """List recent session ids that have persisted correlation graphs."""
+    try:
+        with _persistence_ctx() as pm:
+            ids = pm.list_correlation_graphs(limit=limit)
+        return {"session_ids": ids, "count": len(ids)}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def dump_correlation_window() -> dict[str, Any]:
+    """Return the current contents of the correlator's sliding window.
+
+    Reads the augur:correlation:window sorted set directly and returns
+    one entry per member: {anomaly: dict, score: unix_timestamp}.
+    Useful for verifying what the correlator currently sees as "recent"
+    when debugging correlation misses.
+    """
+    try:
+        with _redis_ctx() as r:
+            raw_members = r.zrevrangebyscore(
+                "augur:correlation:window", "+inf", "-inf", withscores=True
+            )
+        window: list[dict[str, Any]] = []
+        for member, score in raw_members:
+            member_str = member.decode() if isinstance(member, bytes) else member
+            try:
+                anomaly = json.loads(member_str)
+            except json.JSONDecodeError:
+                continue
+            window.append({"anomaly": anomaly, "score": float(score)})
+        return {"window": window, "count": len(window)}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def get_escalation_matrix() -> dict[str, Any]:
+    """Read the current cross-domain escalation matrix from Redis."""
+    try:
+        with _persistence_ctx() as pm:
+            matrix = pm.load_escalation_matrix()
+        if matrix is None:
+            return {"error": "not set"}
+        return {"matrix": matrix}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+_VALID_SEVERITIES = {"LOW", "MEDIUM", "HIGH"}
+
+# SEC-04: caps on matrix size. Without these, a caller could pass
+# thousands of rules or very long keys, amplifying memory and Redis-read
+# latency (the correlator re-reads the matrix on every anomaly event).
+# Twenty rules is already generous for pairwise severity combinations
+# (there are only 6 unique combinations in the default matrix).
+MAX_ESCALATION_RULES = 20
+MAX_ESCALATION_RULE_KEY_LEN = 32
+MAX_ESCALATION_VERSION_LEN = 32
+
+
+def _validate_escalation_rules(rules: dict[str, str]) -> str | None:
+    """Return an error message if rules fail shape validation, else None."""
+    if not isinstance(rules, dict):
+        return "rules must be a dict"
+    if len(rules) > MAX_ESCALATION_RULES:
+        return f"too many rules: {len(rules)} (max {MAX_ESCALATION_RULES})"
+    for key, value in rules.items():
+        if not isinstance(key, str) or "+" not in key:
+            return f"invalid rule key (expected 'A+B'): {key!r}"
+        if len(key) > MAX_ESCALATION_RULE_KEY_LEN:
+            return (
+                f"rule key too long: {len(key)} chars "
+                f"(max {MAX_ESCALATION_RULE_KEY_LEN})"
+            )
+        parts = key.split("+")
+        if not all(p in _VALID_SEVERITIES for p in parts):
+            return (
+                f"invalid severity in rule key {key!r}: "
+                f"each part must be one of {sorted(_VALID_SEVERITIES)}"
+            )
+        if not isinstance(value, str) or value not in _VALID_SEVERITIES:
+            return (
+                f"invalid rule value for {key!r}: "
+                f"must be one of {sorted(_VALID_SEVERITIES)}, got {value!r}"
+            )
+    return None
+
+
+@mcp.tool()
+def set_escalation_matrix(
+    rules: dict[str, str],
+    version: str = "1.0",
+) -> dict[str, Any]:
+    """Write a new escalation matrix to Redis for runtime tuning."""
+    # R2-SEC-01: the version string is written to Redis as part of the
+    # matrix JSON and the correlator re-reads the matrix on every anomaly
+    # event. An unbounded version string would amplify the per-event
+    # Redis read+deserialize cost. Cap it.
+    if not isinstance(version, str):
+        return {"error": f"version must be a string, got {type(version).__name__}"}
+    if len(version) > MAX_ESCALATION_VERSION_LEN:
+        return {
+            "error": (
+                f"version string too long: {len(version)} chars "
+                f"(max {MAX_ESCALATION_VERSION_LEN})"
+            )
+        }
+
+    err = _validate_escalation_rules(rules)
+    if err is not None:
+        return {"error": err}
+
+    matrix = {"version": version, "rules": rules}
+    try:
+        with _persistence_ctx() as pm:
+            pm.save_escalation_matrix(matrix)
+        return {"status": "saved", "matrix": matrix}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 # ===========================================================================
 # Control tools
 # ===========================================================================
@@ -606,17 +798,21 @@ async def trigger_reflection(session_id: str | None = None) -> dict[str, Any]:
     Returns:
         Dict with 'status' and 'session_id'.
     """
+    # Resolve session id first (may need a Redis read).
+    sid = session_id
+    if sid is None:
+        try:
+            with _persistence_ctx() as pm:
+                current = pm.load_current_session()
+            if current is not None:
+                sid = current.get("session_id")
+        except Exception as exc:
+            return {"status": "error", "error": f"Redis read failed: {exc}"}
+
+    payload = json.dumps({"session_id": sid}).encode()
+
+    # LEAK-04: guarantee nc.close() even if publish raises.
     try:
-        r = _get_redis()
-        sid = session_id
-        if sid is None:
-            raw_session = r.get("augur:session:current")
-            if raw_session is not None:
-                session_data = json.loads(raw_session)
-                sid = session_data.get("session_id")
-
-        payload = json.dumps({"session_id": sid}).encode()
-
         nc = await asyncio.wait_for(
             nats_client.connect(
                 _config.nats_url,
@@ -624,12 +820,19 @@ async def trigger_reflection(session_id: str | None = None) -> dict[str, Any]:
             ),
             timeout=_config.nats_connect_timeout + 1,
         )
-        await nc.publish("augur.reflect.trigger", payload)
-        await nc.close()
+    except Exception as exc:
+        return {"status": "error", "error": f"NATS connect failed: {exc}"}
 
+    try:
+        await nc.publish("augur.reflect.trigger", payload)
         return {"status": "triggered", "session_id": sid}
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
+    finally:
+        try:
+            await nc.close()
+        except Exception as exc:
+            log.debug("NATS close failed after trigger_reflection: %s", exc)
 
 
 @mcp.tool()
@@ -648,12 +851,12 @@ def flush_state(confirm: bool = False) -> dict[str, Any]:
             "reason": "Pass confirm=True to actually flush Redis state.",
         }
     try:
-        r = _get_redis()
-        keys = r.keys("augur:*")
-        if keys:
-            deleted = r.delete(*keys)
-        else:
-            deleted = 0
+        with _redis_ctx() as r:
+            keys = r.keys("augur:*")
+            if keys:
+                deleted = r.delete(*keys)
+            else:
+                deleted = 0
         return {"status": "flushed", "deleted_count": deleted}
     except Exception as exc:
         return {"status": "error", "error": str(exc)}

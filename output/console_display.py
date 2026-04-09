@@ -50,6 +50,7 @@ BG_YELLOW = "\033[43m"
 # ---------------------------------------------------------------------------
 SUBJECT_ANOMALY = "augur.detection.anomaly"
 SUBJECT_ADVICE = "augur.reasoning.advice"
+SUBJECT_CORRELATION = "augur.correlation.detected"
 SUBJECT_REFLECT = "augur.reflect.complete"
 WRAP_WIDTH = 80
 
@@ -86,6 +87,108 @@ def render_anomaly_line(data: dict) -> str:
         f"{FG_GRAY}{player} played {move}  "
         f"think={think:.1f}s  dev={dev:.1f}σ{RESET}"
     )
+
+
+def render_correlation(data: dict) -> str:
+    """Block render for a correlation event from augur.correlation.detected.
+
+    Correlated event: multi-domain MEDIUM/HIGH block with contributing signals.
+    Pass-through event: single-domain block identifying it as standalone.
+    """
+    primary = data.get("primary_anomaly", {})
+    correlated = data.get("correlated_events", [])
+    combined = str(data.get("combined_severity", "?")).upper()
+    rule = data.get("escalation_rule")
+
+    color_map = {
+        "LOW": FG_GREEN,
+        "MEDIUM": FG_YELLOW + BOLD,
+        "HIGH": FG_RED + BOLD,
+    }
+    color = color_map.get(combined, FG_WHITE)
+    badge = f"{color}[{combined}]{RESET}"
+
+    if data.get("correlation_found"):
+        all_domains = [primary.get("domain", "?")] + [
+            e.get("domain", "?") for e in correlated
+        ]
+        header = (
+            f"{BOLD}\u26a0 CORRELATION{RESET} {badge}  "
+            f"{FG_CYAN}{' + '.join(all_domains)}{RESET}"
+        )
+        lag = data.get("temporal_lag_seconds")
+        lag_line = (
+            f"  {FG_GRAY}Temporal lag: {lag}s" if lag is not None else f"  {FG_GRAY}"
+        )
+        if rule:
+            lag_line += f"   rule: {rule}{RESET}"
+        else:
+            lag_line += f"{RESET}"
+
+        sig_lines: list[str] = []
+        for ev in [primary, *correlated]:
+            d = ev.get("domain", "?")
+            e = ev.get("entity", "?")
+            v = ev.get("value", "?")
+            b = ev.get("baseline_mean", "?")
+            dev = ev.get("deviation_score", "?")
+            sig_lines.append(
+                f"  {FG_WHITE}{d}{RESET}/{e}: value={v} baseline={b} dev={dev}\u03c3"
+            )
+
+        return "\n".join(
+            [
+                "",
+                THICK_SEPARATOR,
+                header,
+                SEPARATOR,
+                lag_line,
+                *sig_lines,
+                THICK_SEPARATOR,
+                "",
+            ]
+        )
+
+    # Pass-through (standalone medium/high — no correlation)
+    domain = primary.get("domain", "?")
+    entity = primary.get("entity", "?")
+    value = primary.get("value", "?")
+    baseline = primary.get("baseline_mean", "?")
+    dev = primary.get("deviation_score", "?")
+    return "\n".join(
+        [
+            "",
+            THICK_SEPARATOR,
+            f"  {BOLD}STANDALONE{RESET} {badge}  {FG_CYAN}{domain}{RESET}/{entity}",
+            SEPARATOR,
+            f"  value={value}  baseline={baseline}  dev={dev}\u03c3",
+            THICK_SEPARATOR,
+            "",
+        ]
+    )
+
+
+def dedup_should_suppress(last_rendered: dict, anomaly: dict) -> bool:
+    """Return True if this anomaly was already rendered as a low-severity one-liner.
+
+    Matches on (domain, entity, timestamp) — all three must agree to suppress.
+    """
+    domain = anomaly.get("domain")
+    if domain is None:
+        return False
+    prev = last_rendered.get(domain)
+    if prev is None:
+        return False
+    prev_entity, prev_ts = prev
+    return prev_entity == anomaly.get("entity") and prev_ts == anomaly.get("timestamp")
+
+
+def update_last_rendered(last_rendered: dict, anomaly: dict) -> None:
+    """Record this anomaly as the last rendered one-liner for its domain."""
+    domain = anomaly.get("domain")
+    if domain is None:
+        return
+    last_rendered[domain] = (anomaly.get("entity"), anomaly.get("timestamp"))
 
 
 def render_advice(data: dict) -> str:
@@ -212,6 +315,7 @@ BANNER = f"""{FG_CYAN}{BOLD}
 {RESET}
 {FG_GRAY}  Listening for events...
   ├─ {FG_GREEN}anomalies{FG_GRAY}    →  {SUBJECT_ANOMALY}
+  ├─ {FG_YELLOW}correlations{FG_GRAY} →  {SUBJECT_CORRELATION}
   ├─ {FG_CYAN}advice{FG_GRAY}       →  {SUBJECT_ADVICE}
   └─ {FG_YELLOW}reflection{FG_GRAY}   →  {SUBJECT_REFLECT}
 {RESET}"""
@@ -227,6 +331,8 @@ async def run() -> None:
         config.nats_url, connect_timeout=config.nats_connect_timeout
     )
 
+    last_rendered: dict[str, tuple[str, str]] = {}
+
     print(BANNER, flush=True)
 
     async def on_anomaly(msg: nats.aio.client.Msg) -> None:
@@ -238,6 +344,23 @@ async def run() -> None:
         severity = data.get("severity", "low")
         if severity == "low":
             print(render_anomaly_line(data), flush=True)
+            update_last_rendered(last_rendered, data)
+
+    async def on_correlation(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = json.loads(msg.data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        primary = data.get("primary_anomaly", {})
+        if dedup_should_suppress(last_rendered, primary):
+            # The primary already showed as a low-severity one-liner
+            # when it first arrived on augur.detection.anomaly — do not
+            # render it again as part of the correlation block.
+            # The correlation block still prints (this flag only
+            # suppresses the earlier one-liner's retention).
+            pass
+        print(render_correlation(data), flush=True)
 
     async def on_advice(msg: nats.aio.client.Msg) -> None:
         try:
@@ -255,9 +378,13 @@ async def run() -> None:
 
         print(render_reflection(data), flush=True)
 
-    await nc.subscribe(SUBJECT_ANOMALY, cb=on_anomaly)
-    await nc.subscribe(SUBJECT_ADVICE, cb=on_advice)
-    await nc.subscribe(SUBJECT_REFLECT, cb=on_reflection)
+    # LEAK-07: save subscription handles so unsubscribe() is called on
+    # shutdown rather than relying on nc.close() to tear them down abruptly
+    # mid-render.
+    sub_anomaly = await nc.subscribe(SUBJECT_ANOMALY, cb=on_anomaly)
+    sub_correlation = await nc.subscribe(SUBJECT_CORRELATION, cb=on_correlation)
+    sub_advice = await nc.subscribe(SUBJECT_ADVICE, cb=on_advice)
+    sub_reflect = await nc.subscribe(SUBJECT_REFLECT, cb=on_reflection)
 
     try:
         while True:
@@ -265,6 +392,13 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        try:
+            await sub_anomaly.unsubscribe()
+            await sub_correlation.unsubscribe()
+            await sub_advice.unsubscribe()
+            await sub_reflect.unsubscribe()
+        except Exception as exc:
+            log.debug("Unsubscribe failed during shutdown: %s", exc)
         await nc.close()
 
 

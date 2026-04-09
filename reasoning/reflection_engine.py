@@ -1,14 +1,16 @@
 """Session reflection engine — self-adjusts Augur parameters after each session.
 
 Triggers on augur.feedback.complete (end of feedback collection) or
-augur.reflect.trigger (manual). Runs three analyses:
+augur.reflect.trigger (manual). Runs four analyses:
 
 1. Precision  — Were anomaly detections accurate? Adjusts sigma threshold.
 2. Utility    — Was the advice useful? May mutate LLM prompt via Ollama.
 3. Counterfactual — Would +-10% threshold variants have been better?
+4. Correlation tuning — Per-rule EWMA confidence with hysteresis to
+   tune the cross-domain escalation matrix.
 
 Publishes a reflection report to augur.reflect.complete and persists
-it in Redis at augur:reflect:<session_id>.
+it via PersistenceManager.save_reflection.
 """
 
 from __future__ import annotations
@@ -19,8 +21,10 @@ import logging
 import math
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any  # noqa: F401 — used in PEP-563 deferred annotations
 
 import httpx
 import nats
@@ -28,7 +32,9 @@ import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from blackboard.config import AugurConfig
+from blackboard.connections import connect_redis
 from blackboard.persistence import PersistenceManager
+from reasoning.correlator import DEFAULT_ESCALATION_MATRIX
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -46,8 +52,32 @@ SUBJECT_FEEDBACK_COMPLETE = "augur.feedback.complete"
 SUBJECT_REFLECT_TRIGGER = "augur.reflect.trigger"
 SUBJECT_REFLECT_COMPLETE = "augur.reflect.complete"
 
-# Default domain for chess
+# Fallback domain used only when a session's feedback contains no usable
+# standalone advice events. Per-session domain is now derived from
+# feedback.advice_events instead of being hardcoded (ARCH-06 fix). Previous
+# behaviour silently applied chess-domain threshold and prompt tuning to
+# typing-only sessions.
 DEFAULT_DOMAIN = "chess"
+
+
+def _derive_domain(feedback: dict) -> str:
+    """Pick a domain for threshold/prompt tuning from the session's feedback.
+
+    Only standalone (non-correlated) advice events contribute, because the
+    correlation path does not use stored prompts or per-domain sigma
+    thresholds. Returns the most common domain among those events, or
+    ``DEFAULT_DOMAIN`` if the session had no attributable standalone events.
+    """
+    standalone_domains = [
+        ev.get("domain")
+        for ev in feedback.get("advice_events", [])
+        if ev.get("domain") and not ev.get("correlation_found")
+    ]
+    if not standalone_domains:
+        return DEFAULT_DOMAIN
+    most_common, _count = Counter(standalone_domains).most_common(1)[0]
+    return most_common
+
 
 # ---------------------------------------------------------------------------
 # Precision analysis
@@ -133,11 +163,20 @@ def analyze_utility(feedback: dict, config: AugurConfig) -> dict:
 
     Weighted score: 60% explicit, 40% behavioral.
     If utility < config.utility_mutation_threshold, flags for prompt mutation.
+
+    Excludes correlated advice events (correlation_found=True) because
+    prompt mutation only affects the single-domain DOMAIN_HANDLERS path;
+    the correlation path uses build_correlation_prompt which is
+    self-contained and not managed by PersistenceManager.save_prompt.
     """
-    advice_events = feedback.get("advice_events", [])
+    # Filter out correlated advice before computing the score that drives
+    # prompt mutation. The correlation path is tuned by the matrix tuning
+    # analysis in a later step of run_reflection, not by prompt mutation.
+    all_events = feedback.get("advice_events", [])
+    advice_events = [e for e in all_events if not e.get("correlation_found")]
     summary = feedback.get("session_summary", {})
 
-    total = summary.get("total_advice", len(advice_events))
+    total = len(advice_events)
     if total == 0:
         return {
             "analysis": "utility",
@@ -292,6 +331,190 @@ def analyze_counterfactual(
 
 
 # ---------------------------------------------------------------------------
+# Correlation matrix tuning (cross-domain escalation rule tuning)
+# ---------------------------------------------------------------------------
+
+
+def analyze_correlation_tuning(
+    feedback: dict,
+    current_matrix: dict,
+    current_confidence_state: dict,
+    config: AugurConfig,
+) -> dict[str, Any]:
+    """Tune the cross-domain escalation matrix via per-rule EWMA confidence.
+
+    For each correlated advice event with a valid rule_key, attribute the
+    feedback utility to that rule. Update a per-rule confidence state via
+    EWMA across sessions. Use two hysteresis thresholds to decide whether
+    to keep a rule at its current target, disable it (target=LOW), or
+    re-enable it (restore to snapshotted target).
+
+    Pure function: no Redis or NATS I/O. See design doc at
+    docs/superpowers/specs/2026-04-09-reflection-matrix-tuning-design.md
+    for the full algorithm specification.
+    """
+    if not config.correlation_tuning_enabled:
+        return {
+            "analysis": "correlation_tuning",
+            "disabled": True,
+            "reason": "Tuning disabled via AUGUR_CORRELATION_TUNING_ENABLED=false",
+        }
+
+    # Filter to correlated events with a valid rule_key
+    all_events = feedback.get("advice_events", [])
+    events_with_rule = [
+        e
+        for e in all_events
+        if e.get("correlation_found") is True and e.get("rule_key") is not None
+    ]
+
+    if not events_with_rule:
+        return {
+            "analysis": "correlation_tuning",
+            "rules_evaluated": 0,
+            "per_rule": {},
+            "new_confidence_state": dict(current_confidence_state),
+            "new_matrix": None,
+            "reason": "No correlated advice events with rule attribution",
+        }
+
+    # Group by rule_key
+    events_per_rule: dict[str, list[dict]] = {}
+    for ev in events_with_rule:
+        rk = ev["rule_key"]
+        events_per_rule.setdefault(rk, []).append(ev)
+
+    alpha = config.correlation_tuning_alpha
+    enable_t = config.correlation_tuning_enable_threshold
+    disable_t = config.correlation_tuning_disable_threshold
+
+    # Start with a shallow copy of the existing state so unchanged rules pass through.
+    updated_state: dict = {k: dict(v) for k, v in current_confidence_state.items()}
+    new_matrix_rules = dict(current_matrix.get("rules", {}))
+    per_rule_result: dict = {}
+    matrix_changed = False
+
+    explicit_map = {"y": 1.0, "n": 0.0, "no_response": 0.5}
+
+    for rule_key, events in events_per_rule.items():
+        # Per-rule session utility (60/40 explicit/behavioral)
+        explicit_scores = [
+            explicit_map.get(ev.get("explicit_rating", "no_response"), 0.5)
+            for ev in events
+        ]
+        explicit_avg = sum(explicit_scores) / len(explicit_scores)
+
+        behavioral_scores = [
+            ev.get("behavioral_score", 0.0)
+            for ev in events
+            if ev.get("behavioral_score", 0.0) > 0
+        ]
+        behavioral_avg = (
+            sum(behavioral_scores) / len(behavioral_scores)
+            if behavioral_scores
+            else 0.5
+        )
+
+        session_utility = 0.6 * explicit_avg + 0.4 * behavioral_avg
+
+        # Load previous state or initialize to 1.0 (presumed useful)
+        prev_state = updated_state.get(
+            rule_key, {"confidence": 1.0, "restore_target": None}
+        )
+        prev_conf = prev_state["confidence"]
+        prev_restore = prev_state.get("restore_target")
+
+        # EWMA update, rounded to 3 decimals for deterministic comparison
+        new_conf = round((1 - alpha) * prev_conf + alpha * session_utility, 3)
+
+        # Current target in the matrix (may differ from default due to past tuning
+        # or manual MCP edits). "LOW" fallback for rules not in the matrix.
+        current_target = new_matrix_rules.get(rule_key, "LOW")
+
+        # Derive new target via hysteresis + restore_target snapshot
+        if new_conf >= enable_t:
+            if current_target == "LOW":
+                # Recovering from disabled — restore to snapshot (or current if no snapshot)
+                new_target = (
+                    prev_restore if prev_restore is not None else current_target
+                )
+            else:
+                # Already enabled — track the live matrix value so manual edits propagate
+                new_target = current_target
+            # Refresh the snapshot to track the current live target
+            new_restore = new_target
+        elif new_conf < disable_t:
+            # Disable
+            new_target = "LOW"
+            if prev_restore is not None:
+                new_restore = prev_restore
+            else:
+                # First-ever disable — capture current_target (unless it's already LOW)
+                new_restore = current_target if current_target != "LOW" else None
+        else:
+            # Hysteresis band — freeze target and restore_target
+            new_target = current_target
+            new_restore = prev_restore
+
+        # Classify action based on target change
+        if current_target == "LOW" and new_target != "LOW":
+            action = "re-enabled"
+        elif current_target != "LOW" and new_target == "LOW":
+            action = "disabled"
+        else:
+            action = "tracked"
+
+        # Track matrix mutation
+        if new_target != current_target:
+            new_matrix_rules[rule_key] = new_target
+            matrix_changed = True
+
+        # Update state
+        updated_state[rule_key] = {
+            "confidence": new_conf,
+            "restore_target": new_restore,
+        }
+
+        per_rule_result[rule_key] = {
+            "session_utility": round(session_utility, 3),
+            "event_count": len(events),
+            "confidence_before": prev_conf,
+            "confidence_after": new_conf,
+            "target_before": current_target,
+            "target_after": new_target,
+            "restore_target_before": prev_restore,
+            "restore_target_after": new_restore,
+            "action": action,
+        }
+
+    # Build the new_matrix dict if anything changed
+    if matrix_changed:
+        new_matrix: dict | None = {
+            "version": current_matrix.get("version", "1.0"),
+            "rules": new_matrix_rules,
+        }
+    else:
+        new_matrix = None
+
+    # Build a summary reason string
+    reason_parts = [
+        f"{rk} conf {r['confidence_before']}->{r['confidence_after']}, "
+        f"{r['target_before']}->{r['target_after']} ({r['action']})"
+        for rk, r in per_rule_result.items()
+    ]
+    reason = "; ".join(reason_parts) if reason_parts else "No rules updated"
+
+    return {
+        "analysis": "correlation_tuning",
+        "rules_evaluated": len(events_per_rule),
+        "per_rule": per_rule_result,
+        "new_confidence_state": updated_state,
+        "new_matrix": new_matrix,
+        "reason": reason,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Prompt mutation via Ollama
 # ---------------------------------------------------------------------------
 
@@ -381,10 +604,14 @@ async def run_reflection(
     http_client: httpx.AsyncClient,
     nc: nats.aio.client.Client,
     config: AugurConfig,
-) -> dict:
-    """Execute all three analyses and build the reflection report."""
-    domain = DEFAULT_DOMAIN
-    log.info("Starting reflection for session %s", session_id)
+) -> dict[str, Any]:
+    """Execute all four analyses and build the reflection report."""
+    domain = _derive_domain(feedback)
+    log.info(
+        "Starting reflection for session %s (derived domain=%s)",
+        session_id,
+        domain,
+    )
 
     # Load current thresholds
     stored_thresholds = pm.load_thresholds(domain)
@@ -430,6 +657,48 @@ async def run_reflection(
     counterfactual = analyze_counterfactual(pm, domain, current_thresholds)
     log.info("Counterfactual: %s", counterfactual["recommendation"])
 
+    # 4. Correlation matrix tuning
+    tuning: dict[str, Any]
+    if pm.is_tuning_applied(session_id):
+        log.info(
+            "Skipping correlation tuning — already applied for session %s",
+            session_id,
+        )
+        tuning = {
+            "analysis": "correlation_tuning",
+            "skipped": True,
+            "reason": "already_applied_for_session",
+        }
+    else:
+        current_matrix = pm.load_escalation_matrix() or DEFAULT_ESCALATION_MATRIX
+        current_confidence_state = pm.load_rule_confidence() or {}
+        tuning = analyze_correlation_tuning(
+            feedback, current_matrix, current_confidence_state, config
+        )
+        log.info("Correlation tuning: %s", tuning.get("reason", "no reason"))
+
+        if tuning.get("rules_evaluated", 0) > 0:
+            # BUG-03: save confidence + mark_applied BEFORE the matrix save.
+            # If save_escalation_matrix raises, the confidence update is
+            # already persisted (not losable), and the marker prevents the
+            # next reflect-trigger from double-applying the same EWMA step
+            # to already-updated state. A failed matrix write is recoverable
+            # on the next session; double-updated confidence is not.
+            pm.save_rule_confidence(tuning["new_confidence_state"])
+            pm.mark_tuning_applied(session_id)
+            if tuning.get("new_matrix") is not None:
+                try:
+                    pm.save_escalation_matrix(tuning["new_matrix"])
+                    log.info(
+                        "Escalation matrix updated by reflection engine: %s",
+                        tuning["reason"],
+                    )
+                except redis.RedisError as exc:
+                    log.error(
+                        "Matrix save failed (confidence was saved, marker set): %s",
+                        exc,
+                    )
+
     # Build report
     report = {
         "session_id": session_id,
@@ -438,23 +707,25 @@ async def run_reflection(
             "precision": precision,
             "utility": utility,
             "counterfactual": counterfactual,
+            "correlation_tuning": tuning,
         },
         "adjustments": {
             "sigma_adjusted": precision["action"] != "none",
             "sigma_value": precision["sigma_after"],
             "prompt_mutated": mutation_result is not None
             and mutation_result.get("mutated", False),
+            "matrix_mutated": tuning.get("new_matrix") is not None,
         },
     }
 
     if mutation_result:
         report["adjustments"]["mutation_details"] = mutation_result
 
-    # Persist to Redis
-    reflect_key = f"augur:reflect:{session_id}"
+    # Persist via PersistenceManager (ARCH-03: was a bare redis_client.set
+    # call that bypassed the persistence abstraction).
     try:
-        redis_client.set(reflect_key, json.dumps(report))
-        log.info("Saved reflection to %s", reflect_key)
+        pm.save_reflection(session_id, report)
+        log.info("Saved reflection report for session %s", session_id)
     except redis.RedisError as exc:
         log.error("Failed to persist reflection: %s", exc)
 
@@ -479,14 +750,7 @@ async def run_reflection(
 async def run() -> None:
     config = AugurConfig.from_env()
 
-    redis_client = redis.Redis(
-        host=config.redis_host,
-        port=config.redis_port,
-        socket_connect_timeout=config.redis_connect_timeout,
-    )
-    redis_client.ping()
-    log.info("Redis connected (%s)", config.redis_url)
-
+    redis_client = connect_redis(config)
     pm = PersistenceManager(redis_client)
 
     nc = await nats.connect(
@@ -512,8 +776,8 @@ async def run() -> None:
     async def on_feedback_complete(msg: nats.aio.client.Msg) -> None:
         try:
             data = json.loads(msg.data.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            log.warning("Bad feedback complete payload")
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            log.warning("Bad feedback complete payload: %s", exc)
             return
 
         session_id = data.get("session_id", "unknown")
@@ -539,7 +803,8 @@ async def run() -> None:
         """Manual trigger — accepts {session_id} or runs on latest session."""
         try:
             data = json.loads(msg.data.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            log.debug("Trigger payload unparseable, using empty: %s", exc)
             data = {}
 
         session_id = data.get("session_id")
@@ -569,8 +834,12 @@ async def run() -> None:
                 session_id, feedback, pm, redis_client, http_client, nc, config
             )
 
-    await nc.subscribe(SUBJECT_FEEDBACK_COMPLETE, cb=on_feedback_complete)
-    await nc.subscribe(SUBJECT_REFLECT_TRIGGER, cb=on_trigger)
+    # LEAK-06: save subscription handles so we can unsubscribe on shutdown
+    # rather than relying on nc.close() to tear them down abruptly.
+    sub_feedback = await nc.subscribe(
+        SUBJECT_FEEDBACK_COMPLETE, cb=on_feedback_complete
+    )
+    sub_trigger = await nc.subscribe(SUBJECT_REFLECT_TRIGGER, cb=on_trigger)
 
     log.info(
         "Subscribed to: %s, %s", SUBJECT_FEEDBACK_COMPLETE, SUBJECT_REFLECT_TRIGGER
@@ -583,8 +852,16 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
     finally:
-        await http_client.aclose()
+        # LEAK-06: close NATS first (stop delivering messages to callbacks)
+        # before closing the HTTP client so an in-flight reflection cannot
+        # see a mid-shutdown "client is closed" error from Ollama.
+        try:
+            await sub_feedback.unsubscribe()
+            await sub_trigger.unsubscribe()
+        except Exception as exc:
+            log.debug("Unsubscribe failed during shutdown: %s", exc)
         await nc.close()
+        await http_client.aclose()
         log.info("Shut down cleanly")
 
 

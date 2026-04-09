@@ -7,12 +7,26 @@ Use AugurConfig.from_env() to allow AUGUR_* env-var overrides at deploy time.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import os
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
+log = logging.getLogger("augur.config")
+
 # Maps field name -> type coercion callable for from_env().
-_TYPE_COERCIONS: dict[str, type] = {}  # populated after class definition
+_TYPE_COERCIONS: dict[str, Callable[[str], Any]] = {}
+
+
+def _coerce_bool(raw: str) -> bool:
+    """Parse an env var string as a bool.
+
+    Truthy: ``true``, ``1``, ``yes``, ``on``, ``y`` (case-insensitive,
+    whitespace-stripped). Everything else — including the common footgun
+    of ``"false"`` — evaluates to False. This replaces the default
+    ``bool(raw)`` coercion which treats any non-empty string as True.
+    """
+    return raw.strip().lower() in {"true", "1", "yes", "on", "y"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -57,19 +71,42 @@ class AugurConfig:
     sigma_max: float = 5.0
     utility_mutation_threshold: float = 0.4
 
+    # ── Reflection: cross-domain matrix tuning ─────────────────────────────
+    correlation_tuning_enabled: bool = True
+    correlation_tuning_alpha: float = 0.2
+    correlation_tuning_enable_threshold: float = 0.6
+    correlation_tuning_disable_threshold: float = 0.3
+
     # ── Constructors ───────────────────────────────────────────────────────
 
     @classmethod
     def from_env(cls) -> AugurConfig:
-        """Build config from defaults, overridden by AUGUR_* environment variables."""
+        """Build config from defaults, overridden by AUGUR_* environment variables.
+
+        If an env var's value cannot be coerced to the field's type (e.g.,
+        ``AUGUR_OLLAMA_TIMEOUT=xyz``), the failure is logged as a warning
+        and the field keeps its default. This prevents a misconfigured env
+        var from crash-looping every component at startup.
+        """
         defaults = dataclasses.asdict(cls())
         overrides: dict[str, Any] = {}
         for field in dataclasses.fields(cls):
             env_key = f"AUGUR_{field.name.upper()}"
             raw = os.environ.get(env_key)
-            if raw is not None:
-                coerce = _TYPE_COERCIONS.get(field.name, str)
+            if raw is None:
+                continue
+            coerce = _TYPE_COERCIONS.get(field.name, str)
+            try:
                 overrides[field.name] = coerce(raw)
+            except (ValueError, TypeError) as exc:
+                log.warning(
+                    "%s=%r: coercion via %s failed (%s); using default %r",
+                    env_key,
+                    raw,
+                    getattr(coerce, "__name__", type(coerce).__name__),
+                    exc,
+                    defaults[field.name],
+                )
         return cls(**{**defaults, **overrides})
 
     # ── Convenience ────────────────────────────────────────────────────────
@@ -90,7 +127,16 @@ class AugurConfig:
 
 
 # Build the type-coercion map now that the class exists.
-_TYPE_COERCIONS = {
-    field.name: field.type if isinstance(field.type, type) else type(field.default)
-    for field in dataclasses.fields(AugurConfig)
-}
+#
+# Under ``from __future__ import annotations`` (PEP 563), field.type is a
+# *string*, so isinstance(field.type, type) is always False. Use the concrete
+# default value's type as the source of truth instead. bool fields get the
+# explicit string parser because bool("false") == True (Python treats any
+# non-empty string as truthy).
+_TYPE_COERCIONS = {}
+for _field in dataclasses.fields(AugurConfig):
+    _field_type = type(_field.default)
+    if _field_type is bool:
+        _TYPE_COERCIONS[_field.name] = _coerce_bool
+    else:
+        _TYPE_COERCIONS[_field.name] = _field_type

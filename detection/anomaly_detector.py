@@ -26,6 +26,7 @@ from river.anomaly import HalfSpaceTrees
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from blackboard.config import AugurConfig
+from blackboard.connections import connect_redis
 from blackboard.contracts import PerceptionEvent
 from blackboard.persistence import PersistenceManager
 
@@ -54,6 +55,16 @@ DEFAULT_THRESHOLDS = {
     "severity_medium_sigma": 2.5,
     "severity_high_sigma": 4.0,
 }
+
+# LEAK-10: cap on the in-memory baselines dict. The detector creates one
+# EntityBaseline per unique (domain, entity) pair seen on the wildcard
+# perception subject. Each EntityBaseline owns a River HalfSpaceTrees
+# model with 15 trees and a 50-sample window, so the per-entity memory
+# footprint is non-trivial. Without a cap, arbitrary entity names (e.g.,
+# from inject_sequence or malicious publishers) could balloon the dict.
+# When the cap is reached, new (domain, entity) pairs are logged and
+# dropped rather than creating a new baseline.
+MAX_BASELINE_ENTITIES = 10_000
 
 # ---------------------------------------------------------------------------
 # Per-entity baseline
@@ -187,14 +198,7 @@ def load_persisted_baselines(
 async def run() -> None:
     config = AugurConfig.from_env()
 
-    redis_client = redis.Redis(
-        host=config.redis_host,
-        port=config.redis_port,
-        socket_connect_timeout=config.redis_connect_timeout,
-    )
-    redis_client.ping()
-    log.info("Redis connected (%s)", config.redis_url)
-
+    redis_client = connect_redis(config)
     pm = PersistenceManager(redis_client)
 
     nc = await nats.connect(
@@ -222,7 +226,7 @@ async def run() -> None:
     async def on_event(msg: nats.aio.client.Msg) -> None:
         try:
             event = PerceptionEvent.from_json(msg.data)
-        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError) as exc:
+        except (ValueError, TypeError, UnicodeDecodeError) as exc:
             log.warning("Bad perception event: %s", exc)
             return
 
@@ -232,8 +236,18 @@ async def run() -> None:
         key = (domain, entity)
         th = get_thresholds(domain)
 
-        # Get or create baseline
+        # Get or create baseline. LEAK-10: refuse new entries once the
+        # cap is reached so the dict cannot grow unbounded under arbitrary
+        # entity names.
         if key not in baselines:
+            if len(baselines) >= MAX_BASELINE_ENTITIES:
+                log.warning(
+                    "Baseline cap reached (%d entities); dropping new %s/%s",
+                    MAX_BASELINE_ENTITIES,
+                    domain,
+                    entity,
+                )
+                return
             baselines[key] = EntityBaseline()
 
         bl = baselines[key]
@@ -337,8 +351,11 @@ async def run() -> None:
             log.error("  NATS publish failed: %s", exc)
 
         try:
-            redis_client.set(REDIS_KEY_ANOMALY, json.dumps(anomaly_payload))
-            log.info("  Wrote anomaly to Redis key %s", REDIS_KEY_ANOMALY)
+            # R2-ARCH-02: routed through PersistenceManager rather than
+            # a bare redis_client.set so the write path matches the
+            # read path (pm.load_last_anomaly).
+            pm.save_last_anomaly(anomaly_payload)
+            log.info("  Wrote anomaly to Redis via PersistenceManager")
         except redis.RedisError as exc:
             log.error("  Redis write failed: %s", exc)
 

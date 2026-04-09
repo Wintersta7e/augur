@@ -1,8 +1,12 @@
 services:
   redis:
     image: redis:7-alpine
+    # SEC-06: bind Redis to 127.0.0.1 only. Previously bound to all
+    # interfaces with no password, exposing all Augur state to any
+    # LAN-reachable host. Single-operator local use should not expose
+    # these ports beyond loopback.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     command: redis-server --appendonly yes
@@ -14,9 +18,13 @@ services:
 
   nats:
     image: nats:2-alpine
+    # SEC-05 / SEC-06: bind NATS client and monitoring ports to
+    # 127.0.0.1. The monitoring port (/varz, /connz, /subsz) discloses
+    # the full subscription topology, which should not be reachable
+    # from the LAN.
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
     command: --jetstream --store_dir /data --http_port 8222
     volumes:
       - nats-data:/data

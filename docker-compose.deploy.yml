@@ -12,6 +12,19 @@ services:
       AUGUR_REDIS_URL: redis://redis:6379
     restart: unless-stopped
 
+  correlator:
+    build: .
+    command: python -m reasoning.correlator
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      AUGUR_NATS_URL: nats://nats:4222
+      AUGUR_REDIS_URL: redis://redis:6379
+    restart: unless-stopped
+
   advisor:
     build: .
     command: python -m reasoning.augur_advisor
@@ -20,6 +33,8 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+      correlator:
+        condition: service_started
     environment:
       AUGUR_NATS_URL: nats://nats:4222
       AUGUR_REDIS_URL: redis://redis:6379

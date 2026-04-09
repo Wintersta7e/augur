@@ -20,6 +20,7 @@ import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from blackboard.config import AugurConfig
+from blackboard.connections import connect_redis
 from blackboard.contracts import PerceptionEvent
 from blackboard.persistence import PersistenceManager
 
@@ -68,6 +69,10 @@ class PendingAdvice:
         severity: str,
         baseline_mean: float,
         timestamp: str,
+        correlation_found: bool = False,
+        correlated_domains: list[str] | None = None,
+        rule_key: str | None = None,
+        escalation_rule: str | None = None,
     ) -> None:
         self.advice_id = advice_id
         self.domain = domain
@@ -79,6 +84,11 @@ class PendingAdvice:
         self.think_times_after: list[float] = []
         self.behavioral_score: float = 0.0
         self.finalized = False
+        # Correlation metadata (added for matrix tuning)
+        self.correlation_found = correlation_found
+        self.correlated_domains = correlated_domains or []
+        self.rule_key = rule_key
+        self.escalation_rule = escalation_rule
 
     def add_post_move(self, value: float) -> None:
         if len(self.think_times_after) < POST_ADVICE_TRACK_MOVES:
@@ -128,6 +138,11 @@ class PendingAdvice:
             "think_times_after": self.think_times_after,
             "baseline_mean_at_time": self.baseline_mean,
             "timestamp": self.timestamp,
+            # Correlation metadata (added for matrix tuning)
+            "correlation_found": self.correlation_found,
+            "correlated_domains": self.correlated_domains,
+            "rule_key": self.rule_key,
+            "escalation_rule": self.escalation_rule,
         }
 
 
@@ -136,12 +151,37 @@ class PendingAdvice:
 # ---------------------------------------------------------------------------
 
 
+import concurrent.futures
+
+# LEAK-08: use a dedicated single-worker executor for stdin reads so a
+# timed-out read that leaves a thread blocked on sys.stdin.readline does
+# not consume a slot in the default asyncio executor pool (which is shared
+# with every other loop.run_in_executor call). The dedicated executor
+# caps the collateral damage to one leaked thread per pending read.
+# The executor is intentionally module-global so it is reused across
+# multiple read_stdin_with_timeout calls and cleaned up at process exit.
+_stdin_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="augur-stdin"
+)
+
+
 async def read_stdin_with_timeout(timeout: float) -> str | None:
-    """Non-blocking stdin read with timeout. Returns None on timeout."""
+    """Non-blocking stdin read with timeout. Returns None on timeout.
+
+    NOTE: On Linux there is no portable way to cancel a blocking
+    ``sys.stdin.readline`` call once it has started. If this function
+    times out, the underlying thread remains blocked on readline until
+    the user eventually types something. We contain the damage by using
+    a dedicated single-worker executor (LEAK-08) so a stalled read does
+    not consume slots from the shared default pool; the next call will
+    queue behind the blocked thread if one is already outstanding, but
+    in practice users respond to at most one prompt at a time so queuing
+    is never observed during normal operation.
+    """
     loop = asyncio.get_event_loop()
     try:
         result = await asyncio.wait_for(
-            loop.run_in_executor(None, sys.stdin.readline),
+            loop.run_in_executor(_stdin_executor, sys.stdin.readline),
             timeout=timeout,
         )
         return result.strip().lower() if result else None
@@ -157,14 +197,8 @@ async def read_stdin_with_timeout(timeout: float) -> str | None:
 async def run() -> None:
     config = AugurConfig.from_env()
 
-    redis_client = redis.Redis(
-        host=config.redis_host,
-        port=config.redis_port,
-        socket_connect_timeout=config.redis_connect_timeout,
-    )
-    redis_client.ping()
-    log.info("Redis connected (%s)", config.redis_url)
-
+    # ARCH-11: shared connect_redis helper (previously inlined here).
+    redis_client = connect_redis(config)
     pm = PersistenceManager(redis_client)
 
     nc = await nats.connect(
@@ -231,6 +265,12 @@ async def run() -> None:
         move = data.get("move", "?")
         think_time = data.get("think_time", 0)
 
+        # Correlation metadata from the advisor (Phase 3B + matrix-tuning follow-up)
+        correlation_found = bool(data.get("correlation_found", False))
+        correlated_domains = data.get("correlated_domains") or []
+        rule_key = data.get("rule_key")
+        escalation_rule = data.get("escalation_rule")
+
         # Read baseline mean from Redis
         baseline_raw = pm.load_baseline(
             "chess",
@@ -248,8 +288,26 @@ async def run() -> None:
             severity=severity,
             baseline_mean=baseline_mean,
             timestamp=datetime.now(timezone.utc).isoformat(),
+            correlation_found=correlation_found,
+            correlated_domains=correlated_domains,
+            rule_key=rule_key,
+            escalation_rule=escalation_rule,
         )
         advice_events.append(pending)
+
+        # BUG-04: if there is already a pending advice tracked for this
+        # entity, finalize its behavioural score before replacing it.
+        # Without this, the displaced advice would stay at behavioural=0.0
+        # and finalized=False for the lifetime of the session, silently
+        # corrupting the feedback record used by the reflection engine.
+        displaced = active_tracking.get(entity)
+        if displaced is not None and not displaced.finalized:
+            displaced._compute_behavioral_score()
+            log.debug(
+                "Finalized displaced pending advice %s before overwriting %s",
+                displaced.advice_id,
+                entity,
+            )
         active_tracking[entity] = pending
 
         log.info(
@@ -290,7 +348,8 @@ async def run() -> None:
     async def on_perception(msg: nats.aio.client.Msg) -> None:
         try:
             event = PerceptionEvent.from_json(msg.data)
-        except (json.JSONDecodeError, TypeError, KeyError):
+        except (ValueError, TypeError, UnicodeDecodeError) as exc:
+            log.debug("Skipping bad perception event in feedback tracker: %s", exc)
             return
 
         entity = event.entity
@@ -360,9 +419,14 @@ async def run() -> None:
             log.error("Failed to publish feedback complete: %s", exc)
 
     # -- Subscribe -----------------------------------------------------------
-    await nc.subscribe(SUBJECT_ADVICE, cb=on_advice)
-    await nc.subscribe(SUBJECT_PERCEPTION, cb=on_perception)
-    await nc.subscribe(SUBJECT_SESSION_END, cb=on_session_end)
+    # R2-LEAK-01: save subscription handles so unsubscribe() is called on
+    # shutdown rather than relying on nc.close() to tear them down abruptly.
+    # This matches the pattern in correlator.py, reflection_engine.py,
+    # console_display.py, and anomaly_detector.py — feedback_collector was
+    # missed in Round 1's LEAK-05/06/07 batch.
+    sub_advice = await nc.subscribe(SUBJECT_ADVICE, cb=on_advice)
+    sub_perception = await nc.subscribe(SUBJECT_PERCEPTION, cb=on_perception)
+    sub_session_end = await nc.subscribe(SUBJECT_SESSION_END, cb=on_session_end)
 
     log.info(
         "Subscribed to: %s, %s, %s",
@@ -378,6 +442,12 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        try:
+            await sub_advice.unsubscribe()
+            await sub_perception.unsubscribe()
+            await sub_session_end.unsubscribe()
+        except Exception as exc:
+            log.debug("Unsubscribe failed during shutdown: %s", exc)
         await nc.close()
         log.info("Shut down cleanly")
 

@@ -16,6 +16,8 @@ import pygame
 import redis
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
+from blackboard.config import AugurConfig
+from blackboard.connections import connect_redis
 from blackboard.contracts import PerceptionEvent
 from blackboard.session import SessionManager
 
@@ -45,8 +47,18 @@ COLOR_TEXT = pygame.Color("#FFFFFF")
 COLOR_CHECK = pygame.Color(235, 64, 52, 180)
 
 PIECE_UNICODE: dict[str, str] = {
-    "P": "\u2659", "N": "\u2658", "B": "\u2657", "R": "\u2656", "Q": "\u2655", "K": "\u2654",
-    "p": "\u265F", "n": "\u265E", "b": "\u265D", "r": "\u265C", "q": "\u265B", "k": "\u265A",
+    "P": "\u2659",
+    "N": "\u2658",
+    "B": "\u2657",
+    "R": "\u2656",
+    "Q": "\u2655",
+    "K": "\u2654",
+    "p": "\u265f",
+    "n": "\u265e",
+    "b": "\u265d",
+    "r": "\u265c",
+    "q": "\u265b",
+    "k": "\u265a",
 }
 
 REDIS_KEY_LAST = "augur:chess:last_move"
@@ -57,12 +69,9 @@ NATS_SUBJECT = "augur.perception.chess"
 # ---------------------------------------------------------------------------
 # Redis helpers
 # ---------------------------------------------------------------------------
-
-def connect_redis() -> redis.Redis:
-    client = redis.Redis(host="localhost", port=6379, socket_connect_timeout=5)
-    client.ping()
-    log.info("Redis connected")
-    return client
+#
+# ARCH-11: the local connect_redis wrapper was deleted; callers now use
+# the shared helper from blackboard.connections (imported above).
 
 
 def publish_move_redis(r: redis.Redis, payload: dict) -> None:
@@ -72,14 +81,17 @@ def publish_move_redis(r: redis.Redis, payload: dict) -> None:
     r.ltrim(REDIS_KEY_HISTORY, 0, REDIS_HISTORY_MAX - 1)
     log.info("Redis: wrote move %s", payload["move_san"])
 
+
 # ---------------------------------------------------------------------------
 # NATS helpers (async, run from sync context via event loop)
 # ---------------------------------------------------------------------------
 
+
 class NatsPublisher:
     """Thin wrapper that keeps a NATS connection open for the session."""
 
-    def __init__(self) -> None:
+    def __init__(self, config: AugurConfig) -> None:
+        self._config = config
         self._nc: Optional[nats.NATS] = None
         self._loop = asyncio.new_event_loop()
 
@@ -88,8 +100,13 @@ class NatsPublisher:
         self._loop.run_until_complete(self._async_connect())
 
     async def _async_connect(self) -> None:
-        self._nc = await nats.connect("nats://localhost:4222", connect_timeout=5)
-        log.info("NATS connected")
+        # ARCH-04: use AugurConfig instead of hardcoded localhost so Docker
+        # deploy mode (where NATS runs as a named container) works.
+        self._nc = await nats.connect(
+            self._config.nats_url,
+            connect_timeout=self._config.nats_connect_timeout,
+        )
+        log.info("NATS connected (%s)", self._config.nats_url)
 
     def close(self) -> None:
         if self._nc:
@@ -107,11 +124,15 @@ class NatsPublisher:
         await self._nc.publish(subject, json.dumps(payload).encode())
         log.info("NATS: published to %s", subject)
 
+
 # ---------------------------------------------------------------------------
 # Drawing helpers
 # ---------------------------------------------------------------------------
 
-def draw_board(surface: pygame.Surface, selected_sq: Optional[int], board: chess.Board) -> None:
+
+def draw_board(
+    surface: pygame.Surface, selected_sq: Optional[int], board: chess.Board
+) -> None:
     """Draw the 8x8 board squares, highlights, and check indicator."""
     for sq in range(64):
         rank, file = divmod(sq, 8)
@@ -146,13 +167,17 @@ def draw_board(surface: pygame.Surface, selected_sq: Optional[int], board: chess
                 dot_surf = pygame.Surface((SQUARE_SIZE, SQUARE_SIZE), pygame.SRCALPHA)
                 radius = SQUARE_SIZE // 6
                 pygame.draw.circle(
-                    dot_surf, COLOR_LEGAL,
-                    (SQUARE_SIZE // 2, SQUARE_SIZE // 2), radius,
+                    dot_surf,
+                    COLOR_LEGAL,
+                    (SQUARE_SIZE // 2, SQUARE_SIZE // 2),
+                    radius,
                 )
                 surface.blit(dot_surf, (tf * SQUARE_SIZE, (7 - tr) * SQUARE_SIZE))
 
 
-def draw_pieces(surface: pygame.Surface, board: chess.Board, font: pygame.font.Font) -> None:
+def draw_pieces(
+    surface: pygame.Surface, board: chess.Board, font: pygame.font.Font
+) -> None:
     """Draw Unicode chess pieces on the board."""
     for sq in range(64):
         piece = board.piece_at(sq)
@@ -163,15 +188,32 @@ def draw_pieces(surface: pygame.Surface, board: chess.Board, font: pygame.font.F
         rank = chess.square_rank(sq)
         x = file * SQUARE_SIZE + SQUARE_SIZE // 2
         y = (7 - rank) * SQUARE_SIZE + SQUARE_SIZE // 2
-        text = font.render(char, True, pygame.Color("black") if piece.color == chess.BLACK else pygame.Color("white"))
+        text = font.render(
+            char,
+            True,
+            pygame.Color("black")
+            if piece.color == chess.BLACK
+            else pygame.Color("white"),
+        )
         # Outline for contrast
-        outline = font.render(char, True, pygame.Color("white") if piece.color == chess.BLACK else pygame.Color("black"))
+        outline = font.render(
+            char,
+            True,
+            pygame.Color("white")
+            if piece.color == chess.BLACK
+            else pygame.Color("black"),
+        )
         for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
             surface.blit(outline, outline.get_rect(center=(x + dx, y + dy)))
         surface.blit(text, text.get_rect(center=(x, y)))
 
 
-def draw_info(surface: pygame.Surface, board: chess.Board, font: pygame.font.Font, think_start: float) -> None:
+def draw_info(
+    surface: pygame.Surface,
+    board: chess.Board,
+    font: pygame.font.Font,
+    think_start: float,
+) -> None:
     """Draw the status bar below the board."""
     bar_rect = pygame.Rect(0, BOARD_PX, BOARD_PX, INFO_HEIGHT)
     pygame.draw.rect(surface, COLOR_BG, bar_rect)
@@ -203,15 +245,22 @@ def sq_from_pixel(x: int, y: int) -> int:
     rank = 7 - (y // SQUARE_SIZE)
     return chess.square(file, rank)
 
+
 # ---------------------------------------------------------------------------
 # Promotion dialog
 # ---------------------------------------------------------------------------
 
-def ask_promotion(surface: pygame.Surface, color: chess.Color, piece_font: pygame.font.Font) -> chess.PieceType:
+
+def ask_promotion(
+    surface: pygame.Surface, color: chess.Color, piece_font: pygame.font.Font
+) -> chess.PieceType:
     """Show a simple 4-square overlay for promotion selection."""
     choices = [chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT]
     symbols = {
-        chess.QUEEN: "Q", chess.ROOK: "R", chess.BISHOP: "B", chess.KNIGHT: "N",
+        chess.QUEEN: "Q",
+        chess.ROOK: "R",
+        chess.BISHOP: "B",
+        chess.KNIGHT: "N",
     }
     overlay = pygame.Surface((SQUARE_SIZE * 4, SQUARE_SIZE), pygame.SRCALPHA)
     overlay.fill(pygame.Color(50, 50, 50, 220))
@@ -242,9 +291,11 @@ def ask_promotion(surface: pygame.Surface, color: chess.Color, piece_font: pygam
                     if r.collidepoint(event.pos):
                         return choices[i]
 
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     pygame.init()
@@ -255,14 +306,17 @@ def main() -> None:
     piece_font = pygame.font.SysFont("segoeuisymbol,dejavusans,noto", SQUARE_SIZE - 12)
     info_font = pygame.font.SysFont("consolas,dejavusansmono,monospace", 18)
 
-    # Infrastructure connections
+    # Infrastructure connections (ARCH-04: routed through AugurConfig so
+    # Docker deploy mode picks up the container network addresses).
+    config = AugurConfig.from_env()
+
     try:
-        redis_client = connect_redis()
+        redis_client = connect_redis(config)
     except redis.ConnectionError as exc:
         log.error("Cannot connect to Redis: %s", exc)
         sys.exit(1)
 
-    nats_pub = NatsPublisher()
+    nats_pub = NatsPublisher(config)
     try:
         nats_pub.connect()
     except Exception as exc:
@@ -275,11 +329,14 @@ def main() -> None:
 
     # Publish session start to NATS
     try:
-        nats_pub.publish("augur.session.start", {
-            "session_id": session_id,
-            "domain": "chess",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+        nats_pub.publish(
+            "augur.session.start",
+            {
+                "session_id": session_id,
+                "domain": "chess",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
     except Exception as exc:
         log.error("Failed to publish session start: %s", exc)
 
@@ -333,12 +390,17 @@ def main() -> None:
                     promotion = None
                     if piece and piece.piece_type == chess.PAWN:
                         target_rank = chess.square_rank(clicked_sq)
-                        if (piece.color == chess.WHITE and target_rank == 7) or \
-                           (piece.color == chess.BLACK and target_rank == 0):
+                        if (piece.color == chess.WHITE and target_rank == 7) or (
+                            piece.color == chess.BLACK and target_rank == 0
+                        ):
                             # Only ask if the move is potentially legal
-                            test_move = chess.Move(selected_sq, clicked_sq, promotion=chess.QUEEN)
+                            test_move = chess.Move(
+                                selected_sq, clicked_sq, promotion=chess.QUEEN
+                            )
                             if test_move in board.legal_moves:
-                                promotion = ask_promotion(screen, board.turn, piece_font)
+                                promotion = ask_promotion(
+                                    screen, board.turn, piece_font
+                                )
 
                     move = chess.Move(selected_sq, clicked_sq, promotion=promotion)
 
@@ -410,11 +472,14 @@ def main() -> None:
     # Session end
     session_mgr.end()
     try:
-        nats_pub.publish("augur.session.end", {
-            "session_id": session_id,
-            "domain": "chess",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+        nats_pub.publish(
+            "augur.session.end",
+            {
+                "session_id": session_id,
+                "domain": "chess",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
     except Exception as exc:
         log.error("Failed to publish session end: %s", exc)
 

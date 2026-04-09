@@ -232,6 +232,49 @@ Analyze this anomaly and provide a concise assessment (2-4 sentences)."""
 
 
 # ---------------------------------------------------------------------------
+# Lightweight per-domain one-liner formatter (used by correlation prompts)
+# ---------------------------------------------------------------------------
+
+
+def describe_signal(domain: str, anomaly: dict) -> str:
+    """Return a one-line human-readable summary of a single-domain anomaly.
+
+    Used inside build_correlation_prompt to embed each domain's contribution
+    without rebuilding a full domain-specific prompt. Does not share code
+    with the full prompt builders — different purpose, different format.
+    """
+    if domain == "chess":
+        move = anomaly.get("context", {}).get("move_san") or anomaly.get("move", "?")
+        think = anomaly.get("value", anomaly.get("think_time", 0))
+        baseline = anomaly.get("baseline_mean", "?")
+        deviation = anomaly.get("deviation_score", "?")
+        return (
+            f"CHESS (timing): {anomaly.get('entity', '?')} paused {think}s on "
+            f"move {move}. Baseline: {baseline}s. Deviation: {deviation}\u03c3."
+        )
+
+    if domain == "typing":
+        pause = anomaly.get("value", 0)
+        unit = anomaly.get("unit", "seconds")
+        ctx = anomaly.get("context", {})
+        avg_wpm = ctx.get("avg_wpm", "?")
+        baseline = anomaly.get("baseline_mean", "?")
+        return (
+            f"TYPING (rhythm): Pause duration {pause}{unit[:1]}. "
+            f"Average speed {avg_wpm} wpm. Baseline pause: {baseline}s."
+        )
+
+    # Generic fallback
+    value = anomaly.get("value", "?")
+    unit = anomaly.get("unit", "")
+    deviation = anomaly.get("deviation_score", "?")
+    return (
+        f"{domain.upper()}: {anomaly.get('event_type', 'event')} "
+        f"value={value}{unit}  deviation={deviation}\u03c3"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Domain handler registry
 # ---------------------------------------------------------------------------
 

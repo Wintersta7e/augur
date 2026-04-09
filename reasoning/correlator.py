@@ -205,6 +205,10 @@ def _build_correlation_payload(
         primary["severity"], driver["severity"], matrix
     )
 
+    # Structural attribution: rule_key is derived from severities directly so
+    # the reflection engine can tune regardless of matrix-miss.
+    rule_key = normalize_rule_key(primary["severity"], driver["severity"])
+
     # Temporal lag = primary - closest correlated event
     primary_ts = parse_timestamp(primary["timestamp"])
     closest = min(
@@ -222,6 +226,7 @@ def _build_correlation_payload(
         "severity_escalated": combined_severity != primary["severity"].upper(),
         "escalation_rule": rule_label,
         "escalation_matrix_version": matrix.get("version") if rule_label else None,
+        "rule_key": rule_key,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -237,6 +242,7 @@ def _build_passthrough_payload(primary: dict) -> dict:
         "severity_escalated": False,
         "escalation_rule": None,
         "escalation_matrix_version": None,
+        "rule_key": None,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 

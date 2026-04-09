@@ -591,3 +591,51 @@ class TestEnsureMatrixSeeded:
 
         mock_pm.save_escalation_matrix.assert_not_called()
         assert result == existing
+
+
+class TestPayloadRuleKey:
+    """Phase follow-up: correlator emits rule_key on every payload so
+    the reflection engine can attribute feedback to a rule without
+    parsing the escalation_rule label string."""
+
+    def test_correlation_payload_includes_rule_key(self) -> None:
+        primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
+        correlated = _make_anomaly("typing", "user", "low", "2026-03-17T14:29:48+00:00")
+        mock_redis = MagicMock()
+        mock_redis.zrangebyscore.return_value = [
+            json.dumps(correlated).encode(),
+            json.dumps(primary).encode(),
+        ]
+
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+
+        assert result is not None
+        assert result["correlation_found"] is True
+        assert result["rule_key"] == "LOW+LOW"
+
+    def test_passthrough_payload_rule_key_is_none(self) -> None:
+        # Standalone medium anomaly — passthrough path has no rule_key
+        primary = _make_anomaly("chess", "white", "medium", "2026-03-17T14:30:00+00:00")
+        mock_redis = MagicMock()
+        mock_redis.zrangebyscore.return_value = [json.dumps(primary).encode()]
+
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+
+        assert result is not None
+        assert result["correlation_found"] is False
+        assert result["rule_key"] is None
+
+    def test_correlation_rule_key_handles_severity_ordering(self) -> None:
+        # Primary HIGH + correlated LOW should produce rule_key "LOW+HIGH" (rank-sorted)
+        primary = _make_anomaly("chess", "white", "high", "2026-03-17T14:30:00+00:00")
+        correlated = _make_anomaly("typing", "user", "low", "2026-03-17T14:29:48+00:00")
+        mock_redis = MagicMock()
+        mock_redis.zrangebyscore.return_value = [
+            json.dumps(correlated).encode(),
+            json.dumps(primary).encode(),
+        ]
+
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+
+        assert result is not None
+        assert result["rule_key"] == "LOW+HIGH"

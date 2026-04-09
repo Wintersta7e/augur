@@ -162,7 +162,6 @@ def build_typing_prompt(
     system_prompt: str,
 ) -> str:
     """Build an LLM prompt focused on cognitive load from typing patterns."""
-    entity = anomaly.get("entity", "user")
     value = anomaly.get("value", 0)
     unit = anomaly.get("unit", "seconds")
     event_type = anomaly.get("event_type", "pause")

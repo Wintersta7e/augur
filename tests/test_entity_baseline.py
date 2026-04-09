@@ -7,7 +7,6 @@ and the entire detection layer produces garbage.
 
 from __future__ import annotations
 
-import math
 
 import pytest
 

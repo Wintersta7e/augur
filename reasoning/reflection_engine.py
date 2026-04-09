@@ -174,7 +174,6 @@ def analyze_utility(feedback: dict, config: AugurConfig) -> dict:
     # analysis in a later step of run_reflection, not by prompt mutation.
     all_events = feedback.get("advice_events", [])
     advice_events = [e for e in all_events if not e.get("correlation_found")]
-    summary = feedback.get("session_summary", {})
 
     total = len(advice_events)
     if total == 0:

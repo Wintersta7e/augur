@@ -6,8 +6,12 @@ payload.correlation_found.
 
 from __future__ import annotations
 
-
-from reasoning.augur_advisor import describe_signal
+from reasoning.augur_advisor import (
+    SEVERITY_GATE,
+    SUBSCRIBE_SUBJECT,
+    build_correlation_prompt,
+    describe_signal,
+)
 
 
 def _chess_event() -> dict:
@@ -78,9 +82,6 @@ class TestDescribeSignal:
         assert "\n" not in line
 
 
-from reasoning.augur_advisor import build_correlation_prompt
-
-
 def _correlation_payload() -> dict:
     return {
         "primary_anomaly": _chess_event() | {"timestamp": "2026-03-17T14:30:00+00:00"},
@@ -141,9 +142,6 @@ class TestBuildCorrelationPrompt:
         assert "CHESS" in prompt
         assert "TYPING" in prompt
         assert "FOCUS" in prompt
-
-
-from reasoning.augur_advisor import SUBSCRIBE_SUBJECT, SEVERITY_GATE
 
 
 class TestAdvisorSubscriptionAndGate:

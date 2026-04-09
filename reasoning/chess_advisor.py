@@ -11,7 +11,6 @@ import asyncio
 import json
 import logging
 import os
-import sys
 import time
 from datetime import datetime, timezone
 
@@ -49,6 +48,7 @@ SEVERITY_GATE = {"medium", "high"}
 # Redis helpers
 # ---------------------------------------------------------------------------
 
+
 def connect_redis() -> redis.Redis:
     client = redis.Redis(host="localhost", port=6379, socket_connect_timeout=5)
     client.ping()
@@ -67,9 +67,11 @@ def read_board_context(r: redis.Redis) -> tuple[dict | None, list[dict]]:
     history.reverse()
     return last_move, history
 
+
 # ---------------------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------------------
+
 
 def build_prompt(anomaly: dict, last_move: dict | None, history: list[dict]) -> str:
     """Build an LLM prompt with full game context."""
@@ -89,11 +91,15 @@ def build_prompt(anomaly: dict, last_move: dict | None, history: list[dict]) -> 
         prefix = f"{num}." if p == "white" else f"{num}..."
         history_lines.append(f"  {prefix} {san} ({p}, {t}s)")
 
-    history_block = "\n".join(history_lines) if history_lines else "  (no history available)"
+    history_block = (
+        "\n".join(history_lines) if history_lines else "  (no history available)"
+    )
 
     current_move = "unknown"
     if last_move:
-        current_move = f"{last_move.get('move_san', '?')} (UCI: {last_move.get('move_uci', '?')})"
+        current_move = (
+            f"{last_move.get('move_san', '?')} (UCI: {last_move.get('move_uci', '?')})"
+        )
 
     return f"""You are a chess analyst reviewing a game in progress. A timing anomaly has been detected.
 
@@ -115,9 +121,11 @@ def build_prompt(anomaly: dict, last_move: dict | None, history: list[dict]) -> 
 
 Keep your response concise (3-5 sentences). Focus on actionable chess insight, not generic advice."""
 
+
 # ---------------------------------------------------------------------------
 # Ollama client
 # ---------------------------------------------------------------------------
+
 
 async def query_ollama(prompt: str, client: httpx.AsyncClient) -> tuple[str, float]:
     """Send prompt to Ollama, return (response_text, latency_ms).
@@ -150,9 +158,11 @@ async def query_ollama(prompt: str, client: httpx.AsyncClient) -> tuple[str, flo
 
     return text, latency_ms
 
+
 # ---------------------------------------------------------------------------
 # Core loop
 # ---------------------------------------------------------------------------
+
 
 async def run() -> None:
     redis_client = connect_redis()
@@ -176,8 +186,7 @@ async def run() -> None:
             )
     except (httpx.HTTPError, httpx.ConnectError) as exc:
         log.warning(
-            "Ollama not reachable at startup (%s). "
-            "Will retry when anomalies arrive.",
+            "Ollama not reachable at startup (%s). Will retry when anomalies arrive.",
             exc,
         )
 
@@ -199,13 +208,19 @@ async def run() -> None:
         if severity not in SEVERITY_GATE:
             log.info(
                 "Ignoring %s severity anomaly for %s (%s, %.2fs)",
-                severity, player, move, think_time,
+                severity,
+                player,
+                move,
+                think_time,
             )
             return
 
         log.info(
             "Anomaly received [%s] %s played %s in %.2fs — querying LLM",
-            severity.upper(), player, move, think_time,
+            severity.upper(),
+            player,
+            move,
+            think_time,
         )
 
         if reasoning_lock.locked():
@@ -228,12 +243,14 @@ async def run() -> None:
                 advice, latency_ms = await query_ollama(prompt, http_client)
             except httpx.ConnectError:
                 log.error(
-                    "Ollama unreachable at %s — is it running?", OLLAMA_URL,
+                    "Ollama unreachable at %s — is it running?",
+                    OLLAMA_URL,
                 )
                 return
             except httpx.TimeoutException:
                 log.error(
-                    "Ollama timed out after %ds", OLLAMA_TIMEOUT_S,
+                    "Ollama timed out after %ds",
+                    OLLAMA_TIMEOUT_S,
                 )
                 return
             except httpx.HTTPStatusError as exc:
@@ -245,7 +262,8 @@ async def run() -> None:
 
             log.info(
                 "LLM responded in %.0fms (%d chars)",
-                latency_ms, len(advice),
+                latency_ms,
+                len(advice),
             )
             log.info("Advice for %s:\n%s", player, advice)
 

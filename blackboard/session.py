@@ -25,11 +25,16 @@ class SessionManager:
     def start(self) -> str:
         """Record session start in Redis and return the session_id."""
         self._redis.incr(REDIS_KEY_COUNT)
-        self._redis.set(REDIS_KEY_CURRENT, json.dumps({
-            "session_id": self.session_id,
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "status": "active",
-        }))
+        self._redis.set(
+            REDIS_KEY_CURRENT,
+            json.dumps(
+                {
+                    "session_id": self.session_id,
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "status": "active",
+                }
+            ),
+        )
         log.info("Session started: %s", self.session_id)
         return self.session_id
 

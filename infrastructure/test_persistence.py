@@ -56,8 +56,12 @@ def main() -> int:
     events = []
     for i in range(5):
         e = PerceptionEvent(
-            domain="test", stream_id="test_stream", entity="white",
-            event_type="move", value=float(i), unit="seconds",
+            domain="test",
+            stream_id="test_stream",
+            entity="white",
+            event_type="move",
+            value=float(i),
+            unit="seconds",
             context={"move_number": i + 1},
             timestamp=f"2026-03-07T00:00:0{i}+00:00",
             session_id="test-session",
@@ -68,10 +72,15 @@ def main() -> int:
     history = pm.get_history("test", limit=100)
     check("history length", len(history) == 5, f"got {len(history)}")
     # lpush means newest first
-    check("history order (newest first)", history[0]["value"] == 4.0,
-          f"got {history[0]['value']}")
-    check("history preserves fields",
-          history[0]["domain"] == "test" and history[0]["session_id"] == "test-session")
+    check(
+        "history order (newest first)",
+        history[0]["value"] == 4.0,
+        f"got {history[0]['value']}",
+    )
+    check(
+        "history preserves fields",
+        history[0]["domain"] == "test" and history[0]["session_id"] == "test-session",
+    )
 
     limited = pm.get_history("test", limit=3)
     check("history limit works", len(limited) == 3, f"got {len(limited)}")
@@ -92,8 +101,9 @@ def main() -> int:
 
     all_fb = pm.get_all_feedback(limit=10)
     check("get_all_feedback returns records", len(all_fb) == 2, f"got {len(all_fb)}")
-    check("get_all_feedback includes session_id",
-          all(("session_id" in f) for f in all_fb))
+    check(
+        "get_all_feedback includes session_id", all(("session_id" in f) for f in all_fb)
+    )
 
     print("\n=== Prompt versioning ===")
     track("augur:prompts:test:current")
@@ -112,25 +122,33 @@ def main() -> int:
 
     hist = pm.get_prompt_history("test", limit=10)
     check("prompt history has 2 entries", len(hist) == 2, f"got {len(hist)}")
-    check("prompt history newest first",
-          hist[0]["prompt"] == "You are a chess advisor v2")
-    check("prompt history has scores",
-          hist[0]["score"] == 0.8 and hist[1]["score"] == 0.6)
+    check(
+        "prompt history newest first", hist[0]["prompt"] == "You are a chess advisor v2"
+    )
+    check(
+        "prompt history has scores", hist[0]["score"] == 0.8 and hist[1]["score"] == 0.6
+    )
 
     # Rollback: v3 (score 0.3) is current, v2 (score 0.8) should be restored
     ok = pm.rollback_prompt("test")
     check("rollback succeeds", ok is True)
-    check("rollback restores v2", pm.load_prompt("test") == "You are a chess advisor v2")
+    check(
+        "rollback restores v2", pm.load_prompt("test") == "You are a chess advisor v2"
+    )
 
     # v3 should now be at the end of history, v1 at position 0
     hist_after = pm.get_prompt_history("test", limit=10)
-    check("rollback archives bad version",
-          any(h["prompt"] == "You are a chess advisor v3" for h in hist_after))
+    check(
+        "rollback archives bad version",
+        any(h["prompt"] == "You are a chess advisor v3" for h in hist_after),
+    )
 
     # Rollback again to v1
     pm.rollback_prompt("test")
-    check("second rollback restores v1",
-          pm.load_prompt("test") == "You are a chess advisor v1")
+    check(
+        "second rollback restores v1",
+        pm.load_prompt("test") == "You are a chess advisor v1",
+    )
 
     print("\n=== Threshold config ===")
     track("augur:config:thresholds:test")

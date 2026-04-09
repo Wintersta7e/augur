@@ -7,7 +7,6 @@ Augur makes threshold recommendations based on phantom data.
 
 from __future__ import annotations
 
-import math
 from unittest.mock import MagicMock
 
 import pytest
@@ -55,7 +54,9 @@ class TestCounterfactualFlagCounting:
         pm = _make_pm_with_history(events)
 
         result = analyze_counterfactual(
-            pm, "chess", {"sigma_threshold": 2.0, "ewma_alpha": 0.3},
+            pm,
+            "chess",
+            {"sigma_threshold": 2.0, "ewma_alpha": 0.3},
         )
         lower = result["variants"]["minus_10pct"]["would_flag"]
         current = result["variants"]["current"]["would_flag"]
@@ -73,7 +74,9 @@ class TestCounterfactualEWMAReplay:
         events = [{"entity": "white", "value": 100.0}]
         pm = _make_pm_with_history(events)
         result = analyze_counterfactual(
-            pm, "chess", {"sigma_threshold": 0.01, "ewma_alpha": 0.3},
+            pm,
+            "chess",
+            {"sigma_threshold": 0.01, "ewma_alpha": 0.3},
         )
         # Even with a near-zero threshold, the first event should have 0 deviation
         assert result["variants"]["current"]["would_flag"] == 0
@@ -88,7 +91,9 @@ class TestCounterfactualEWMAReplay:
         ]
         pm = _make_pm_with_history(events)
         result = analyze_counterfactual(
-            pm, "chess", {"sigma_threshold": 2.0, "ewma_alpha": 0.3},
+            pm,
+            "chess",
+            {"sigma_threshold": 2.0, "ewma_alpha": 0.3},
         )
         # Stable values — nothing should flag
         assert result["variants"]["current"]["would_flag"] == 0

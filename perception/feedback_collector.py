@@ -8,6 +8,7 @@ persists aggregated feedback records per session.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import sys
@@ -150,8 +151,6 @@ class PendingAdvice:
 # Async stdin reader
 # ---------------------------------------------------------------------------
 
-
-import concurrent.futures
 
 # LEAK-08: use a dedicated single-worker executor for stdin reads so a
 # timed-out read that leaves a thread blocked on sys.stdin.readline does

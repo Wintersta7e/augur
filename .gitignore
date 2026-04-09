@@ -30,9 +30,15 @@ Thumbs.db
 logs/
 .claude
 
-# Local design specs and plans (not for remote)
-docs/superpowers/
+# Local design specs, plans, and internal docs (not for remote)
+# The entire docs/ tree is local-only — architecture notes, roadmap,
+# session handoffs, audit trails, and superpowers specs/plans all live
+# here. Nothing in docs/ should be pushed.
+docs/
 
 # Local Claude Code instructions (never commit)
 CLAUDE.md
 **/CLAUDE.md
+
+# Codex CLI scratch
+.codex

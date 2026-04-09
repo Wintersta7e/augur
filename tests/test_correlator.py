@@ -8,14 +8,22 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+import networkx as nx
+import pytest
+
 from reasoning.correlator import (
     CORRELATION_WINDOW_S,
     DEFAULT_ESCALATION_MATRIX,
     PRUNE_WINDOW_S,
     SEVERITY_ORDER,
+    add_correlation_to_graph,
     add_to_window,
     correlate,
+    ensure_matrix_seeded,
+    flush_graph_to_redis,
     lookup_escalation,
+    new_session_graph,
+    node_key,
     normalize_rule_key,
     parse_timestamp,
     query_window,
@@ -411,16 +419,6 @@ class TestCorrelate:
         assert call_log.index("prune") < call_log.index("query")
 
 
-import networkx as nx
-import pytest
-
-from reasoning.correlator import (
-    add_correlation_to_graph,
-    new_session_graph,
-    node_key,
-)
-
-
 class TestSessionGraph:
     def test_node_key_uses_domain_entity_timestamp(self) -> None:
         ev = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
@@ -487,10 +485,6 @@ class TestSessionGraph:
         assert isinstance(g, nx.DiGraph)
         assert len(g.nodes) == 0
         assert len(g.edges) == 0
-
-
-from reasoning.correlator import ensure_matrix_seeded
-from reasoning.correlator import flush_graph_to_redis  # noqa: E402
 
 
 class TestFlushGraphToRedis:

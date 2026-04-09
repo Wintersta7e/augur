@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any
 
 import redis
 
@@ -55,7 +54,8 @@ class PersistenceManager:
     def save_feedback(self, session_id: str, feedback_dict: dict) -> None:
         key = f"augur:feedback:{session_id}"
         feedback_dict.setdefault(
-            "timestamp", datetime.now(timezone.utc).isoformat(),
+            "timestamp",
+            datetime.now(timezone.utc).isoformat(),
         )
         self._r.set(key, json.dumps(feedback_dict))
         # Also maintain an ordered index of session IDs for get_all_feedback
@@ -84,7 +84,10 @@ class PersistenceManager:
     # -- Prompt versioning ---------------------------------------------------
 
     def save_prompt(
-        self, domain: str, prompt_text: str, score: float | None = None,
+        self,
+        domain: str,
+        prompt_text: str,
+        score: float | None = None,
     ) -> None:
         current_key = f"augur:prompts:{domain}:current"
         history_key = f"augur:prompts:{domain}:history"
@@ -144,6 +147,22 @@ class PersistenceManager:
 
     def load_thresholds(self, domain: str) -> dict | None:
         key = f"augur:config:thresholds:{domain}"
+        raw = self._r.get(key)
+        if raw is None:
+            return None
+        return json.loads(raw)
+
+    # -- Escalation matrix (cross-domain correlator) -------------------------
+
+    def save_escalation_matrix(self, matrix: dict) -> None:
+        """Store the full matrix dict (including 'version' and 'rules' keys) as-is."""
+        key = "augur:config:escalation_matrix"
+        self._r.set(key, json.dumps(matrix))
+        log.debug("Saved escalation matrix (version=%s)", matrix.get("version"))
+
+    def load_escalation_matrix(self) -> dict | None:
+        """Return the full matrix dict or None if not set."""
+        key = "augur:config:escalation_matrix"
         raw = self._r.get(key)
         if raw is None:
             return None

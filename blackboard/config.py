@@ -15,6 +15,17 @@ from urllib.parse import urlparse
 _TYPE_COERCIONS: dict[str, type] = {}  # populated after class definition
 
 
+def _coerce_bool(raw: str) -> bool:
+    """Parse an env var string as a bool.
+
+    Truthy: ``true``, ``1``, ``yes``, ``on``, ``y`` (case-insensitive,
+    whitespace-stripped). Everything else — including the common footgun
+    of ``"false"`` — evaluates to False. This replaces the default
+    ``bool(raw)`` coercion which treats any non-empty string as True.
+    """
+    return raw.strip().lower() in {"true", "1", "yes", "on", "y"}
+
+
 @dataclasses.dataclass(frozen=True)
 class AugurConfig:
     """Immutable configuration snapshot for the Augur system."""
@@ -90,7 +101,12 @@ class AugurConfig:
 
 
 # Build the type-coercion map now that the class exists.
-_TYPE_COERCIONS = {
-    field.name: field.type if isinstance(field.type, type) else type(field.default)
-    for field in dataclasses.fields(AugurConfig)
-}
+# bool fields get the explicit string parser because bool("false") == True
+# (Python treats non-empty strings as truthy).
+_TYPE_COERCIONS = {}
+for _field in dataclasses.fields(AugurConfig):
+    _field_type = _field.type if isinstance(_field.type, type) else type(_field.default)
+    if _field_type is bool:
+        _TYPE_COERCIONS[_field.name] = _coerce_bool
+    else:
+        _TYPE_COERCIONS[_field.name] = _field_type

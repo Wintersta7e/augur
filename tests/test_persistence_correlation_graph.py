@@ -169,7 +169,9 @@ class TestRoundTrip:
     def test_save_then_load_via_shared_mock(self) -> None:
         store: dict[str, bytes] = {}
         mock_redis = MagicMock()
-        mock_redis.set.side_effect = lambda k, v: store.__setitem__(k, v)
+        # save_correlation_graph now passes ex=SESSION_KEY_TTL_S (LEAK-12 fix),
+        # so the lambda must accept keyword arguments.
+        mock_redis.set.side_effect = lambda k, v, **kw: store.__setitem__(k, v)
         mock_redis.get.side_effect = lambda k: store.get(k)
 
         pm = PersistenceManager(mock_redis)

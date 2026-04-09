@@ -16,6 +16,17 @@ log = logging.getLogger("persistence")
 HISTORY_MAX = 1000
 PROMPT_HISTORY_MAX = 100
 
+# Default TTL for per-session Redis keys (feedback, correlation graph,
+# reflection report). Prevents indefinite growth beyond the 1000-entry
+# index trim boundary. Override in tests by passing ``ttl_s=None`` to the
+# save methods if you need a persistent key.
+SESSION_KEY_TTL_S = 30 * 24 * 3600  # 30 days
+
+# TTL for the correlation-tuning idempotency marker. Long enough to survive
+# manual reflect-trigger replays of a recent session, short enough to prevent
+# the key from lingering indefinitely.
+TUNING_APPLIED_TTL_S = 7 * 24 * 3600  # 7 days
+
 
 class PersistenceManager:
     """Unified persistence interface for all Augur subsystems."""
@@ -57,7 +68,7 @@ class PersistenceManager:
             "timestamp",
             datetime.now(timezone.utc).isoformat(),
         )
-        self._r.set(key, json.dumps(feedback_dict))
+        self._r.set(key, json.dumps(feedback_dict), ex=SESSION_KEY_TTL_S)
         # Also maintain an ordered index of session IDs for get_all_feedback
         self._r.lpush("augur:feedback:_index", session_id)
         self._r.ltrim("augur:feedback:_index", 0, 999)
@@ -174,10 +185,11 @@ class PersistenceManager:
         """Persist a session's correlation DiGraph as node_link_data JSON.
 
         Also maintains an ordered index list so list_correlation_graphs
-        can return session ids without scanning keyspace.
+        can return session ids without scanning keyspace. Uses a 30-day TTL
+        to prevent unbounded Redis growth past the index-trim boundary.
         """
         key = f"augur:correlation:graph:{session_id}"
-        self._r.set(key, json.dumps(graph_data))
+        self._r.set(key, json.dumps(graph_data), ex=SESSION_KEY_TTL_S)
         self._r.lpush("augur:correlation:graph:_index", session_id)
         self._r.ltrim("augur:correlation:graph:_index", 0, 999)
         log.debug(
@@ -224,3 +236,65 @@ class PersistenceManager:
         if raw is None:
             return None
         return json.loads(raw)
+
+    # -- Reflection reports --------------------------------------------------
+
+    def save_reflection(self, session_id: str, report_dict: dict) -> None:
+        """Persist a per-session reflection report with a 30-day TTL.
+
+        Previously written directly via redis_client.set(...) from
+        reflection_engine.py, bypassing this abstraction. Now routed here
+        so the key namespace is discoverable alongside other persistence
+        concerns and TTL is applied consistently.
+        """
+        key = f"augur:reflect:{session_id}"
+        self._r.set(key, json.dumps(report_dict), ex=SESSION_KEY_TTL_S)
+        log.debug("Saved reflection report for session %s", session_id)
+
+    def load_reflection(self, session_id: str) -> dict | None:
+        """Return a session's reflection report or None if not set."""
+        key = f"augur:reflect:{session_id}"
+        raw = self._r.get(key)
+        if raw is None:
+            return None
+        return json.loads(raw)
+
+    # -- Last anomaly / last advice (live state, not per-session) -----------
+
+    def save_last_anomaly(self, anomaly_dict: dict) -> None:
+        """Persist the most recent anomaly event (no TTL — live state)."""
+        self._r.set("augur:detection:last_anomaly", json.dumps(anomaly_dict))
+
+    def load_last_anomaly(self) -> dict | None:
+        """Return the most recent anomaly event or None if not set."""
+        raw = self._r.get("augur:detection:last_anomaly")
+        if raw is None:
+            return None
+        return json.loads(raw)
+
+    def save_last_advice(self, advice_dict: dict) -> None:
+        """Persist the most recent LLM advice payload (no TTL — live state)."""
+        self._r.set("augur:reasoning:last_advice", json.dumps(advice_dict))
+
+    def load_last_advice(self) -> dict | None:
+        """Return the most recent LLM advice payload or None if not set."""
+        raw = self._r.get("augur:reasoning:last_advice")
+        if raw is None:
+            return None
+        return json.loads(raw)
+
+    # -- Correlation tuning idempotency marker ------------------------------
+
+    def mark_tuning_applied(self, session_id: str) -> None:
+        """Mark a session as having had its correlation tuning pass applied.
+
+        Sets a short-lived (7-day) marker so manual reflect-trigger replays
+        of a recent session do not double-apply the EWMA update.
+        """
+        key = f"augur:correlation:tuning_applied:{session_id}"
+        self._r.set(key, "1", ex=TUNING_APPLIED_TTL_S)
+
+    def is_tuning_applied(self, session_id: str) -> bool:
+        """Return True if mark_tuning_applied was called for this session."""
+        key = f"augur:correlation:tuning_applied:{session_id}"
+        return bool(self._r.exists(key))

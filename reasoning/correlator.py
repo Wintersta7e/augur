@@ -26,6 +26,7 @@ import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from blackboard.config import AugurConfig
+from blackboard.connections import connect_redis
 from blackboard.persistence import PersistenceManager
 
 # ---------------------------------------------------------------------------
@@ -389,20 +390,8 @@ def flush_graph_to_redis(
     )
 
 
-# ---------------------------------------------------------------------------
-# Redis helper
-# ---------------------------------------------------------------------------
-
-
-def connect_redis(config: AugurConfig) -> redis.Redis:
-    client = redis.Redis(
-        host=config.redis_host,
-        port=config.redis_port,
-        socket_connect_timeout=config.redis_connect_timeout,
-    )
-    client.ping()
-    log.info("Redis connected")
-    return client
+# Redis connection comes from blackboard.connections.connect_redis
+# (imported above) — previously duplicated inline here.
 
 
 def ensure_matrix_seeded(pm: PersistenceManager) -> dict:

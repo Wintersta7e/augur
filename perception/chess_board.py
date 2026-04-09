@@ -16,6 +16,8 @@ import pygame
 import redis
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
+from blackboard.config import AugurConfig
+from blackboard.connections import connect_redis
 from blackboard.contracts import PerceptionEvent
 from blackboard.session import SessionManager
 
@@ -67,22 +69,9 @@ NATS_SUBJECT = "augur.perception.chess"
 # ---------------------------------------------------------------------------
 # Redis helpers
 # ---------------------------------------------------------------------------
-
-
-def connect_redis(config: AugurConfig) -> redis.Redis:
-    """Connect to Redis using the shared AugurConfig (ARCH-04).
-
-    Previously hardcoded host="localhost"/port=6379, which broke Docker
-    deploy mode where Redis runs on a named container network.
-    """
-    client = redis.Redis(
-        host=config.redis_host,
-        port=config.redis_port,
-        socket_connect_timeout=config.redis_connect_timeout,
-    )
-    client.ping()
-    log.info("Redis connected (%s)", config.redis_url)
-    return client
+#
+# ARCH-11: the local connect_redis wrapper was deleted; callers now use
+# the shared helper from blackboard.connections (imported above).
 
 
 def publish_move_redis(r: redis.Redis, payload: dict) -> None:

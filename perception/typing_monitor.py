@@ -24,6 +24,8 @@ import nats
 import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from blackboard.config import AugurConfig
+from blackboard.connections import connect_redis
 from blackboard.contracts import PerceptionEvent
 from blackboard.persistence import PersistenceManager
 from blackboard.session import SessionManager
@@ -149,19 +151,12 @@ class TypingTracker:
 
 
 async def run() -> None:
-    # ARCH-04: route Redis + NATS through AugurConfig so Docker deploy
-    # mode (and any AUGUR_* env override) applies to this component.
+    # ARCH-04 / ARCH-11: route Redis + NATS through AugurConfig and the
+    # shared connect_redis helper so Docker deploy mode (and any AUGUR_*
+    # env override) applies uniformly to this component.
     config = AugurConfig.from_env()
 
-    # Redis
-    redis_client = redis.Redis(
-        host=config.redis_host,
-        port=config.redis_port,
-        socket_connect_timeout=config.redis_connect_timeout,
-    )
-    redis_client.ping()
-    log.info("Redis connected (%s)", config.redis_url)
-
+    redis_client = connect_redis(config)
     pm = PersistenceManager(redis_client)
 
     # Load existing baseline

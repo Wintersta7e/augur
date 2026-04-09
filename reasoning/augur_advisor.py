@@ -26,6 +26,7 @@ import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from blackboard.config import AugurConfig
+from blackboard.connections import connect_redis
 from blackboard.persistence import PersistenceManager
 
 # ---------------------------------------------------------------------------
@@ -75,17 +76,6 @@ def resolve_advisor_path(payload: dict) -> str:
 # ---------------------------------------------------------------------------
 # Redis helpers
 # ---------------------------------------------------------------------------
-
-
-def connect_redis(config: AugurConfig) -> redis.Redis:
-    client = redis.Redis(
-        host=config.redis_host,
-        port=config.redis_port,
-        socket_connect_timeout=config.redis_connect_timeout,
-    )
-    client.ping()
-    log.info("Redis connected")
-    return client
 
 
 def read_board_context(r: redis.Redis) -> tuple[dict | None, list[dict]]:

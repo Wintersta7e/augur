@@ -31,6 +31,7 @@ import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from blackboard.config import AugurConfig
+from blackboard.connections import connect_redis
 from blackboard.persistence import PersistenceManager
 from reasoning.correlator import DEFAULT_ESCALATION_MATRIX
 
@@ -748,14 +749,7 @@ async def run_reflection(
 async def run() -> None:
     config = AugurConfig.from_env()
 
-    redis_client = redis.Redis(
-        host=config.redis_host,
-        port=config.redis_port,
-        socket_connect_timeout=config.redis_connect_timeout,
-    )
-    redis_client.ping()
-    log.info("Redis connected (%s)", config.redis_url)
-
+    redis_client = connect_redis(config)
     pm = PersistenceManager(redis_client)
 
     nc = await nats.connect(

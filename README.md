@@ -1,124 +1,188 @@
 # Augur
 
-A hybrid neurosymbolic AI system that combines neural perception with symbolic reasoning to detect, interpret, and respond to complex patterns in streaming data.
+A hybrid neurosymbolic AI system that combines neural perception with symbolic reasoning to detect, interpret, and respond to complex patterns in streaming behavioral data. Augur detects anomalies across independent perception domains, correlates signals that fire together, asks a local LLM for advice, collects feedback, and tunes its own parameters after every session.
 
-Currently implemented as a **chess timing analyzer** -- a playable two-player chess board that captures move timing data, detects anomalous think times using online machine learning, and triggers LLM-powered strategic advice when players struggle.
+> **Status:** active personal research project. Currently validated with two independent perception domains (chess move timing and system-wide typing rhythm) sharing the same detection, correlation, and reasoning pipeline. Cross-domain reasoning verified end-to-end against a local Ollama `qwen2.5:32b` model.
+
+## What makes it different
+
+- **Domain-agnostic detection** — adding a new perception source requires zero changes to the detector. Any publisher that emits `PerceptionEvent` to a `augur.perception.<domain>` NATS subject is picked up automatically.
+- **Cross-domain correlation** — a rule-based escalation matrix combines signals from different domains inside a rolling 30-second window. Two low-severity signals firing together can escalate to medium or high severity and trigger LLM advice that references the *combination* rather than either signal alone.
+- **Self-tuning escalation rules** — per-rule EWMA confidence with hysteresis. Rules that consistently produce useful advice stay; rules that repeatedly miss have their confidence decayed toward their pre-mutation state. The reflection engine updates the escalation matrix in Redis; the correlator reloads it on every event without restart.
+- **Self-improvement loop** — after each session, the reflection engine runs four analysis passes (precision, utility, counterfactual, correlation tuning) and adjusts sigma thresholds, mutates LLM prompts via Ollama, and updates escalation confidence.
+- **Blackboard architecture** — Redis holds durable state, NATS carries events between components. Six independent subsystems, each testable in isolation.
 
 ## Architecture
 
-Augur uses a **blackboard architecture** where specialized subsystems communicate through shared state (Redis) and message passing (NATS).
-
 ```
-  Chess Board (pygame)
-        |
-        | NATS: augur.perception.chess
-        v
-  Anomaly Detector (River HalfSpaceTrees + EWMA)
-        |
-        | NATS: augur.detection.anomaly
-        +----------------------------+
-        v                            v
-  Chess Advisor             Console Display
-  (Ollama / qwen2.5:32b)   (low severity alerts)
-        |
-        | NATS: augur.reasoning.advice
-        v
-  Console Display (full advice blocks)
+  perception/* (chess, typing, ...)
+         │
+         │ NATS: augur.perception.<domain>  (wildcard)
+         ▼
+  detection/anomaly_detector.py          EWMA + River HalfSpaceTrees
+         │
+         │ NATS: augur.detection.anomaly
+         ▼
+  reasoning/correlator.py                Redis sorted-set window + NetworkX DiGraph
+         │                                escalation matrix lookup
+         │ NATS: augur.correlation.detected
+         ▼
+  reasoning/augur_advisor.py             Ollama qwen2.5:32b
+         │                                cross-domain prompt construction
+         │ NATS: augur.reasoning.advice
+         ▼
+  perception/feedback_collector.py       explicit + behavioral scoring
+         │
+         │ NATS: augur.feedback.complete
+         ▼
+  reasoning/reflection_engine.py         4-pass analysis → parameter tuning
+         │
+         │ NATS: augur.reflect.complete
+         ▼
+  output/console_display.py              ANSI renderer with dedup
 ```
 
-### Subsystems
+At session end, the correlator flushes the in-memory NetworkX DiGraph to Redis for later cross-session analysis. All live state is queryable and mutable via a 21-tool FastMCP server.
 
-| Directory        | File                  | Purpose                                                      |
-|------------------|-----------------------|--------------------------------------------------------------|
-| `perception/`    | `chess_board.py`      | Playable two-player chess board, captures move timing data    |
-| `detection/`     | `anomaly_detector.py` | Online anomaly detection using EWMA baselines + HalfSpaceTrees |
-| `reasoning/`     | `chess_advisor.py`    | LLM-powered chess analysis triggered by anomalies            |
-| `output/`        | `console_display.py`  | Color-coded terminal display of detections and advice         |
-| `blackboard/`    | --                    | Shared state (Redis) and event coordination (NATS)           |
-| `infrastructure/`| `run_augur.sh`, `test_connections.py` | Launcher script, connection tests          |
+## Components
 
-### Data Flow
-
-| NATS Subject              | Payload                                                    | Producer   | Consumer(s)         |
-|---------------------------|------------------------------------------------------------|------------|---------------------|
-| `augur.perception.chess`  | player, move_uci, move_san, think_time_seconds, move_number | chess_board | anomaly_detector   |
-| `augur.detection.anomaly` | player, move, think_time, deviation_score, severity        | anomaly_detector | chess_advisor, console_display |
-| `augur.reasoning.advice`  | player, move, advice, severity, model, latency_ms          | chess_advisor | console_display   |
-
-### Redis Keys
-
-| Key                          | Type   | Purpose                              |
-|------------------------------|--------|--------------------------------------|
-| `augur:chess:last_move`      | String | Last move JSON                       |
-| `augur:chess:move_history`   | List   | Rolling last 20 moves                |
-| `augur:detection:last_anomaly` | String | Most recent anomaly event          |
-| `augur:reasoning:last_advice`  | String | Most recent LLM advice             |
+| Directory | Purpose |
+|---|---|
+| `blackboard/` | Shared state layer: `AugurConfig` (env-var config), `PerceptionEvent` contract, `SessionManager`, `PersistenceManager` (all Redis I/O) |
+| `perception/` | Input sources publishing to `augur.perception.<domain>`. Includes `chess_board.py`, `typing_monitor.py`, `feedback_collector.py` |
+| `detection/` | Domain-agnostic anomaly detector (EWMA + River HalfSpaceTrees, wildcard NATS subscription) |
+| `reasoning/` | `correlator.py` (cross-domain), `augur_advisor.py` (Ollama LLM), `reflection_engine.py` (self-improvement) |
+| `output/` | ANSI terminal display with domain-scoped dedup and correlation rendering |
+| `augur_mcp/` | FastMCP server with 21 tools (lifecycle, injection, inspection, control) |
+| `infrastructure/` | Launcher script (6-slot pipeline), connectivity and persistence smoke tests |
+| `tests/` | 302 tests total — 278 unit (mocked) + 21 fast integration (real Redis/NATS) + 3 slow (real Ollama) |
 
 ## Prerequisites
 
 - Python 3.12+
-- Docker (for Redis and NATS)
-- [Ollama](https://ollama.com) with `qwen2.5:32b` pulled
-- Ollama must be running on Windows (not inside WSL). The advisor connects via `http://host.docker.internal:11434` by default. Override with `OLLAMA_URL` env var if needed.
+- Docker (for Redis 7 and NATS 2 + JetStream)
+- [Ollama](https://ollama.com) with `qwen2.5:32b` (or any model — configurable) pulled
+- Linux: the typing monitor uses the `keyboard` library which needs root for system-wide keypress capture. The chess board does not need root.
 
-## Getting Started
+## Quick start
 
 ```bash
-# 1. Start infrastructure services
+# 1. Start Redis + NATS
 docker compose up -d
 
-# 2. Verify Redis and NATS are reachable
-python3 -m venv .venv
+# 2. Set up Python environment
+python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+
+# 3. Verify connectivity
 .venv/bin/python infrastructure/test_connections.py
 
-# 3. Pull the LLM model (if not already available)
+# 4. Pull the LLM model
 ollama pull qwen2.5:32b
 
-# 4. Start the Augur pipeline (detector + advisor + display)
-infrastructure/run_augur.sh
+# 5. Run the tests (unit only, no Ollama needed)
+.venv/bin/pytest tests/ --ignore=tests/integration
 
-# 5. In a second terminal, start the chess board
+# 6. Run the fast integration tests (needs Redis + NATS)
+.venv/bin/pytest tests/integration/ -m "not slow"
+
+# 7. Start the full pipeline (dev mode)
+bash infrastructure/run_augur.sh
+
+# 8. In another terminal, start a perception source
 .venv/bin/python perception/chess_board.py
+# or, for system-wide typing (Linux: requires sudo):
+sudo .venv/bin/python perception/typing_monitor.py
 ```
 
-## Usage
+### Fully containerized mode
 
-### Chess Board Controls
+```bash
+docker compose -f docker-compose.yml -f docker-compose.deploy.yml up
+```
 
-| Input  | Action            |
-|--------|-------------------|
-| Click  | Select / move piece |
-| `R`    | Reset board       |
-| `U`    | Undo last move    |
+All six pipeline components run as containers; Ollama stays on the host (for GPU access). The correlator service has a healthcheck-gated `depends_on` from the advisor.
 
-### How Detection Works
+## Configuration
 
-- Each player's think times are tracked independently using an EWMA (exponentially weighted moving average) for mean and variance
-- After 3 moves per player, new moves are scored for anomaly
-- Two detection methods run in parallel:
-  - **Statistical**: flags moves deviating >= 2 standard deviations from the player's baseline
-  - **ML**: River's HalfSpaceTrees online anomaly detector (scores 0-1)
-- Severity levels: **low** (mild), **medium** (significant), **high** (extreme)
+All components read from `AugurConfig` (`blackboard/config.py`), a frozen dataclass with ~30 fields. Any field can be overridden via environment variables using the `AUGUR_` prefix:
 
-### How Advice Works
+```bash
+export AUGUR_NATS_URL=nats://remotehost:4222
+export AUGUR_REDIS_HOST=redis.internal
+export AUGUR_OLLAMA_URL=http://host.docker.internal:11434
+export AUGUR_OLLAMA_MODEL=llama3.2:3b
+export AUGUR_DEFAULT_SIGMA_THRESHOLD=2.5
+```
 
-- Only **medium** and **high** severity anomalies trigger an LLM query (conserving resources)
-- The advisor enriches the anomaly with board context from Redis (move history, current position)
-- Ollama generates detailed strategic analysis of the position and situation
-- A concurrency lock prevents piling up requests during slow LLM responses
+There are no hardcoded connection strings anywhere in the codebase.
+
+## Adding a new perception domain
+
+The design rule is: **a new perception source must require zero changes to detection or reasoning**. In practice:
+
+1. Create `perception/<your_source>.py` that publishes `PerceptionEvent`s to `augur.perception.<your_domain>`
+2. Add a `describe_signal` case in `reasoning/correlator.py` (one-liner formatter)
+3. Add a `DOMAIN_HANDLERS` entry in `reasoning/augur_advisor.py` (domain-specific prompt prefix)
+
+The detector picks up the new domain automatically (wildcard NATS subscription). The correlator will start finding cross-domain patterns as soon as two domains emit anomalies inside the same 30s window.
+
+## MCP server
+
+The `augur_mcp` package exposes a FastMCP server with 21 tools covering pipeline lifecycle, event injection, state inspection, and escalation-matrix mutation. Useful for programmatic testing, automated smoke checks, and future autonomous operation without a human in the loop.
 
 ## Dependencies
 
+Runtime:
+
 ```
-python-chess    # Chess logic and move validation
-pygame          # Board GUI
-river           # Online machine learning (HalfSpaceTrees)
-redis           # Blackboard shared state
-nats-py         # Message bus client
-httpx           # Async HTTP client for Ollama
+python-chess    # Chess rules and move validation (GPL-3.0 — see License note below)
+pygame          # Board GUI (LGPL-2.1)
+river           # Online machine learning - HalfSpaceTrees (BSD-3)
+redis[hiredis]  # Blackboard shared state (MIT)
+nats-py         # Message bus client (Apache-2.0)
+httpx           # Async HTTP client for Ollama (BSD-3)
+keyboard        # System-wide keypress capture for typing_monitor (MIT)
+fastmcp         # MCP server framework (Apache-2.0)
+networkx        # Session correlation DiGraph (BSD-3)
+```
+
+Dev:
+
+```
+pytest, pytest-asyncio
 ```
 
 ## License
 
-MIT
+MIT — see [`LICENSE`](LICENSE).
+
+**Note on `python-chess`:** this transitive dependency is GPL-3.0. Augur itself is MIT-licensed; the chess board perception module imports `python-chess` for move validation. If you derive a distributable binary from Augur, the GPL terms of `python-chess` may apply to the combined work. For personal use and research, this is not a practical concern. If you need to avoid GPL entirely, use only the non-chess perception domains (typing, or your own).
+
+## Security notes
+
+- Redis and NATS ports (`6379`, `4222`, `8222`) are bound to `127.0.0.1` in `docker-compose.yml`. **Do not rebind them to `0.0.0.0`** without adding authentication — the NATS monitoring port discloses the full subscription topology.
+- The `keyboard` library captures all system-wide keypresses when the typing monitor is running. This is a personal-use pattern; do not run it on a shared or public machine.
+- All MCP tool inputs are validated against a strict allowlist (`^[a-z0-9_]{1,64}$` for labels) and bounded length caps for escalation matrix keys.
+- Session-scoped Redis keys (feedback, correlation graphs, reflection reports) have a 30-day TTL. Long-lived keys are only those that represent persistent state (baselines, prompts, thresholds).
+
+## Status and roadmap
+
+**Shipped:**
+- Phases 1–2 foundation (chess perception, anomaly detection, Ollama advisor, console display)
+- Phase 2 generic architecture (PerceptionEvent contract, PersistenceManager, typing monitor as second domain)
+- Phase 2 self-improvement (feedback collector, reflection engine with precision/utility/counterfactual analysis)
+- Phase 2.5 infrastructure (AugurConfig, MCP server, Docker dual-mode, integration test framework)
+- **Phase 3 symbolic reasoning** — NetworkX knowledge graph, escalation matrix symbolic rules, cross-domain correlation, self-tuning via EWMA confidence. Live Ollama verification confirmed cross-domain reasoning produces qualitatively richer advice than per-signal alone.
+
+**In progress / open:**
+- Three-domain (and higher) correlation — matrix supports it structurally, `correlate()` is pairwise-only
+- Cross-session pattern mining — per-session graphs are persisted but not yet queried across sessions (may be subsumed by Phase 6)
+- Adaptive correlation window
+- Multi-domain feedback attribution
+
+**Future phases:**
+- Phase 4 — richer behavioral inference (session fingerprinting, longitudinal modeling)
+- Phase 5 — additional perception domains (code editing, application focus)
+- Phase 6 — Hot/Warm/Cold knowledge store with long-term cross-session memory
+- Phase 7 — self-modification beyond parameters and prompts (symbolic rule mutation with rollback)

@@ -82,3 +82,36 @@ def normalize_rule_key(sev1: str, sev2: str) -> str | None:
         return None
     pair = sorted([s1, s2], key=lambda s: SEVERITY_ORDER[s])
     return f"{pair[0]}+{pair[1]}"
+
+
+def lookup_escalation(
+    sev1: str,
+    sev2: str,
+    matrix: dict,
+) -> tuple[str, str | None]:
+    """Look up a severity pair in the escalation matrix.
+
+    Returns ``(combined_severity, rule_label)`` where:
+    - ``combined_severity`` is the escalated severity (uppercase).
+    - ``rule_label`` is ``"LOW+LOW→MEDIUM"`` on matrix hit, ``None`` on miss.
+
+    On matrix miss, falls back to ``max(sev1, sev2)`` by rank order. If
+    neither severity is recognized at all, returns the first input
+    uppercased with ``rule_label=None`` — the caller should have dropped
+    this event before reaching lookup, so this path is a safety net only.
+    """
+    key = normalize_rule_key(sev1, sev2)
+    rules = matrix.get("rules", {})
+
+    if key is not None and key in rules:
+        combined = rules[key]
+        return combined, f"{key}→{combined}"
+
+    # Fallback: take the higher of the two by rank
+    s1, s2 = sev1.upper(), sev2.upper()
+    r1 = SEVERITY_ORDER.get(s1, -1)
+    r2 = SEVERITY_ORDER.get(s2, -1)
+    if r1 < 0 and r2 < 0:
+        return s1, None
+    combined = s1 if r1 >= r2 else s2
+    return combined, None

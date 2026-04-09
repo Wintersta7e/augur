@@ -516,6 +516,8 @@ async def run() -> None:
                 "correlated_domains": [
                     e.get("domain") for e in payload.get("correlated_events", [])
                 ],
+                "rule_key": payload.get("rule_key"),
+                "escalation_rule": payload.get("escalation_rule"),
                 # Compat aliases for console_display and feedback_collector
                 "player": primary_compat.get("entity", entity),
                 "move": primary_compat.get(

@@ -202,3 +202,25 @@ class PersistenceManager:
         """
         raw_ids = self._r.lrange("augur:correlation:graph:_index", 0, limit - 1)
         return [sid.decode() if isinstance(sid, bytes) else sid for sid in raw_ids]
+
+    # -- Rule confidence state (reflection matrix tuning) --------------------
+
+    def save_rule_confidence(self, confidence_state: dict) -> None:
+        """Store per-rule EWMA confidence + restore_target snapshots.
+
+        Schema: {rule_key: {"confidence": float, "restore_target": str | None}}
+        """
+        key = "augur:config:escalation_confidence"
+        self._r.set(key, json.dumps(confidence_state))
+        log.debug(
+            "Saved rule confidence state: %d rules",
+            len(confidence_state),
+        )
+
+    def load_rule_confidence(self) -> dict | None:
+        """Return the per-rule confidence state dict or None if not set."""
+        key = "augur:config:escalation_confidence"
+        raw = self._r.get(key)
+        if raw is None:
+            return None
+        return json.loads(raw)

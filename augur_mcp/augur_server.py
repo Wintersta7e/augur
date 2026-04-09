@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import signal
 import sys
 import time
@@ -41,6 +40,7 @@ _processes: dict[str, dict[str, Any]] = {}
 
 COMPONENT_COMMANDS: dict[str, list[str]] = {
     "detector": [sys.executable, "-m", "detection.anomaly_detector"],
+    "correlator": [sys.executable, "-m", "reasoning.correlator"],
     "advisor": [sys.executable, "-m", "reasoning.augur_advisor"],
     "feedback": [sys.executable, "-m", "perception.feedback_collector"],
     "reflection": [sys.executable, "-m", "reasoning.reflection_engine"],

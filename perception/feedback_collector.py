@@ -314,7 +314,8 @@ async def run() -> None:
     async def on_perception(msg: nats.aio.client.Msg) -> None:
         try:
             event = PerceptionEvent.from_json(msg.data)
-        except (json.JSONDecodeError, TypeError, KeyError):
+        except (ValueError, TypeError, UnicodeDecodeError) as exc:
+            log.debug("Skipping bad perception event in feedback tracker: %s", exc)
             return
 
         entity = event.entity

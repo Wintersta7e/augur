@@ -222,7 +222,7 @@ async def run() -> None:
     async def on_event(msg: nats.aio.client.Msg) -> None:
         try:
             event = PerceptionEvent.from_json(msg.data)
-        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, KeyError) as exc:
+        except (ValueError, TypeError, UnicodeDecodeError) as exc:
             log.warning("Bad perception event: %s", exc)
             return
 

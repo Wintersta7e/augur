@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from blackboard.config import AugurConfig
 from blackboard.persistence import PersistenceManager
 from reasoning.correlator import (
     DEFAULT_ESCALATION_MATRIX,
@@ -23,6 +24,7 @@ from reasoning.correlator import (
 )
 
 pytestmark = pytest.mark.asyncio
+_CONFIG = AugurConfig.from_env()
 
 
 def _anomaly(
@@ -67,10 +69,10 @@ async def test_two_lows_different_domains_produce_medium_correlation(
     chess_event = _anomaly("chess", "white", "low", now)
 
     # Publish events to the window in chronological order
-    first = correlate(typing_event, redis_client, matrix)
+    first = correlate(typing_event, redis_client, matrix, _CONFIG)
     assert first is None, "standalone low typing event should be dropped"
 
-    second = correlate(chess_event, redis_client, matrix)
+    second = correlate(chess_event, redis_client, matrix, _CONFIG)
     assert second is not None
     assert second["correlation_found"] is True
     assert second["combined_severity"] == "MEDIUM"
@@ -96,7 +98,7 @@ async def test_standalone_high_passes_through_redis(
     now = datetime.now(timezone.utc)
     high = _anomaly("chess", "white", "high", now, value=99.9)
 
-    result = correlate(high, redis_client, matrix)
+    result = correlate(high, redis_client, matrix, _CONFIG)
 
     assert result is not None
     assert result["correlation_found"] is False
@@ -116,8 +118,8 @@ async def test_same_domain_lows_do_not_correlate(
     chess1 = _anomaly("chess", "white", "low", now - timedelta(seconds=10))
     chess2 = _anomaly("chess", "black", "low", now)
 
-    first = correlate(chess1, redis_client, matrix)
-    second = correlate(chess2, redis_client, matrix)
+    first = correlate(chess1, redis_client, matrix, _CONFIG)
+    second = correlate(chess2, redis_client, matrix, _CONFIG)
 
     assert first is None
     assert second is None  # same-domain low + low → both dropped

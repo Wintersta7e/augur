@@ -226,7 +226,12 @@ def render_advice(data: dict) -> str:
 
 
 def render_reflection(data: dict) -> str:
-    """End-of-session reflection summary block."""
+    """End-of-session reflection summary block.
+
+    Handles both the new per-domain shape (Phase 3+) and the legacy
+    single-domain shape (pre-Phase-3) for backward compatibility with
+    historical reflection records.
+    """
     session_id = data.get("session_id", "?")
     analyses = data.get("analyses", {})
     adjustments = data.get("adjustments", {})
@@ -235,45 +240,88 @@ def render_reflection(data: dict) -> str:
     utility = analyses.get("utility", {})
     counterfactual = analyses.get("counterfactual", {})
 
-    prec_ratio = precision.get("precision_ratio", 0)
-    prec_color = (
-        FG_GREEN if prec_ratio >= 0.7 else FG_YELLOW if prec_ratio >= 0.4 else FG_RED
-    )
     util_score = utility.get("utility_score", 0)
     util_color = (
         FG_GREEN if util_score >= 0.7 else FG_YELLOW if util_score >= 0.4 else FG_RED
     )
 
-    sigma_line = ""
-    if adjustments.get("sigma_adjusted"):
-        sigma_line = (
-            f"\n  {FG_YELLOW}Sigma threshold adjusted to "
-            f"{adjustments.get('sigma_value', '?')}{RESET}"
-        )
-
-    prompt_line = ""
-    if adjustments.get("prompt_mutated"):
-        prompt_line = f"\n  {FG_YELLOW}LLM prompt mutated for next session{RESET}"
-
     cf_rec = counterfactual.get("recommendation", "")
 
-    lines = [
+    lines: list[str] = [
         "",
         THICK_SEPARATOR,
         f"  {BOLD}AUGUR REFLECTION{RESET}  {FG_GRAY}session {session_id[:8]}...{RESET}",
         SEPARATOR,
-        f"  {FG_GRAY}Precision:{RESET}   {prec_color}{BOLD}{prec_ratio:.0%}{RESET}"
-        f"  {FG_GRAY}({precision.get('escalated', 0)}/{precision.get('total_anomalies', 0)} useful){RESET}",
-        f"  {FG_GRAY}Utility:{RESET}     {util_color}{BOLD}{util_score:.2f}{RESET}"
-        f"  {FG_GRAY}(explicit={utility.get('explicit_component', 0):.2f},"
-        f" behavioral={utility.get('behavioral_component', 0):.2f}){RESET}",
-        f"  {FG_GRAY}Counterfactual:{RESET}  {FG_WHITE}{cf_rec}{RESET}",
     ]
 
-    if sigma_line:
-        lines.append(sigma_line)
-    if prompt_line:
-        lines.append(prompt_line)
+    # Precision — per-domain (new) or top-level scalar (legacy)
+    per_domain = precision.get("per_domain")
+    if per_domain:
+        lines.append(f"  {FG_GRAY}Precision (per-domain):{RESET}")
+        for domain, result in per_domain.items():
+            ratio = result.get("precision_ratio", 0)
+            action = result.get("action", "none")
+            prec_color = (
+                FG_GREEN if ratio >= 0.7 else FG_YELLOW if ratio >= 0.4 else FG_RED
+            )
+            lines.append(
+                f"    {FG_WHITE}{domain}{RESET}: "
+                f"{prec_color}{BOLD}{ratio:.0%}{RESET}  [{action}]"
+            )
+    elif "precision_ratio" in precision:
+        # Legacy single-domain shape
+        prec_ratio = precision.get("precision_ratio", 0)
+        prec_color = (
+            FG_GREEN
+            if prec_ratio >= 0.7
+            else FG_YELLOW
+            if prec_ratio >= 0.4
+            else FG_RED
+        )
+        lines.append(
+            f"  {FG_GRAY}Precision:{RESET}   {prec_color}{BOLD}{prec_ratio:.0%}{RESET}"
+            f"  {FG_GRAY}({precision.get('escalated', 0)}/{precision.get('total_anomalies', 0)} useful){RESET}"
+        )
+
+    lines.append(
+        f"  {FG_GRAY}Utility:{RESET}     {util_color}{BOLD}{util_score:.2f}{RESET}"
+        f"  {FG_GRAY}(explicit={utility.get('explicit_component', 0):.2f},"
+        f" behavioral={utility.get('behavioral_component', 0):.2f}){RESET}"
+    )
+    lines.append(f"  {FG_GRAY}Counterfactual:{RESET}  {FG_WHITE}{cf_rec}{RESET}")
+
+    # Sigma adjustments — per-domain map (new) or scalar (legacy)
+    sigma_values = adjustments.get("sigma_values")
+    if sigma_values:
+        lines.append(f"  {FG_GRAY}Sigma after:{RESET}")
+        for domain, value in sigma_values.items():
+            lines.append(
+                f"    {FG_WHITE}{domain}{RESET}: {FG_YELLOW}{value:.2f}{RESET}"
+            )
+    elif adjustments.get("sigma_adjusted"):
+        # Legacy single value
+        lines.append(
+            f"  {FG_YELLOW}Sigma threshold adjusted to "
+            f"{adjustments.get('sigma_value', '?')}{RESET}"
+        )
+
+    if adjustments.get("prompt_mutated"):
+        lines.append(f"  {FG_YELLOW}LLM prompt mutated for next session{RESET}")
+
+    if adjustments.get("matrix_mutated"):
+        lines.append(f"  {FG_GRAY}Matrix:{RESET} updated")
+
+    # Window tuning (new in Phase 3)
+    window_tuning = analyses.get("correlation_window_tuning", {})
+    if adjustments.get("windows_tuned") and window_tuning.get("per_rule"):
+        lines.append(f"  {FG_GRAY}Windows tuned:{RESET}")
+        for rule_key, rec in window_tuning["per_rule"].items():
+            if rec.get("action") == "tuned":
+                lines.append(
+                    f"    {FG_WHITE}{rule_key}{RESET}: "
+                    f"{rec.get('window_before')}s {FG_GRAY}→{RESET} "
+                    f"{FG_CYAN}{rec.get('window_after')}s{RESET}"
+                )
 
     lines.extend(
         [

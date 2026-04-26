@@ -310,6 +310,69 @@ the domains, not each signal in isolation."""
 
 
 # ---------------------------------------------------------------------------
+# Advice event builder
+# ---------------------------------------------------------------------------
+
+
+def _build_advice_event(
+    payload: dict,
+    advice_text: str,
+    model_used: str,
+) -> dict:
+    """Build the advice event dict published on augur.reasoning.advice.
+
+    Derives domain/entity/value/severity from the payload so the result is
+    fully self-contained. The caller merges in ``latency_ms`` (only available
+    in the async context) before publishing.
+    """
+    primary = payload.get("primary_anomaly", {})
+    primary_domain = primary.get("domain", "unknown")
+
+    path = resolve_advisor_path(payload)
+    if path == "correlation":
+        domain = "multi"
+        entity = (
+            "+".join(e.get("domain", "?") for e in payload.get("correlated_events", []))
+            or "?"
+        )
+        value = payload.get("temporal_lag_seconds", 0) or 0
+    else:
+        domain = primary_domain
+        entity = primary.get("entity", primary.get("player", "?"))
+        value = primary.get("value", primary.get("think_time", 0))
+
+    severity = str(
+        payload.get("combined_severity", primary.get("severity", "low"))
+    ).lower()
+
+    return {
+        "domain": domain,
+        "entity": entity,
+        "advice": advice_text,
+        "value": value,
+        "severity": severity,
+        "model": model_used,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        # Correlation metadata
+        "correlation_found": bool(payload.get("correlation_found")),
+        "correlated_domains": [
+            e.get("domain") for e in payload.get("correlated_events", [])
+        ],
+        "rule_key": payload.get("rule_key"),
+        "escalation_rule": payload.get("escalation_rule"),
+        # Compat aliases for console_display and feedback_collector
+        "player": primary.get("entity", entity),
+        "move": primary.get("move", primary.get("context", {}).get("label", "?")),
+        "think_time": primary.get("value", value),
+        # NEW Phase 3 polish fields
+        "involved_domains": payload.get("involved_domains") or [primary_domain],
+        "correlation_span_s": payload.get("correlation_span_s"),
+        "rule_window_s": payload.get("rule_window_s"),
+        "temporal_lag_seconds": payload.get("temporal_lag_seconds"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Domain handler registry
 # ---------------------------------------------------------------------------
 
@@ -429,12 +492,10 @@ async def run() -> None:
                 )
                 or "?"
             )
-            value = payload.get("temporal_lag_seconds", 0) or 0
         else:
             primary = payload["primary_anomaly"]
             domain = primary.get("domain", "unknown")
             entity = primary.get("entity", primary.get("player", "?"))
-            value = primary.get("value", primary.get("think_time", 0))
 
         log.info(
             "Event received [%s] path=%s domain=%s entity=%s — querying LLM",
@@ -495,30 +556,12 @@ async def run() -> None:
             log.info("Advice for %s/%s:\n%s", domain, entity, advice)
 
             # Build advice payload — include correlation fields for downstream
-            primary_compat = payload.get("primary_anomaly", {})
-            advice_payload = {
-                "domain": domain,
-                "entity": entity,
-                "advice": advice,
-                "value": value,
-                "severity": severity,
-                "model": config.ollama_model,
-                "latency_ms": round(latency_ms, 1),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                # Correlation metadata
-                "correlation_found": bool(payload.get("correlation_found")),
-                "correlated_domains": [
-                    e.get("domain") for e in payload.get("correlated_events", [])
-                ],
-                "rule_key": payload.get("rule_key"),
-                "escalation_rule": payload.get("escalation_rule"),
-                # Compat aliases for console_display and feedback_collector
-                "player": primary_compat.get("entity", entity),
-                "move": primary_compat.get(
-                    "move", primary_compat.get("context", {}).get("label", "?")
-                ),
-                "think_time": primary_compat.get("value", value),
-            }
+            advice_payload = _build_advice_event(
+                payload,
+                advice_text=advice,
+                model_used=config.ollama_model,
+            )
+            advice_payload["latency_ms"] = round(latency_ms, 1)
 
             try:
                 await nc.publish(

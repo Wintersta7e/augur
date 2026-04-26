@@ -77,6 +77,47 @@ class AugurConfig:
     correlation_tuning_enable_threshold: float = 0.6
     correlation_tuning_disable_threshold: float = 0.3
 
+    # ── Correlation: adaptive window ───────────────────────────────────────
+    correlation_window_s: float = 30.0
+    correlation_window_min_s: float = 5.0
+    correlation_window_max_s: float = 120.0
+    correlation_window_tuning_alpha: float = 0.2
+    correlation_window_lag_multiplier: float = 2.5
+    correlation_window_tuning_hysteresis_pct: float = 0.20
+
+    def __post_init__(self) -> None:
+        """Validate bounds on tuning fields. Raises ValueError on out-of-range.
+
+        `frozen=True` only blocks attribute reassignment after __init__; calling
+        methods (including __post_init__) is fine.
+        """
+        if not (5.0 <= self.correlation_window_s <= 120.0):
+            raise ValueError(
+                f"correlation_window_s={self.correlation_window_s} outside [5, 120]"
+            )
+        if not (0.0 < self.correlation_window_min_s <= self.correlation_window_s):
+            raise ValueError(
+                f"correlation_window_min_s={self.correlation_window_min_s} must be in "
+                f"(0, correlation_window_s={self.correlation_window_s}]"
+            )
+        if not (self.correlation_window_s <= self.correlation_window_max_s <= 600.0):
+            raise ValueError(
+                f"correlation_window_max_s={self.correlation_window_max_s} outside "
+                f"[{self.correlation_window_s}, 600]"
+            )
+        if not (1.0 <= self.correlation_window_lag_multiplier <= 5.0):
+            raise ValueError(
+                f"correlation_window_lag_multiplier={self.correlation_window_lag_multiplier} outside [1.0, 5.0]"
+            )
+        if not (0.0 <= self.correlation_window_tuning_hysteresis_pct <= 1.0):
+            raise ValueError(
+                f"correlation_window_tuning_hysteresis_pct={self.correlation_window_tuning_hysteresis_pct} outside [0.0, 1.0]"
+            )
+        if not (0.0 <= self.correlation_window_tuning_alpha <= 1.0):
+            raise ValueError(
+                f"correlation_window_tuning_alpha={self.correlation_window_tuning_alpha} outside [0.0, 1.0]"
+            )
+
     # ── Constructors ───────────────────────────────────────────────────────
 
     @classmethod

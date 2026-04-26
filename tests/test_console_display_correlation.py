@@ -117,3 +117,110 @@ class TestDedup:
     def test_no_suppress_when_domain_never_rendered(self) -> None:
         last: dict = {}
         assert dedup_should_suppress(last, _typing_anomaly()) is False
+
+
+# ---------------------------------------------------------------------------
+# render_reflection — Phase 3 per-domain shape + legacy fallback
+# ---------------------------------------------------------------------------
+
+from output.console_display import render_reflection  # noqa: E402
+
+
+def test_render_reflection_handles_per_domain_precision():
+    data = {
+        "session_id": "s1",
+        "analyses": {
+            "precision": {
+                "per_domain": {
+                    "chess": {"precision_ratio": 0.9, "action": "lower_sigma"},
+                    "typing": {"precision_ratio": 0.4, "action": "none"},
+                },
+                "domains_evaluated": ["chess", "typing"],
+            },
+            "utility": {"utility_score": 0.8},
+            "counterfactual": {"recommendation": "OK"},
+            "correlation_tuning": {"rules_evaluated": 0},
+            "correlation_window_tuning": {"rules_evaluated": 0},
+        },
+        "adjustments": {
+            "sigma_adjusted": True,
+            "sigma_values": {"chess": 1.9, "typing": 2.0},
+            "prompt_mutated": False,
+            "matrix_mutated": False,
+            "windows_tuned": False,
+        },
+    }
+    rendered = render_reflection(data)
+    assert "chess" in rendered
+    assert "typing" in rendered
+    assert "1.9" in rendered  # the per-domain sigma value
+
+
+def test_render_reflection_handles_empty_per_domain():
+    data = {
+        "session_id": "s1",
+        "analyses": {
+            "precision": {"per_domain": {}, "domains_evaluated": []},
+            "utility": {"utility_score": 1.0},
+            "counterfactual": {"recommendation": ""},
+            "correlation_tuning": {"rules_evaluated": 0},
+            "correlation_window_tuning": {"rules_evaluated": 0},
+        },
+        "adjustments": {
+            "sigma_adjusted": False,
+            "sigma_values": {},
+        },
+    }
+    rendered = render_reflection(data)
+    # No precision data → no precision lines in output, but still renders
+    assert "session" in rendered.lower() or "reflection" in rendered.lower()
+
+
+def test_render_reflection_shows_windows_tuned_flag():
+    data = {
+        "session_id": "s1",
+        "analyses": {
+            "precision": {"per_domain": {}, "domains_evaluated": []},
+            "utility": {"utility_score": 1.0},
+            "counterfactual": {"recommendation": ""},
+            "correlation_tuning": {"rules_evaluated": 0},
+            "correlation_window_tuning": {
+                "rules_evaluated": 1,
+                "per_rule": {
+                    "LOW+LOW": {
+                        "action": "tuned",
+                        "window_before": 30.0,
+                        "window_after": 25.0,
+                    }
+                },
+            },
+        },
+        "adjustments": {
+            "sigma_adjusted": False,
+            "sigma_values": {},
+            "windows_tuned": True,
+        },
+    }
+    rendered = render_reflection(data)
+    assert "LOW+LOW" in rendered
+    assert "25" in rendered  # tuned window value
+
+
+def test_render_reflection_old_single_domain_shape_falls_back_gracefully():
+    """Old reflection records (pre-Phase-3) had top-level precision_ratio
+    and adjustments[sigma_value]. Renderer should not crash on them."""
+    data = {
+        "session_id": "old",
+        "analyses": {
+            "precision": {"precision_ratio": 0.7, "action": "none"},  # OLD shape
+            "utility": {"utility_score": 0.8},
+            "counterfactual": {"recommendation": ""},
+        },
+        "adjustments": {
+            "sigma_adjusted": True,
+            "sigma_value": 2.1,  # OLD singular field
+        },
+    }
+    rendered = render_reflection(data)
+    assert isinstance(rendered, str)
+    assert len(rendered) > 0

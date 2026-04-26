@@ -95,6 +95,57 @@ def normalize_rule_key(sev1: str, sev2: str) -> str | None:
     return f"{pair[0]}+{pair[1]}"
 
 
+def normalize_rule_key_n_way(severities: list[str]) -> str | None:
+    """Sort N severities by rank (LOW<MEDIUM<HIGH) and join with '+'.
+
+    Uppercases inputs first because the detector emits lowercase.
+    Returns None for empty input or any unknown severity — caller must
+    fall back to max-severity behaviour.
+    """
+    if not severities:
+        return None
+    upper = [s.upper() for s in severities]
+    if any(s not in SEVERITY_ORDER for s in upper):
+        return None
+    sorted_severities = sorted(upper, key=lambda s: SEVERITY_ORDER[s])
+    return "+".join(sorted_severities)
+
+
+def lookup_escalation_n_way(
+    severities: list[str],
+    matrix: dict,
+) -> tuple[str, str | None]:
+    """Look up an N-severity tuple in the escalation matrix.
+
+    Returns ``(combined_severity, rule_label)`` where:
+    - ``combined_severity`` is the escalated severity (uppercase).
+    - ``rule_label`` is e.g. ``"LOW+LOW+LOW→MEDIUM"`` on hit, ``None`` on miss.
+
+    Defensive: callers normally pass len >= 2 (correlation found path).
+    For len == 1 returns ``(severities[0].upper(), None)`` without matrix lookup.
+    For empty list returns ``("LOW", None)``.
+
+    On miss, falls back to ``max(severities)`` by rank order.
+    """
+    if not severities:
+        return "LOW", None
+    upper = [s.upper() for s in severities]
+    if len(upper) == 1:
+        return upper[0], None
+
+    key = normalize_rule_key_n_way(upper)
+    rules = matrix.get("rules", {})
+    if key is not None and key in rules:
+        combined = rules[key]
+        return combined, f"{key}→{combined}"
+
+    # Fallback: max severity by rank
+    valid = [s for s in upper if s in SEVERITY_ORDER]
+    if not valid:
+        return upper[0], None
+    return max(valid, key=lambda s: SEVERITY_ORDER[s]), None
+
+
 def lookup_escalation(
     sev1: str,
     sev2: str,

@@ -3,7 +3,6 @@
 from unittest.mock import patch
 
 
-
 def _call_validate(rules, rule_windows=None, version="1.0"):
     """Helper that calls the MCP validation directly via the module-level helpers."""
     from augur_mcp.augur_server import (

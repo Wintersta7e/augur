@@ -56,8 +56,6 @@ def test_pending_advice_new_fields_default_none():
     assert record["rule_window_s"] is None
 
 
-
-
 def test_resolve_primary_domain_from_top_level():
     assert _resolve_primary_domain({"domain": "typing"}) == "typing"
 

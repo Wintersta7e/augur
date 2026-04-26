@@ -547,6 +547,129 @@ def analyze_correlation_tuning(
 
 
 # ---------------------------------------------------------------------------
+# Correlation window tuning (per-rule observed-lag EWMA)
+# ---------------------------------------------------------------------------
+
+
+def analyze_correlation_window_tuning(
+    feedback: dict,
+    current_matrix: dict,
+    current_window_state: dict,
+    config: AugurConfig,
+) -> dict[str, Any]:
+    """Update per-rule observed-lag EWMA, derive new rule_windows.
+
+    EWMA tracks observed *lag*; window is derived from EWMA at update time
+    via lag_multiplier and clamp to [min_s, max_s]. Hysteresis on the
+    derived window prevents flapping.
+
+    Pairwise rule_keys only this phase — N-way (3+) keys are skipped.
+
+    Pure function: no Redis or NATS I/O.
+    """
+    from collections import defaultdict
+
+    if not config.correlation_tuning_enabled:
+        return {
+            "analysis": "correlation_window_tuning",
+            "disabled": True,
+            "reason": "Tuning disabled via AUGUR_CORRELATION_TUNING_ENABLED=false",
+            "rules_evaluated": 0,
+            "per_rule": {},
+            "new_window_state": dict(current_window_state),
+            "new_rule_windows": None,
+        }
+
+    events_with_lag = [
+        e
+        for e in feedback.get("advice_events", [])
+        if e.get("correlation_found")
+        and isinstance(e.get("rule_key"), str)
+        and e["rule_key"].count("+") == 1  # pairwise only
+        and isinstance(e.get("correlation_span_s"), (int, float))
+    ]
+    if not events_with_lag:
+        return {
+            "analysis": "correlation_window_tuning",
+            "rules_evaluated": 0,
+            "per_rule": {},
+            "new_window_state": dict(current_window_state),
+            "new_rule_windows": None,
+            "reason": "No pairwise correlated advice events with lag data",
+        }
+
+    spans_per_rule: dict[str, list[float]] = defaultdict(list)
+    for ev in events_with_lag:
+        spans_per_rule[ev["rule_key"]].append(ev["correlation_span_s"])
+
+    current_windows = current_matrix.get("rule_windows", {})
+    new_windows = dict(current_windows)
+    new_state = {k: dict(v) for k, v in current_window_state.items()}
+    per_rule_result: dict = {}
+    windows_changed = False
+
+    alpha = config.correlation_window_tuning_alpha
+
+    for rule_key, spans in spans_per_rule.items():
+        session_mean = sum(spans) / len(spans)
+
+        prev_state = new_state.get(rule_key, {"ewma_lag": session_mean})
+        prev_ewma_lag = prev_state["ewma_lag"]
+        new_ewma_lag = round((1 - alpha) * prev_ewma_lag + alpha * session_mean, 3)
+
+        target_window = max(
+            config.correlation_window_min_s,
+            min(
+                new_ewma_lag * config.correlation_window_lag_multiplier,
+                config.correlation_window_max_s,
+            ),
+        )
+        target_window = round(target_window, 1)
+
+        current_window = current_windows.get(rule_key, config.correlation_window_s)
+        delta_pct = (
+            abs(target_window - current_window) / current_window
+            if current_window > 0
+            else 1.0
+        )
+
+        if delta_pct >= config.correlation_window_tuning_hysteresis_pct:
+            new_windows[rule_key] = target_window
+            windows_changed = True
+            action = "tuned"
+            window_after = target_window
+        else:
+            action = "held"
+            window_after = current_window
+
+        new_state[rule_key] = {"ewma_lag": new_ewma_lag}
+
+        per_rule_result[rule_key] = {
+            "session_mean_span": round(session_mean, 3),
+            "event_count": len(spans),
+            "ewma_lag_before": prev_ewma_lag,
+            "ewma_lag_after": new_ewma_lag,
+            "window_before": current_window,
+            "window_after": window_after,
+            "delta_pct": round(delta_pct, 3),
+            "action": action,
+        }
+
+    return {
+        "analysis": "correlation_window_tuning",
+        "rules_evaluated": len(spans_per_rule),
+        "per_rule": per_rule_result,
+        "new_rule_windows": new_windows if windows_changed else None,
+        "new_window_state": new_state,
+        "reason": "; ".join(
+            f"{k}: {v['action']} {v['window_before']}→{v['window_after']}"
+            for k, v in per_rule_result.items()
+        )
+        or "No rules updated",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Prompt mutation via Ollama
 # ---------------------------------------------------------------------------
 

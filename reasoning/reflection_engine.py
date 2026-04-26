@@ -60,6 +60,23 @@ SUBJECT_REFLECT_COMPLETE = "augur.reflect.complete"
 DEFAULT_DOMAIN = "chess"
 
 
+def _attribution_weights(event: dict) -> dict[str, float]:
+    """Return {domain: weight} per advice event.
+
+    Standalone (non-correlated) advice: full weight 1.0 to event['domain'].
+    Correlated advice with involved_domains: each involved domain gets 1/N.
+    Old records without 'involved_domains' (or empty): falls back to {primary: 1.0}.
+    """
+    primary = event.get("domain", "unknown")
+    if not event.get("correlation_found"):
+        return {primary: 1.0}
+    domains = event.get("involved_domains") or []
+    if not domains:
+        return {primary: 1.0}
+    weight = 1.0 / len(domains)
+    return {d: weight for d in domains}
+
+
 def _derive_domain(feedback: dict) -> str:
     """Pick a domain for threshold/prompt tuning from the session's feedback.
 

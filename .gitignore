@@ -42,3 +42,6 @@ CLAUDE.md
 
 # Codex CLI scratch
 .codex
+
+# Git worktrees (isolated workspaces for feature branches)
+.worktrees/

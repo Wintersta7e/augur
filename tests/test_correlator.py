@@ -576,15 +576,23 @@ class TestEnsureMatrixSeeded:
         )
         assert result == DEFAULT_ESCALATION_MATRIX
 
-    def test_leaves_existing_matrix_alone(self) -> None:
+    def test_preserves_operator_overrides_and_adds_missing_defaults(self) -> None:
+        # Existing matrix has one operator-overridden rule and is missing all others.
         existing = {"version": "1.5", "rules": {"LOW+LOW": "HIGH"}}
         mock_pm = MagicMock()
         mock_pm.load_escalation_matrix.return_value = existing
 
         result = ensure_matrix_seeded(mock_pm)
 
-        mock_pm.save_escalation_matrix.assert_not_called()
-        assert result == existing
+        # Operator's HIGH override for LOW+LOW is preserved
+        assert result["rules"]["LOW+LOW"] == "HIGH"
+        # Missing defaults are merged in
+        assert result["rules"]["LOW+LOW+LOW"] == "MEDIUM"
+        assert result["rules"]["HIGH+HIGH+HIGH"] == "HIGH"
+        # Version is preserved from existing
+        assert result["version"] == "1.5"
+        # Save was called because defaults were missing
+        mock_pm.save_escalation_matrix.assert_called_once()
 
 
 class TestPayloadRuleKey:

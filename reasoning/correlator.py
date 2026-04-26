@@ -64,12 +64,24 @@ SEVERITY_ORDER: dict[str, int] = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
 DEFAULT_ESCALATION_MATRIX: dict = {
     "version": "1.0",
     "rules": {
+        # Pairwise (existing)
         "LOW+LOW": "MEDIUM",
         "LOW+MEDIUM": "MEDIUM",
         "LOW+HIGH": "HIGH",
         "MEDIUM+MEDIUM": "HIGH",
         "MEDIUM+HIGH": "HIGH",
         "HIGH+HIGH": "HIGH",
+        # 3-way (NEW)
+        "LOW+LOW+LOW": "MEDIUM",
+        "LOW+LOW+MEDIUM": "MEDIUM",
+        "LOW+LOW+HIGH": "HIGH",
+        "LOW+MEDIUM+MEDIUM": "HIGH",
+        "LOW+MEDIUM+HIGH": "HIGH",
+        "LOW+HIGH+HIGH": "HIGH",
+        "MEDIUM+MEDIUM+MEDIUM": "HIGH",
+        "MEDIUM+MEDIUM+HIGH": "HIGH",
+        "MEDIUM+HIGH+HIGH": "HIGH",
+        "HIGH+HIGH+HIGH": "HIGH",
     },
 }
 
@@ -497,17 +509,52 @@ def flush_graph_to_redis(
 
 
 def ensure_matrix_seeded(pm: PersistenceManager) -> dict:
-    """Write the default escalation matrix if absent; return the active matrix."""
+    """Write the default matrix if absent; additively merge missing default
+    rules into an existing matrix without overwriting operator changes.
+
+    Operator deletion of a default rule is non-durable: it will be re-seeded
+    on next startup. The intended operator model is to set the rule's target
+    to LOW (which short-circuits escalation) for durable disable.
+
+    rule_windows in an existing matrix are preserved untouched.
+    """
     existing = pm.load_escalation_matrix()
     if existing is None:
         pm.save_escalation_matrix(DEFAULT_ESCALATION_MATRIX)
         log.info("Seeded default escalation matrix (version=1.0)")
         return DEFAULT_ESCALATION_MATRIX
+
+    existing_rules = existing.get("rules", {})
+    default_rules = DEFAULT_ESCALATION_MATRIX["rules"]
+
+    merged_rules = dict(existing_rules)
+    added: list[str] = []
+    for k, v in default_rules.items():
+        if k not in merged_rules:
+            merged_rules[k] = v
+            added.append(k)
+
+    if not added:
+        log.info(
+            "Loaded existing escalation matrix (version=%s, no defaults missing)",
+            existing.get("version", "unknown"),
+        )
+        return existing
+
+    merged = {
+        "version": existing.get("version", "1.0"),
+        "rules": merged_rules,
+    }
+    if "rule_windows" in existing:
+        merged["rule_windows"] = existing["rule_windows"]
+
+    pm.save_escalation_matrix(merged)
     log.info(
-        "Loaded existing escalation matrix (version=%s)",
-        existing.get("version", "unknown"),
+        "Seeded %d missing default rules into existing matrix: %s",
+        len(added),
+        ", ".join(added),
     )
-    return existing
+    return merged
 
 
 # ---------------------------------------------------------------------------

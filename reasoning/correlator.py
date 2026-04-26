@@ -146,6 +146,57 @@ def lookup_escalation_n_way(
     return max(valid, key=lambda s: SEVERITY_ORDER[s]), None
 
 
+def get_rule_window(
+    rule_key: str | None,
+    matrix: dict,
+    default_s: float,
+) -> float:
+    """Resolve per-rule window from matrix.rule_windows, fall back to default."""
+    if rule_key is None:
+        return default_s
+    rule_windows = matrix.get("rule_windows", {})
+    return rule_windows.get(rule_key, default_s)
+
+
+def compute_query_window(matrix: dict, default_s: float) -> float:
+    """Return max(default, max(rule_windows.values())). Used to size the candidate pool."""
+    rule_windows = matrix.get("rule_windows", {})
+    if not rule_windows:
+        return default_s
+    return max(default_s, max(rule_windows.values()))
+
+
+def compute_prune_window(query_window_s: float) -> float:
+    """Return 2 * query_window for clock-skew buffer."""
+    return 2.0 * query_window_s
+
+
+def filter_by_pairwise_window(
+    primary: dict,
+    candidates: list[dict],
+    matrix: dict,
+    default_window_s: float,
+) -> list[dict]:
+    """Drop candidates whose lag exceeds their pairwise rule's window.
+
+    For each candidate, compute the pairwise rule_key (primary↔candidate),
+    look up its window, and keep the candidate only if
+    (primary_ts - candidate_ts) <= rule_window. Unknown severities fall
+    back to default_window_s.
+    """
+    primary_ts = parse_timestamp(primary["timestamp"])
+    primary_sev = primary.get("severity", "")
+    survivors: list[dict] = []
+    for cand in candidates:
+        cand_ts = parse_timestamp(cand["timestamp"])
+        lag = primary_ts - cand_ts
+        rule_key = normalize_rule_key_n_way([primary_sev, cand.get("severity", "")])
+        window = get_rule_window(rule_key, matrix, default_window_s)
+        if lag <= window:
+            survivors.append(cand)
+    return survivors
+
+
 def lookup_escalation(
     sev1: str,
     sev2: str,

@@ -78,22 +78,29 @@ def _attribution_weights(event: dict) -> dict[str, float]:
 
 
 def _derive_domain(feedback: dict) -> str:
-    """Pick a domain for threshold/prompt tuning from the session's feedback.
+    """Pick a domain for utility/counterfactual single-domain scope.
 
-    Only standalone (non-correlated) advice events contribute, because the
-    correlation path does not use stored prompts or per-domain sigma
-    thresholds. Returns the most common domain among those events, or
-    ``DEFAULT_DOMAIN`` if the session had no attributable standalone events.
+    Priority order:
+    1. Most-common domain among standalone (non-correlated) advice events.
+       Standalone advice is what utility analysis & prompt mutation operate on.
+    2. Most-common primary domain across ALL advice events (used when the
+       session was entirely correlated; post-Task-8 correlated records carry
+       the real primary domain so this is meaningful).
+    3. DEFAULT_DOMAIN as last resort.
     """
+    advice_events = feedback.get("advice_events", [])
     standalone_domains = [
         ev.get("domain")
-        for ev in feedback.get("advice_events", [])
+        for ev in advice_events
         if ev.get("domain") and not ev.get("correlation_found")
     ]
-    if not standalone_domains:
-        return DEFAULT_DOMAIN
-    most_common, _count = Counter(standalone_domains).most_common(1)[0]
-    return most_common
+    if standalone_domains:
+        return Counter(standalone_domains).most_common(1)[0][0]
+    # Round-3 fallback: post-Task-8, correlated records have a real domain too.
+    all_domains = [ev.get("domain") for ev in advice_events if ev.get("domain")]
+    if all_domains:
+        return Counter(all_domains).most_common(1)[0][0]
+    return DEFAULT_DOMAIN
 
 
 # ---------------------------------------------------------------------------
@@ -768,28 +775,43 @@ async def run_reflection(
         domain,
     )
 
-    # Load current thresholds
-    stored_thresholds = pm.load_thresholds(domain)
-    current_thresholds = {
+    # Build per-domain thresholds by walking attribution weights across all events
+    domains_with_advice: set[str] = set()
+    for ev in feedback.get("advice_events", []):
+        domains_with_advice.update(_attribution_weights(ev).keys())
+    if not domains_with_advice:
+        domains_with_advice = {DEFAULT_DOMAIN}
+    default_thresholds = {
         "sigma_threshold": 2.0,
         "ewma_alpha": 0.3,
         "hst_threshold": 0.7,
-        **(stored_thresholds or {}),
+    }
+    thresholds_per_domain: dict[str, dict] = {
+        d: {**default_thresholds, **(pm.load_thresholds(d) or {})}
+        for d in sorted(domains_with_advice)
     }
 
-    # 1. Precision analysis
-    precision = analyze_precision(feedback, current_thresholds, config)
-    log.info("Precision: %s", precision["reason"])
+    # 1. Precision analysis (per-domain)
+    precision = analyze_precision(feedback, thresholds_per_domain, config)
 
-    # Apply sigma adjustment if needed
-    if precision["action"] in ("raise_sigma", "lower_sigma"):
-        current_thresholds["sigma_threshold"] = precision["sigma_after"]
-        pm.save_thresholds(domain, current_thresholds)
-        log.info(
-            "Saved updated sigma threshold: %.1f -> %.1f",
-            precision["sigma_before"],
-            precision["sigma_after"],
-        )
+    sigma_values_after: dict[str, float] = {}
+    any_sigma_adjusted = False
+    for dom, result in precision["per_domain"].items():
+        if result["action"] in ("raise_sigma", "lower_sigma"):
+            thresholds_per_domain[dom]["sigma_threshold"] = result["sigma_after"]
+            pm.save_thresholds(dom, thresholds_per_domain[dom])
+            any_sigma_adjusted = True
+        sigma_values_after[dom] = thresholds_per_domain[dom]["sigma_threshold"]
+
+    # Single-domain thresholds for analyze_counterfactual (and log summary)
+    current_thresholds = thresholds_per_domain.get(domain, dict(default_thresholds))
+
+    log.info(
+        "Precision: %d domain(s) evaluated: %s",
+        len(precision["per_domain"]),
+        ", ".join(f"{d}={r['action']}" for d, r in precision["per_domain"].items())
+        or "no signal",
+    )
 
     # 2. Utility analysis
     utility = analyze_utility(feedback, config)
@@ -812,47 +834,115 @@ async def run_reflection(
     counterfactual = analyze_counterfactual(pm, domain, current_thresholds)
     log.info("Counterfactual: %s", counterfactual["recommendation"])
 
-    # 4. Correlation matrix tuning
-    tuning: dict[str, Any]
+    # Step 4 + 5 — unified marker covers both correlation tuning + window tuning.
+    # Single matrix load, two analyses, single merged matrix save.
+    matrix_tuning: dict[str, Any]
+    window_tuning: dict[str, Any]
     if pm.is_tuning_applied(session_id):
         log.info(
-            "Skipping correlation tuning — already applied for session %s",
+            "Skipping correlation + window tuning — already applied for session %s",
             session_id,
         )
-        tuning = {
+        matrix_tuning = {
             "analysis": "correlation_tuning",
+            "skipped": True,
+            "reason": "already_applied_for_session",
+        }
+        window_tuning = {
+            "analysis": "correlation_window_tuning",
             "skipped": True,
             "reason": "already_applied_for_session",
         }
     else:
         current_matrix = pm.load_escalation_matrix() or DEFAULT_ESCALATION_MATRIX
-        current_confidence_state = pm.load_rule_confidence() or {}
-        tuning = analyze_correlation_tuning(
-            feedback, current_matrix, current_confidence_state, config
-        )
-        log.info("Correlation tuning: %s", tuning.get("reason", "no reason"))
+        current_confidence = pm.load_rule_confidence() or {}
+        current_window_state = pm.load_rule_window_state() or {}
 
-        if tuning.get("rules_evaluated", 0) > 0:
-            # BUG-03: save confidence + mark_applied BEFORE the matrix save.
-            # If save_escalation_matrix raises, the confidence update is
-            # already persisted (not losable), and the marker prevents the
-            # next reflect-trigger from double-applying the same EWMA step
-            # to already-updated state. A failed matrix write is recoverable
-            # on the next session; double-updated confidence is not.
-            pm.save_rule_confidence(tuning["new_confidence_state"])
-            pm.mark_tuning_applied(session_id)
-            if tuning.get("new_matrix") is not None:
+        matrix_tuning = analyze_correlation_tuning(
+            feedback, current_matrix, current_confidence, config
+        )
+        log.info("Correlation tuning: %s", matrix_tuning.get("reason", "no reason"))
+
+        window_tuning = analyze_correlation_window_tuning(
+            feedback, current_matrix, current_window_state, config
+        )
+        log.info(
+            "Correlation window tuning: %s", window_tuning.get("reason", "no reason")
+        )
+
+        matrix_changed = (
+            matrix_tuning.get("new_matrix") is not None
+            or window_tuning.get("new_rule_windows") is not None
+        )
+        matrix_save_ok = True
+        if matrix_changed:
+            merged: dict[str, Any] = {
+                "version": current_matrix.get("version", "1.0"),
+                "rules": (
+                    matrix_tuning["new_matrix"]["rules"]
+                    if matrix_tuning.get("new_matrix") is not None
+                    else dict(current_matrix.get("rules", {}))
+                ),
+                "rule_windows": (
+                    window_tuning["new_rule_windows"]
+                    if window_tuning.get("new_rule_windows") is not None
+                    else dict(current_matrix.get("rule_windows", {}))
+                ),
+            }
+            try:
+                pm.save_escalation_matrix(merged)
+                log.info(
+                    "Merged matrix updated: matrix=%s, windows=%s",
+                    "yes" if matrix_tuning.get("new_matrix") else "unchanged",
+                    "yes" if window_tuning.get("new_rule_windows") else "unchanged",
+                )
+            except redis.RedisError as exc:
+                matrix_save_ok = False
+                log.error("Merged matrix save failed: %s", exc)
+
+        state_save_ok = True
+        if matrix_save_ok:
+            confidence_to_save = (
+                matrix_tuning["new_confidence_state"]
+                if matrix_tuning.get("rules_evaluated", 0) > 0
+                else None
+            )
+            window_state_to_save = (
+                window_tuning["new_window_state"]
+                if window_tuning.get("rules_evaluated", 0) > 0
+                else None
+            )
+            if confidence_to_save is not None or window_state_to_save is not None:
                 try:
-                    pm.save_escalation_matrix(tuning["new_matrix"])
-                    log.info(
-                        "Escalation matrix updated by reflection engine: %s",
-                        tuning["reason"],
+                    pm.save_tuning_state(
+                        confidence=confidence_to_save,
+                        window_state=window_state_to_save,
                     )
                 except redis.RedisError as exc:
-                    log.error(
-                        "Matrix save failed (confidence was saved, marker set): %s",
-                        exc,
-                    )
+                    state_save_ok = False
+                    log.error("Atomic tuning-state save failed: %s", exc)
+        else:
+            state_save_ok = False
+            log.warning(
+                "Skipping atomic tuning-state save because matrix save failed; "
+                "next reflection trigger will redo the EWMA update against the "
+                "original (unchanged) state."
+            )
+
+        if (
+            (
+                matrix_tuning.get("rules_evaluated", 0) > 0
+                or window_tuning.get("rules_evaluated", 0) > 0
+            )
+            and matrix_save_ok
+            and state_save_ok
+        ):
+            pm.mark_tuning_applied(session_id)
+        elif not (matrix_save_ok and state_save_ok):
+            log.warning(
+                "Skipping mark_tuning_applied because at least one tuning write failed; "
+                "next reflection trigger will retry."
+            )
 
     # Build report
     report = {
@@ -862,14 +952,17 @@ async def run_reflection(
             "precision": precision,
             "utility": utility,
             "counterfactual": counterfactual,
-            "correlation_tuning": tuning,
+            "correlation_tuning": matrix_tuning,
+            "correlation_window_tuning": window_tuning,
         },
         "adjustments": {
-            "sigma_adjusted": precision["action"] != "none",
-            "sigma_value": precision["sigma_after"],
-            "prompt_mutated": mutation_result is not None
-            and mutation_result.get("mutated", False),
-            "matrix_mutated": tuning.get("new_matrix") is not None,
+            "sigma_adjusted": any_sigma_adjusted,
+            "sigma_values": sigma_values_after,
+            "prompt_mutated": (
+                mutation_result is not None and mutation_result.get("mutated", False)
+            ),
+            "matrix_mutated": matrix_tuning.get("new_matrix") is not None,
+            "windows_tuned": window_tuning.get("new_rule_windows") is not None,
         },
     }
 

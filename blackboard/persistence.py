@@ -278,7 +278,7 @@ class PersistenceManager:
             return
         pipe = self._r.pipeline()  # transaction=True by default
         if confidence is not None:
-            pipe.set("augur:config:rule_confidence", json.dumps(confidence))
+            pipe.set("augur:config:escalation_confidence", json.dumps(confidence))
         if window_state is not None:
             pipe.set("augur:config:rule_window_state", json.dumps(window_state))
         pipe.execute()

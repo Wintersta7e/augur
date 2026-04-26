@@ -7,9 +7,11 @@ A hybrid neurosymbolic AI system that combines neural perception with symbolic r
 ## What makes it different
 
 - **Domain-agnostic detection** — adding a new perception source requires zero changes to the detector. Any publisher that emits `PerceptionEvent` to a `augur.perception.<domain>` NATS subject is picked up automatically.
-- **Cross-domain correlation** — a rule-based escalation matrix combines signals from different domains inside a rolling 30-second window. Two low-severity signals firing together can escalate to medium or high severity and trigger LLM advice that references the *combination* rather than either signal alone.
+- **N-way cross-domain correlation** — a rule-based escalation matrix combines signals from any number of domains inside an adaptive correlation window. Default rules ship for both pairwise (e.g. `LOW+LOW→MEDIUM`) and 3-way (`LOW+LOW+LOW→MEDIUM`) escalation. Two or three low-severity signals firing together escalate to higher severity and trigger LLM advice that references the *combination* rather than any one signal alone.
+- **Adaptive correlation windows** — the reflection engine EWMA-updates an observed-lag estimate per pairwise rule and tunes that rule's window upward or downward (with hysteresis to prevent flapping). Rules that fire mostly within 8s get tighter windows; rules with consistently long lag get more headroom. All bounded to `[5s, 120s]` by default.
 - **Self-tuning escalation rules** — per-rule EWMA confidence with hysteresis. Rules that consistently produce useful advice stay; rules that repeatedly miss have their confidence decayed toward their pre-mutation state. The reflection engine updates the escalation matrix in Redis; the correlator reloads it on every event without restart.
-- **Self-improvement loop** — after each session, the reflection engine runs four analysis passes (precision, utility, counterfactual, correlation tuning) and adjusts sigma thresholds, mutates LLM prompts via Ollama, and updates escalation confidence.
+- **Per-domain feedback attribution** — sessions that produced cross-domain advice distribute their feedback signal across all involved domains (1/N weighting). Sigma thresholds tune independently per domain; a chess+typing correlation that gets thumbs-up lowers chess *and* typing detection thresholds in lockstep.
+- **Self-improvement loop** — after each session, the reflection engine runs five analysis passes (precision per-domain, utility, counterfactual, correlation rule tuning, correlation window tuning) and adjusts sigma thresholds, mutates LLM prompts via Ollama, updates escalation confidence, and tunes per-rule windows.
 - **Blackboard architecture** — Redis holds durable state, NATS carries events between components. Six independent subsystems, each testable in isolation.
 
 ## Architecture
@@ -35,7 +37,7 @@ A hybrid neurosymbolic AI system that combines neural perception with symbolic r
          │
          │ NATS: augur.feedback.complete
          ▼
-  reasoning/reflection_engine.py         4-pass analysis → parameter tuning
+  reasoning/reflection_engine.py         5-pass analysis → parameter tuning
          │
          │ NATS: augur.reflect.complete
          ▼
@@ -55,7 +57,7 @@ At session end, the correlator flushes the in-memory NetworkX DiGraph to Redis f
 | `output/` | ANSI terminal display with domain-scoped dedup and correlation rendering |
 | `augur_mcp/` | FastMCP server with 21 tools (lifecycle, injection, inspection, control) |
 | `infrastructure/` | Launcher script (6-slot pipeline), connectivity and persistence smoke tests |
-| `tests/` | 302 tests total — 278 unit (mocked) + 21 fast integration (real Redis/NATS) + 3 slow (real Ollama) |
+| `tests/` | 415 tests — 390 unit (mocked) + 25 fast integration (real Redis/NATS) + 3 slow (real Ollama) |
 
 ## Prerequisites
 
@@ -125,7 +127,7 @@ The design rule is: **a new perception source must require zero changes to detec
 2. Add a `describe_signal` case in `reasoning/correlator.py` (one-liner formatter)
 3. Add a `DOMAIN_HANDLERS` entry in `reasoning/augur_advisor.py` (domain-specific prompt prefix)
 
-The detector picks up the new domain automatically (wildcard NATS subscription). The correlator will start finding cross-domain patterns as soon as two domains emit anomalies inside the same 30s window.
+The detector picks up the new domain automatically (wildcard NATS subscription). The correlator will start finding cross-domain patterns as soon as two domains emit anomalies inside the same correlation window (default 30s, adaptive per pairwise rule via the reflection engine).
 
 ## MCP server
 
@@ -184,12 +186,11 @@ Augur was built as a personal research project with substantial AI-assisted deve
 - Phase 2 self-improvement (feedback collector, reflection engine with precision/utility/counterfactual analysis)
 - Phase 2.5 infrastructure (AugurConfig, MCP server, Docker dual-mode, integration test framework)
 - **Phase 3 symbolic reasoning** — NetworkX knowledge graph, escalation matrix symbolic rules, cross-domain correlation, self-tuning via EWMA confidence. Live Ollama verification confirmed cross-domain reasoning produces qualitatively richer advice than per-signal alone.
+- **Phase 3 polish** — N-way correlation with default 3-way rules, adaptive per-rule correlation windows tuned by EWMA over observed lag, per-domain feedback attribution with 1/N weighting, atomic state persistence (single MULTI/EXEC pipeline for matrix + state), unified tuning marker that only commits when all writes succeed.
 
 **In progress / open:**
-- Three-domain (and higher) correlation — matrix supports it structurally, `correlate()` is pairwise-only
 - Cross-session pattern mining — per-session graphs are persisted but not yet queried across sessions (may be subsumed by Phase 6)
-- Adaptive correlation window
-- Multi-domain feedback attribution
+- 4-way and higher correlation rules — matrix supports it structurally; defaults ship up to 3-way; adaptive windows are pairwise-only
 
 **Future phases:**
 - Phase 4 — richer behavioral inference (session fingerprinting, longitudinal modeling)

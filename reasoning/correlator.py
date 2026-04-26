@@ -49,9 +49,6 @@ PUBLISH_CORRELATION = "augur.correlation.detected"
 REDIS_KEY_WINDOW = "augur:correlation:window"
 REDIS_KEY_MATRIX = "augur:config:escalation_matrix"
 
-CORRELATION_WINDOW_S = 30  # query window (seconds back from primary)
-PRUNE_WINDOW_S = 2 * CORRELATION_WINDOW_S  # derived: 60s buffer for clock skew
-
 # Safety valve for an in-memory session graph that never receives a
 # session.end message (e.g., publisher crash, network partition). Once a
 # session accumulates this many nodes, the correlator flushes the graph
@@ -64,12 +61,24 @@ SEVERITY_ORDER: dict[str, int] = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
 DEFAULT_ESCALATION_MATRIX: dict = {
     "version": "1.0",
     "rules": {
+        # Pairwise (existing)
         "LOW+LOW": "MEDIUM",
         "LOW+MEDIUM": "MEDIUM",
         "LOW+HIGH": "HIGH",
         "MEDIUM+MEDIUM": "HIGH",
         "MEDIUM+HIGH": "HIGH",
         "HIGH+HIGH": "HIGH",
+        # 3-way (NEW)
+        "LOW+LOW+LOW": "MEDIUM",
+        "LOW+LOW+MEDIUM": "MEDIUM",
+        "LOW+LOW+HIGH": "HIGH",
+        "LOW+MEDIUM+MEDIUM": "HIGH",
+        "LOW+MEDIUM+HIGH": "HIGH",
+        "LOW+HIGH+HIGH": "HIGH",
+        "MEDIUM+MEDIUM+MEDIUM": "HIGH",
+        "MEDIUM+MEDIUM+HIGH": "HIGH",
+        "MEDIUM+HIGH+HIGH": "HIGH",
+        "HIGH+HIGH+HIGH": "HIGH",
     },
 }
 
@@ -81,51 +90,106 @@ SEVERITY_GATE_PASSTHROUGH = {"MEDIUM", "HIGH"}  # forwarded even with no correla
 # ---------------------------------------------------------------------------
 
 
-def normalize_rule_key(sev1: str, sev2: str) -> str | None:
-    """Sort a severity pair by rank (LOW<MEDIUM<HIGH) and return 'A+B'.
+def normalize_rule_key_n_way(severities: list[str]) -> str | None:
+    """Sort N severities by rank (LOW<MEDIUM<HIGH) and join with '+'.
 
-    Uppercases inputs first because the detector emits lowercase severity.
-    Returns None for unknown severity levels — caller must fall back to
-    the higher of the two original severities.
+    Uppercases inputs first because the detector emits lowercase.
+    Returns None for empty input or any unknown severity — caller must
+    fall back to max-severity behaviour.
     """
-    s1, s2 = sev1.upper(), sev2.upper()
-    if s1 not in SEVERITY_ORDER or s2 not in SEVERITY_ORDER:
+    if not severities:
         return None
-    pair = sorted([s1, s2], key=lambda s: SEVERITY_ORDER[s])
-    return f"{pair[0]}+{pair[1]}"
+    upper = [s.upper() for s in severities]
+    if any(s not in SEVERITY_ORDER for s in upper):
+        return None
+    sorted_severities = sorted(upper, key=lambda s: SEVERITY_ORDER[s])
+    return "+".join(sorted_severities)
 
 
-def lookup_escalation(
-    sev1: str,
-    sev2: str,
+def lookup_escalation_n_way(
+    severities: list[str],
     matrix: dict,
 ) -> tuple[str, str | None]:
-    """Look up a severity pair in the escalation matrix.
+    """Look up an N-severity tuple in the escalation matrix.
 
     Returns ``(combined_severity, rule_label)`` where:
     - ``combined_severity`` is the escalated severity (uppercase).
-    - ``rule_label`` is ``"LOW+LOW→MEDIUM"`` on matrix hit, ``None`` on miss.
+    - ``rule_label`` is e.g. ``"LOW+LOW+LOW→MEDIUM"`` on hit, ``None`` on miss.
 
-    On matrix miss, falls back to ``max(sev1, sev2)`` by rank order. If
-    neither severity is recognized at all, returns the first input
-    uppercased with ``rule_label=None`` — the caller should have dropped
-    this event before reaching lookup, so this path is a safety net only.
+    Defensive: callers normally pass len >= 2 (correlation found path).
+    For len == 1 returns ``(severities[0].upper(), None)`` without matrix lookup.
+    For empty list returns ``("LOW", None)``.
+
+    On miss, falls back to ``max(severities)`` by rank order.
     """
-    key = normalize_rule_key(sev1, sev2)
-    rules = matrix.get("rules", {})
+    if not severities:
+        return "LOW", None
+    upper = [s.upper() for s in severities]
+    if len(upper) == 1:
+        return upper[0], None
 
+    key = normalize_rule_key_n_way(upper)
+    rules = matrix.get("rules", {})
     if key is not None and key in rules:
         combined = rules[key]
         return combined, f"{key}→{combined}"
 
-    # Fallback: take the higher of the two by rank
-    s1, s2 = sev1.upper(), sev2.upper()
-    r1 = SEVERITY_ORDER.get(s1, -1)
-    r2 = SEVERITY_ORDER.get(s2, -1)
-    if r1 < 0 and r2 < 0:
-        return s1, None
-    combined = s1 if r1 >= r2 else s2
-    return combined, None
+    # Fallback: max severity by rank
+    valid = [s for s in upper if s in SEVERITY_ORDER]
+    if not valid:
+        return upper[0], None
+    return max(valid, key=lambda s: SEVERITY_ORDER[s]), None
+
+
+def get_rule_window(
+    rule_key: str | None,
+    matrix: dict,
+    default_s: float,
+) -> float:
+    """Resolve per-rule window from matrix.rule_windows, fall back to default."""
+    if rule_key is None:
+        return default_s
+    rule_windows = matrix.get("rule_windows", {})
+    return rule_windows.get(rule_key, default_s)
+
+
+def compute_query_window(matrix: dict, default_s: float) -> float:
+    """Return max(default, max(rule_windows.values())). Used to size the candidate pool."""
+    rule_windows = matrix.get("rule_windows", {})
+    if not rule_windows:
+        return default_s
+    return max(default_s, max(rule_windows.values()))
+
+
+def compute_prune_window(query_window_s: float) -> float:
+    """Return 2 * query_window for clock-skew buffer."""
+    return 2.0 * query_window_s
+
+
+def filter_by_pairwise_window(
+    primary: dict,
+    candidates: list[dict],
+    matrix: dict,
+    default_window_s: float,
+) -> list[dict]:
+    """Drop candidates whose lag exceeds their pairwise rule's window.
+
+    For each candidate, compute the pairwise rule_key (primary↔candidate),
+    look up its window, and keep the candidate only if
+    (primary_ts - candidate_ts) <= rule_window. Unknown severities fall
+    back to default_window_s.
+    """
+    primary_ts = parse_timestamp(primary["timestamp"])
+    primary_sev = primary.get("severity", "")
+    survivors: list[dict] = []
+    for cand in candidates:
+        cand_ts = parse_timestamp(cand["timestamp"])
+        lag = primary_ts - cand_ts
+        rule_key = normalize_rule_key_n_way([primary_sev, cand.get("severity", "")])
+        window = get_rule_window(rule_key, matrix, default_window_s)
+        if lag <= window:
+            survivors.append(cand)
+    return survivors
 
 
 # ---------------------------------------------------------------------------
@@ -145,27 +209,30 @@ def _decode_member(member: bytes | str) -> dict:
     return json.loads(member)
 
 
-def add_to_window(r: redis.Redis, anomaly: dict) -> None:
+def add_to_window(r: redis.Redis, anomaly: dict, prune_window_s: float) -> None:
     """Add an anomaly to the correlation window and prune old entries.
 
     Member: JSON-serialized anomaly dict.
     Score: unix timestamp parsed from ``anomaly['timestamp']``.
-    Prune: removes entries with score <= ``now - PRUNE_WINDOW_S``.
+    Prune: removes entries with score <= ``now - prune_window_s``.
     """
     score = parse_timestamp(anomaly["timestamp"])
     member = json.dumps(anomaly)
     r.zadd(REDIS_KEY_WINDOW, {member: score})
-    # Score-based prune: remove everything older than the prune boundary.
-    r.zremrangebyscore(REDIS_KEY_WINDOW, "-inf", score - PRUNE_WINDOW_S)
+    r.zremrangebyscore(REDIS_KEY_WINDOW, "-inf", score - prune_window_s)
 
 
-def query_window(r: redis.Redis, primary: dict) -> list[dict]:
-    """Return anomalies from other domains within the last CORRELATION_WINDOW_S.
+def query_recent_other_domain(
+    r: redis.Redis,
+    primary: dict,
+    query_window_s: float,
+) -> list[dict]:
+    """Return anomalies from other domains within the last query_window_s.
 
     Filters out same-domain events (correlation is cross-domain by definition).
     """
     now = parse_timestamp(primary["timestamp"])
-    start = now - CORRELATION_WINDOW_S
+    start = now - query_window_s
     primary_domain = primary["domain"]
 
     raw_members = r.zrangebyscore(REDIS_KEY_WINDOW, start, now)
@@ -193,48 +260,41 @@ def _pick_most_recent_per_domain(events: list[dict]) -> list[dict]:
     return list(by_domain.values())
 
 
-def _highest_severity(events: list[dict]) -> dict:
-    """Return the event with the highest severity by rank."""
-    return max(
-        events,
-        key=lambda e: SEVERITY_ORDER.get(e["severity"].upper(), -1),
-    )
-
-
 def _build_correlation_payload(
     primary: dict,
     correlated: list[dict],
     matrix: dict,
+    config: AugurConfig,
 ) -> dict:
     """Assemble the correlated-event payload published on augur.correlation.detected."""
-    # Pairwise escalation uses the HIGHEST-severity correlated event
-    driver = _highest_severity(correlated)
-    combined_severity, rule_label = lookup_escalation(
-        primary["severity"], driver["severity"], matrix
-    )
+    # N-way severity tuple from primary + ALL surviving correlated events
+    severities = [primary["severity"]] + [e["severity"] for e in correlated]
+    combined_severity, rule_label = lookup_escalation_n_way(severities, matrix)
+    rule_key = normalize_rule_key_n_way(severities)
+    rule_window_s = get_rule_window(rule_key, matrix, config.correlation_window_s)
 
-    # Structural attribution: rule_key is derived from severities directly so
-    # the reflection engine can tune regardless of matrix-miss.
-    rule_key = normalize_rule_key(primary["severity"], driver["severity"])
-
-    # Temporal lag = primary - closest correlated event
+    # temporal_lag_seconds = closest correlated event (unchanged semantics)
+    # correlation_span_s   = max lag among correlated events (new)
     primary_ts = parse_timestamp(primary["timestamp"])
-    closest = min(
-        correlated,
-        key=lambda e: abs(primary_ts - parse_timestamp(e["timestamp"])),
-    )
-    lag = primary_ts - parse_timestamp(closest["timestamp"])
+    lags = [primary_ts - parse_timestamp(e["timestamp"]) for e in correlated]
+    temporal_lag = min(lags) if lags else 0.0
+    correlation_span = max(lags) if lags else 0.0
+
+    involved_domains = sorted({primary["domain"], *(e["domain"] for e in correlated)})
 
     return {
         "primary_anomaly": primary,
         "correlated_events": correlated,
         "correlation_found": True,
-        "temporal_lag_seconds": round(lag, 3),
+        "temporal_lag_seconds": round(temporal_lag, 3),
+        "correlation_span_s": round(correlation_span, 3),
         "combined_severity": combined_severity,
         "severity_escalated": combined_severity != primary["severity"].upper(),
         "escalation_rule": rule_label,
         "escalation_matrix_version": matrix.get("version") if rule_label else None,
         "rule_key": rule_key,
+        "rule_window_s": rule_window_s,
+        "involved_domains": involved_domains,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -246,11 +306,14 @@ def _build_passthrough_payload(primary: dict) -> dict:
         "correlated_events": [],
         "correlation_found": False,
         "temporal_lag_seconds": None,
+        "correlation_span_s": None,
         "combined_severity": primary["severity"].upper(),
         "severity_escalated": False,
         "escalation_rule": None,
         "escalation_matrix_version": None,
         "rule_key": None,
+        "rule_window_s": None,
+        "involved_domains": [primary["domain"]],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -259,6 +322,7 @@ def correlate(
     primary: dict,
     r: redis.Redis,
     matrix: dict,
+    config: AugurConfig,
 ) -> dict | None:
     """Run the full correlation pipeline for one anomaly.
 
@@ -267,17 +331,25 @@ def correlate(
       - passthrough payload dict (standalone medium/high — forward as-is)
       - None                     (standalone low — drop, advisor ignores)
     """
-    # 1. Add primary to window, prune old entries
-    add_to_window(r, primary)
+    query_window_s = compute_query_window(matrix, config.correlation_window_s)
+    prune_window_s = compute_prune_window(query_window_s)
 
-    # 2. Query for other-domain events in the last 30s
-    other_domain_events = query_window(r, primary)
+    # 1. Add primary, prune by computed prune_window_s
+    add_to_window(r, primary, prune_window_s)
 
-    # 3. Collapse to one event per domain (most recent)
+    # 2. Query for other-domain events within query_window_s
+    other_domain_events = query_recent_other_domain(r, primary, query_window_s)
+
+    # 3. Collapse to most-recent-per-domain
     grouped = _pick_most_recent_per_domain(other_domain_events)
 
-    if grouped:
-        return _build_correlation_payload(primary, grouped, matrix)
+    # 4. Filter by pairwise window (per-rule overrides applied here)
+    filtered = filter_by_pairwise_window(
+        primary, grouped, matrix, config.correlation_window_s
+    )
+
+    if filtered:
+        return _build_correlation_payload(primary, filtered, matrix, config)
 
     # No correlation — gate by severity
     severity = primary.get("severity", "low").upper()
@@ -395,17 +467,52 @@ def flush_graph_to_redis(
 
 
 def ensure_matrix_seeded(pm: PersistenceManager) -> dict:
-    """Write the default escalation matrix if absent; return the active matrix."""
+    """Write the default matrix if absent; additively merge missing default
+    rules into an existing matrix without overwriting operator changes.
+
+    Operator deletion of a default rule is non-durable: it will be re-seeded
+    on next startup. The intended operator model is to set the rule's target
+    to LOW (which short-circuits escalation) for durable disable.
+
+    rule_windows in an existing matrix are preserved untouched.
+    """
     existing = pm.load_escalation_matrix()
     if existing is None:
         pm.save_escalation_matrix(DEFAULT_ESCALATION_MATRIX)
         log.info("Seeded default escalation matrix (version=1.0)")
         return DEFAULT_ESCALATION_MATRIX
+
+    existing_rules = existing.get("rules", {})
+    default_rules = DEFAULT_ESCALATION_MATRIX["rules"]
+
+    merged_rules = dict(existing_rules)
+    added: list[str] = []
+    for k, v in default_rules.items():
+        if k not in merged_rules:
+            merged_rules[k] = v
+            added.append(k)
+
+    if not added:
+        log.info(
+            "Loaded existing escalation matrix (version=%s, no defaults missing)",
+            existing.get("version", "unknown"),
+        )
+        return existing
+
+    merged = {
+        "version": existing.get("version", "1.0"),
+        "rules": merged_rules,
+    }
+    if "rule_windows" in existing:
+        merged["rule_windows"] = existing["rule_windows"]
+
+    pm.save_escalation_matrix(merged)
     log.info(
-        "Loaded existing escalation matrix (version=%s)",
-        existing.get("version", "unknown"),
+        "Seeded %d missing default rules into existing matrix: %s",
+        len(added),
+        ", ".join(added),
     )
-    return existing
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +551,7 @@ async def run() -> None:
         matrix = pm.load_escalation_matrix() or DEFAULT_ESCALATION_MATRIX
 
         try:
-            payload = correlate(anomaly, redis_client, matrix)
+            payload = correlate(anomaly, redis_client, matrix, config)
         except Exception as exc:
             log.error("correlate() failed: %s", exc, exc_info=True)
             return
@@ -578,9 +685,9 @@ async def run() -> None:
     log.info("Subscribed to %s (debug graph dump)", SUBSCRIBE_DEBUG_DUMP)
     log.info("Subscribed to %s (session end graph flush)", SUBSCRIBE_SESSION_END)
     log.info(
-        "Window: %ds query / %ds prune buffer",
-        CORRELATION_WINDOW_S,
-        PRUNE_WINDOW_S,
+        "Window: %.1fs default query / %.1fs prune buffer (per-rule overrides via matrix)",
+        config.correlation_window_s,
+        compute_prune_window(config.correlation_window_s),
     )
     log.info("Waiting for anomalies...")
 

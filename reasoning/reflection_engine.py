@@ -60,23 +60,47 @@ SUBJECT_REFLECT_COMPLETE = "augur.reflect.complete"
 DEFAULT_DOMAIN = "chess"
 
 
-def _derive_domain(feedback: dict) -> str:
-    """Pick a domain for threshold/prompt tuning from the session's feedback.
+def _attribution_weights(event: dict) -> dict[str, float]:
+    """Return {domain: weight} per advice event.
 
-    Only standalone (non-correlated) advice events contribute, because the
-    correlation path does not use stored prompts or per-domain sigma
-    thresholds. Returns the most common domain among those events, or
-    ``DEFAULT_DOMAIN`` if the session had no attributable standalone events.
+    Standalone (non-correlated) advice: full weight 1.0 to event['domain'].
+    Correlated advice with involved_domains: each involved domain gets 1/N.
+    Old records without 'involved_domains' (or empty): falls back to {primary: 1.0}.
     """
+    primary = event.get("domain", "unknown")
+    if not event.get("correlation_found"):
+        return {primary: 1.0}
+    domains = event.get("involved_domains") or []
+    if not domains:
+        return {primary: 1.0}
+    weight = 1.0 / len(domains)
+    return {d: weight for d in domains}
+
+
+def _derive_domain(feedback: dict) -> str:
+    """Pick a domain for utility/counterfactual single-domain scope.
+
+    Priority order:
+    1. Most-common domain among standalone (non-correlated) advice events.
+       Standalone advice is what utility analysis & prompt mutation operate on.
+    2. Most-common primary domain across ALL advice events (used when the
+       session was entirely correlated; post-Task-8 correlated records carry
+       the real primary domain so this is meaningful).
+    3. DEFAULT_DOMAIN as last resort.
+    """
+    advice_events = feedback.get("advice_events", [])
     standalone_domains = [
         ev.get("domain")
-        for ev in feedback.get("advice_events", [])
+        for ev in advice_events
         if ev.get("domain") and not ev.get("correlation_found")
     ]
-    if not standalone_domains:
-        return DEFAULT_DOMAIN
-    most_common, _count = Counter(standalone_domains).most_common(1)[0]
-    return most_common
+    if standalone_domains:
+        return Counter(standalone_domains).most_common(1)[0][0]
+    # Round-3 fallback: post-Task-8, correlated records have a real domain too.
+    all_domains = [ev.get("domain") for ev in advice_events if ev.get("domain")]
+    if all_domains:
+        return Counter(all_domains).most_common(1)[0][0]
+    return DEFAULT_DOMAIN
 
 
 # ---------------------------------------------------------------------------
@@ -86,70 +110,86 @@ def _derive_domain(feedback: dict) -> str:
 
 def analyze_precision(
     feedback: dict,
-    current_thresholds: dict,
+    current_thresholds_per_domain: dict[str, dict],
     config: AugurConfig,
 ) -> dict:
-    """Evaluate detection precision from session feedback.
+    """Per-domain detection-precision analysis with multi-domain attribution.
 
-    Looks at how many anomalies were fired vs how many received positive
-    explicit feedback or high behavioral scores.
+    Standalone advice contributes 1.0 weight to its primary domain;
+    correlated advice contributes 1/N to each involved domain. A domain
+    needs >= 2.0 weighted-total signal to receive a sigma adjustment.
+
+    Returns:
+      {
+        "analysis": "precision",
+        "per_domain": {<domain>: {total_anomalies, useful, precision_ratio,
+                                   action, sigma_before, sigma_after, reason}, ...},
+        "domains_evaluated": [<domain>, ...],
+      }
     """
-    advice_events = feedback.get("advice_events", [])
-    summary = feedback.get("session_summary", {})
+    from collections import defaultdict
 
-    total = summary.get("total_advice", len(advice_events))
-    if total == 0:
-        return {
-            "analysis": "precision",
-            "total_anomalies": 0,
-            "escalated": 0,
-            "precision_ratio": 1.0,
-            "action": "none",
-            "reason": "No anomalies this session",
-            "sigma_before": current_thresholds.get("sigma_threshold", 2.0),
-            "sigma_after": current_thresholds.get("sigma_threshold", 2.0),
+    weighted_totals: dict[str, float] = defaultdict(float)
+    weighted_useful: dict[str, float] = defaultdict(float)
+
+    for ev in feedback.get("advice_events", []):
+        weights = _attribution_weights(ev)
+        useful = (
+            ev.get("explicit_rating") == "y" or ev.get("behavioral_score", 0) >= 0.7
+        )
+        for domain, w in weights.items():
+            weighted_totals[domain] += w
+            if useful:
+                weighted_useful[domain] += w
+
+    per_domain: dict[str, dict] = {}
+    for domain in sorted(weighted_totals.keys()):
+        total = weighted_totals[domain]
+        useful = weighted_useful[domain]
+        thresholds = current_thresholds_per_domain.get(domain, {"sigma_threshold": 2.0})
+        sigma_before = thresholds.get("sigma_threshold", 2.0)
+        sigma_after = sigma_before
+        action = "none"
+
+        if total < 2.0:
+            reason = f"Insufficient signal for {domain} ({total:.1f} weighted events)"
+        else:
+            precision = useful / total
+            if precision < 0.3:
+                sigma_after = min(
+                    sigma_before + config.sigma_adjust_step, config.sigma_max
+                )
+                action = "raise_sigma"
+                reason = (
+                    f"{domain} precision {precision:.0%} ({useful:.1f}/{total:.1f}); "
+                    f"raising sigma {sigma_before:.1f} -> {sigma_after:.1f}"
+                )
+            elif precision > 0.8:
+                sigma_after = max(
+                    sigma_before - config.sigma_adjust_step, config.sigma_min
+                )
+                action = "lower_sigma"
+                reason = (
+                    f"{domain} precision {precision:.0%} ({useful:.1f}/{total:.1f}); "
+                    f"lowering sigma {sigma_before:.1f} -> {sigma_after:.1f}"
+                )
+            else:
+                reason = f"{domain} precision {precision:.0%} acceptable"
+
+        per_domain[domain] = {
+            "total_anomalies": round(total, 3),
+            "useful": round(useful, 3),
+            "precision_ratio": round(useful / total, 3) if total > 0 else 0.0,
+            "action": action,
+            "sigma_before": sigma_before,
+            "sigma_after": sigma_after,
+            "reason": reason,
         }
-
-    # Count "useful" detections: explicit positive OR high behavioral score
-    useful = 0
-    for ev in advice_events:
-        if ev.get("explicit_rating") == "y":
-            useful += 1
-        elif ev.get("behavioral_score", 0) >= 0.7:
-            useful += 1
-
-    precision = useful / total if total > 0 else 0.0
-    sigma_before = current_thresholds.get("sigma_threshold", 2.0)
-    sigma_after = sigma_before
-    action = "none"
-    reason = f"Precision {precision:.0%} is acceptable"
-
-    if precision < 0.3 and total >= 2:
-        # Too many false positives — raise threshold
-        sigma_after = min(sigma_before + config.sigma_adjust_step, config.sigma_max)
-        action = "raise_sigma"
-        reason = (
-            f"Low precision ({precision:.0%}): {useful}/{total} useful. "
-            f"Raising sigma {sigma_before:.1f} -> {sigma_after:.1f}"
-        )
-    elif precision > 0.8 and total >= 2:
-        # Very high precision — could lower threshold to catch more
-        sigma_after = max(sigma_before - config.sigma_adjust_step, config.sigma_min)
-        action = "lower_sigma"
-        reason = (
-            f"High precision ({precision:.0%}): {useful}/{total} useful. "
-            f"Lowering sigma {sigma_before:.1f} -> {sigma_after:.1f}"
-        )
 
     return {
         "analysis": "precision",
-        "total_anomalies": total,
-        "escalated": useful,
-        "precision_ratio": round(precision, 3),
-        "action": action,
-        "reason": reason,
-        "sigma_before": sigma_before,
-        "sigma_after": sigma_after,
+        "per_domain": per_domain,
+        "domains_evaluated": list(per_domain.keys()),
     }
 
 
@@ -514,6 +554,129 @@ def analyze_correlation_tuning(
 
 
 # ---------------------------------------------------------------------------
+# Correlation window tuning (per-rule observed-lag EWMA)
+# ---------------------------------------------------------------------------
+
+
+def analyze_correlation_window_tuning(
+    feedback: dict,
+    current_matrix: dict,
+    current_window_state: dict,
+    config: AugurConfig,
+) -> dict[str, Any]:
+    """Update per-rule observed-lag EWMA, derive new rule_windows.
+
+    EWMA tracks observed *lag*; window is derived from EWMA at update time
+    via lag_multiplier and clamp to [min_s, max_s]. Hysteresis on the
+    derived window prevents flapping.
+
+    Pairwise rule_keys only this phase — N-way (3+) keys are skipped.
+
+    Pure function: no Redis or NATS I/O.
+    """
+    from collections import defaultdict
+
+    if not config.correlation_tuning_enabled:
+        return {
+            "analysis": "correlation_window_tuning",
+            "disabled": True,
+            "reason": "Tuning disabled via AUGUR_CORRELATION_TUNING_ENABLED=false",
+            "rules_evaluated": 0,
+            "per_rule": {},
+            "new_window_state": dict(current_window_state),
+            "new_rule_windows": None,
+        }
+
+    events_with_lag = [
+        e
+        for e in feedback.get("advice_events", [])
+        if e.get("correlation_found")
+        and isinstance(e.get("rule_key"), str)
+        and e["rule_key"].count("+") == 1  # pairwise only
+        and isinstance(e.get("correlation_span_s"), (int, float))
+    ]
+    if not events_with_lag:
+        return {
+            "analysis": "correlation_window_tuning",
+            "rules_evaluated": 0,
+            "per_rule": {},
+            "new_window_state": dict(current_window_state),
+            "new_rule_windows": None,
+            "reason": "No pairwise correlated advice events with lag data",
+        }
+
+    spans_per_rule: dict[str, list[float]] = defaultdict(list)
+    for ev in events_with_lag:
+        spans_per_rule[ev["rule_key"]].append(ev["correlation_span_s"])
+
+    current_windows = current_matrix.get("rule_windows", {})
+    new_windows = dict(current_windows)
+    new_state = {k: dict(v) for k, v in current_window_state.items()}
+    per_rule_result: dict = {}
+    windows_changed = False
+
+    alpha = config.correlation_window_tuning_alpha
+
+    for rule_key, spans in spans_per_rule.items():
+        session_mean = sum(spans) / len(spans)
+
+        prev_state = new_state.get(rule_key, {"ewma_lag": session_mean})
+        prev_ewma_lag = prev_state["ewma_lag"]
+        new_ewma_lag = round((1 - alpha) * prev_ewma_lag + alpha * session_mean, 3)
+
+        target_window = max(
+            config.correlation_window_min_s,
+            min(
+                new_ewma_lag * config.correlation_window_lag_multiplier,
+                config.correlation_window_max_s,
+            ),
+        )
+        target_window = round(target_window, 1)
+
+        current_window = current_windows.get(rule_key, config.correlation_window_s)
+        delta_pct = (
+            abs(target_window - current_window) / current_window
+            if current_window > 0
+            else 1.0
+        )
+
+        if delta_pct >= config.correlation_window_tuning_hysteresis_pct:
+            new_windows[rule_key] = target_window
+            windows_changed = True
+            action = "tuned"
+            window_after = target_window
+        else:
+            action = "held"
+            window_after = current_window
+
+        new_state[rule_key] = {"ewma_lag": new_ewma_lag}
+
+        per_rule_result[rule_key] = {
+            "session_mean_span": round(session_mean, 3),
+            "event_count": len(spans),
+            "ewma_lag_before": prev_ewma_lag,
+            "ewma_lag_after": new_ewma_lag,
+            "window_before": current_window,
+            "window_after": window_after,
+            "delta_pct": round(delta_pct, 3),
+            "action": action,
+        }
+
+    return {
+        "analysis": "correlation_window_tuning",
+        "rules_evaluated": len(spans_per_rule),
+        "per_rule": per_rule_result,
+        "new_rule_windows": new_windows if windows_changed else None,
+        "new_window_state": new_state,
+        "reason": "; ".join(
+            f"{k}: {v['action']} {v['window_before']}→{v['window_after']}"
+            for k, v in per_rule_result.items()
+        )
+        or "No rules updated",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Prompt mutation via Ollama
 # ---------------------------------------------------------------------------
 
@@ -612,28 +775,43 @@ async def run_reflection(
         domain,
     )
 
-    # Load current thresholds
-    stored_thresholds = pm.load_thresholds(domain)
-    current_thresholds = {
+    # Build per-domain thresholds by walking attribution weights across all events
+    domains_with_advice: set[str] = set()
+    for ev in feedback.get("advice_events", []):
+        domains_with_advice.update(_attribution_weights(ev).keys())
+    if not domains_with_advice:
+        domains_with_advice = {DEFAULT_DOMAIN}
+    default_thresholds = {
         "sigma_threshold": 2.0,
         "ewma_alpha": 0.3,
         "hst_threshold": 0.7,
-        **(stored_thresholds or {}),
+    }
+    thresholds_per_domain: dict[str, dict] = {
+        d: {**default_thresholds, **(pm.load_thresholds(d) or {})}
+        for d in sorted(domains_with_advice)
     }
 
-    # 1. Precision analysis
-    precision = analyze_precision(feedback, current_thresholds, config)
-    log.info("Precision: %s", precision["reason"])
+    # 1. Precision analysis (per-domain)
+    precision = analyze_precision(feedback, thresholds_per_domain, config)
 
-    # Apply sigma adjustment if needed
-    if precision["action"] in ("raise_sigma", "lower_sigma"):
-        current_thresholds["sigma_threshold"] = precision["sigma_after"]
-        pm.save_thresholds(domain, current_thresholds)
-        log.info(
-            "Saved updated sigma threshold: %.1f -> %.1f",
-            precision["sigma_before"],
-            precision["sigma_after"],
-        )
+    sigma_values_after: dict[str, float] = {}
+    any_sigma_adjusted = False
+    for dom, result in precision["per_domain"].items():
+        if result["action"] in ("raise_sigma", "lower_sigma"):
+            thresholds_per_domain[dom]["sigma_threshold"] = result["sigma_after"]
+            pm.save_thresholds(dom, thresholds_per_domain[dom])
+            any_sigma_adjusted = True
+        sigma_values_after[dom] = thresholds_per_domain[dom]["sigma_threshold"]
+
+    # Single-domain thresholds for analyze_counterfactual (and log summary)
+    current_thresholds = thresholds_per_domain.get(domain, dict(default_thresholds))
+
+    log.info(
+        "Precision: %d domain(s) evaluated: %s",
+        len(precision["per_domain"]),
+        ", ".join(f"{d}={r['action']}" for d, r in precision["per_domain"].items())
+        or "no signal",
+    )
 
     # 2. Utility analysis
     utility = analyze_utility(feedback, config)
@@ -656,47 +834,115 @@ async def run_reflection(
     counterfactual = analyze_counterfactual(pm, domain, current_thresholds)
     log.info("Counterfactual: %s", counterfactual["recommendation"])
 
-    # 4. Correlation matrix tuning
-    tuning: dict[str, Any]
+    # Step 4 + 5 — unified marker covers both correlation tuning + window tuning.
+    # Single matrix load, two analyses, single merged matrix save.
+    matrix_tuning: dict[str, Any]
+    window_tuning: dict[str, Any]
     if pm.is_tuning_applied(session_id):
         log.info(
-            "Skipping correlation tuning — already applied for session %s",
+            "Skipping correlation + window tuning — already applied for session %s",
             session_id,
         )
-        tuning = {
+        matrix_tuning = {
             "analysis": "correlation_tuning",
+            "skipped": True,
+            "reason": "already_applied_for_session",
+        }
+        window_tuning = {
+            "analysis": "correlation_window_tuning",
             "skipped": True,
             "reason": "already_applied_for_session",
         }
     else:
         current_matrix = pm.load_escalation_matrix() or DEFAULT_ESCALATION_MATRIX
-        current_confidence_state = pm.load_rule_confidence() or {}
-        tuning = analyze_correlation_tuning(
-            feedback, current_matrix, current_confidence_state, config
-        )
-        log.info("Correlation tuning: %s", tuning.get("reason", "no reason"))
+        current_confidence = pm.load_rule_confidence() or {}
+        current_window_state = pm.load_rule_window_state() or {}
 
-        if tuning.get("rules_evaluated", 0) > 0:
-            # BUG-03: save confidence + mark_applied BEFORE the matrix save.
-            # If save_escalation_matrix raises, the confidence update is
-            # already persisted (not losable), and the marker prevents the
-            # next reflect-trigger from double-applying the same EWMA step
-            # to already-updated state. A failed matrix write is recoverable
-            # on the next session; double-updated confidence is not.
-            pm.save_rule_confidence(tuning["new_confidence_state"])
-            pm.mark_tuning_applied(session_id)
-            if tuning.get("new_matrix") is not None:
+        matrix_tuning = analyze_correlation_tuning(
+            feedback, current_matrix, current_confidence, config
+        )
+        log.info("Correlation tuning: %s", matrix_tuning.get("reason", "no reason"))
+
+        window_tuning = analyze_correlation_window_tuning(
+            feedback, current_matrix, current_window_state, config
+        )
+        log.info(
+            "Correlation window tuning: %s", window_tuning.get("reason", "no reason")
+        )
+
+        matrix_changed = (
+            matrix_tuning.get("new_matrix") is not None
+            or window_tuning.get("new_rule_windows") is not None
+        )
+        matrix_save_ok = True
+        if matrix_changed:
+            merged: dict[str, Any] = {
+                "version": current_matrix.get("version", "1.0"),
+                "rules": (
+                    matrix_tuning["new_matrix"]["rules"]
+                    if matrix_tuning.get("new_matrix") is not None
+                    else dict(current_matrix.get("rules", {}))
+                ),
+                "rule_windows": (
+                    window_tuning["new_rule_windows"]
+                    if window_tuning.get("new_rule_windows") is not None
+                    else dict(current_matrix.get("rule_windows", {}))
+                ),
+            }
+            try:
+                pm.save_escalation_matrix(merged)
+                log.info(
+                    "Merged matrix updated: matrix=%s, windows=%s",
+                    "yes" if matrix_tuning.get("new_matrix") else "unchanged",
+                    "yes" if window_tuning.get("new_rule_windows") else "unchanged",
+                )
+            except redis.RedisError as exc:
+                matrix_save_ok = False
+                log.error("Merged matrix save failed: %s", exc)
+
+        state_save_ok = True
+        if matrix_save_ok:
+            confidence_to_save = (
+                matrix_tuning["new_confidence_state"]
+                if matrix_tuning.get("rules_evaluated", 0) > 0
+                else None
+            )
+            window_state_to_save = (
+                window_tuning["new_window_state"]
+                if window_tuning.get("rules_evaluated", 0) > 0
+                else None
+            )
+            if confidence_to_save is not None or window_state_to_save is not None:
                 try:
-                    pm.save_escalation_matrix(tuning["new_matrix"])
-                    log.info(
-                        "Escalation matrix updated by reflection engine: %s",
-                        tuning["reason"],
+                    pm.save_tuning_state(
+                        confidence=confidence_to_save,
+                        window_state=window_state_to_save,
                     )
                 except redis.RedisError as exc:
-                    log.error(
-                        "Matrix save failed (confidence was saved, marker set): %s",
-                        exc,
-                    )
+                    state_save_ok = False
+                    log.error("Atomic tuning-state save failed: %s", exc)
+        else:
+            state_save_ok = False
+            log.warning(
+                "Skipping atomic tuning-state save because matrix save failed; "
+                "next reflection trigger will redo the EWMA update against the "
+                "original (unchanged) state."
+            )
+
+        if (
+            (
+                matrix_tuning.get("rules_evaluated", 0) > 0
+                or window_tuning.get("rules_evaluated", 0) > 0
+            )
+            and matrix_save_ok
+            and state_save_ok
+        ):
+            pm.mark_tuning_applied(session_id)
+        elif not (matrix_save_ok and state_save_ok):
+            log.warning(
+                "Skipping mark_tuning_applied because at least one tuning write failed; "
+                "next reflection trigger will retry."
+            )
 
     # Build report
     report = {
@@ -706,14 +952,17 @@ async def run_reflection(
             "precision": precision,
             "utility": utility,
             "counterfactual": counterfactual,
-            "correlation_tuning": tuning,
+            "correlation_tuning": matrix_tuning,
+            "correlation_window_tuning": window_tuning,
         },
         "adjustments": {
-            "sigma_adjusted": precision["action"] != "none",
-            "sigma_value": precision["sigma_after"],
-            "prompt_mutated": mutation_result is not None
-            and mutation_result.get("mutated", False),
-            "matrix_mutated": tuning.get("new_matrix") is not None,
+            "sigma_adjusted": any_sigma_adjusted,
+            "sigma_values": sigma_values_after,
+            "prompt_mutated": (
+                mutation_result is not None and mutation_result.get("mutated", False)
+            ),
+            "matrix_mutated": matrix_tuning.get("new_matrix") is not None,
+            "windows_tuned": window_tuning.get("new_rule_windows") is not None,
         },
     }
 

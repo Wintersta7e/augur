@@ -241,19 +241,18 @@ class TestCOV05UtilityTotalUsesFilteredCount:
 class TestCOV07RuleKeyUsesDriverNotClosest:
     """When the correlator's sliding window contains multiple events of
     different severities at different temporal distances, rule_key must
-    reflect the *driver* (highest-severity) correlated event, not the
-    *closest* (used for temporal_lag)."""
+    include all surviving correlated events (N-way) and temporal_lag must
+    reflect the *closest* correlated event."""
 
-    def test_driver_selected_over_closest(self) -> None:
+    def test_nway_rule_key_and_closest_temporal_lag(self) -> None:
         # Primary: LOW at T=30s
         primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
         # Closest: LOW at T=29:55 (5s lag) — same severity as primary
         closest_low = _make_anomaly(
             "typing", "user", "low", "2026-03-17T14:29:55+00:00"
         )
-        # Driver: MEDIUM at T=29:35 (25s lag) — higher severity but
-        # further away. The lag must come from closest_low; the rule_key
-        # must come from driver_medium.
+        # Higher severity event at T=29:35 (25s lag) — both survive
+        # pairwise filter (both < 30s default window).
         driver_medium = _make_anomaly(
             "focus", "app", "medium", "2026-03-17T14:29:35+00:00"
         )
@@ -265,12 +264,12 @@ class TestCOV07RuleKeyUsesDriverNotClosest:
             json.dumps(primary).encode(),
         ]
 
-        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX, CONFIG)
         assert result is not None
         assert result["correlation_found"] is True
-        # Driver is MEDIUM, primary is LOW → rule_key="LOW+MEDIUM"
-        assert result["rule_key"] == "LOW+MEDIUM"
-        # Closest is the 5s-lag LOW event, so lag should be ~5s not 25s
+        # N-way: primary=LOW + typing=LOW + focus=MEDIUM → "LOW+LOW+MEDIUM"
+        assert result["rule_key"] == "LOW+LOW+MEDIUM"
+        # temporal_lag = min(5s, 25s) = closest = ~5s
         assert 4.0 < result["temporal_lag_seconds"] < 6.0
 
 
@@ -315,7 +314,7 @@ class TestCOV11PrimaryAnomalyFullPassthrough:
         correlated = _make_anomaly("typing", "user", "low", "2026-03-17T14:29:48+00:00")
 
         result = _build_correlation_payload(
-            primary, [correlated], DEFAULT_ESCALATION_MATRIX
+            primary, [correlated], DEFAULT_ESCALATION_MATRIX, CONFIG
         )
         # Full dict equality — every field preserved
         assert result["primary_anomaly"] == primary

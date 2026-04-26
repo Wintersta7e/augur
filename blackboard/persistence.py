@@ -237,6 +237,52 @@ class PersistenceManager:
             return None
         return json.loads(raw)
 
+    def save_rule_window_state(self, state: dict) -> None:
+        """Persist per-rule observed-lag EWMA state.
+
+        Schema: {rule_key: {"ewma_lag": float}}.
+        Mirrors save_rule_confidence; written to a separate Redis key.
+        """
+        self._r.set("augur:config:rule_window_state", json.dumps(state))
+
+    def load_rule_window_state(self) -> dict:
+        """Load per-rule observed-lag EWMA state. Returns {} if absent or corrupt."""
+        raw = self._r.get("augur:config:rule_window_state")
+        if not raw:
+            return {}
+        try:
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            log.warning("rule_window_state Redis value was corrupt; returning empty")
+            return {}
+
+    def save_tuning_state(
+        self,
+        confidence: dict | None = None,
+        window_state: dict | None = None,
+    ) -> None:
+        """Atomically persist rule_confidence + rule_window_state in one
+        Redis MULTI/EXEC pipeline.
+
+        Codex round-3 fix: previously the two state writes were separate
+        calls. If the second one failed after the first succeeded, the
+        confidence/window EWMAs were partially advanced and the next retry
+        would double-apply. With pipeline.execute() (transaction=True is
+        redis-py's default), either both SETs are committed atomically or
+        neither is.
+        """
+        if confidence is None and window_state is None:
+            return
+        pipe = self._r.pipeline()  # transaction=True by default
+        if confidence is not None:
+            pipe.set("augur:config:escalation_confidence", json.dumps(confidence))
+        if window_state is not None:
+            pipe.set("augur:config:rule_window_state", json.dumps(window_state))
+        pipe.execute()
+
     # -- Reflection reports --------------------------------------------------
 
     def save_reflection(self, session_id: str, report_dict: dict) -> None:

@@ -46,6 +46,10 @@ def mock_persistence_manager() -> MagicMock:
     pm.load_last_anomaly.return_value = None
     pm.load_last_advice.return_value = None
     pm.is_tuning_applied.return_value = False
+    # Task-10 additions: rule_window_state + atomic save_tuning_state
+    pm.load_rule_window_state.return_value = {}
+    pm.save_rule_window_state.return_value = None
+    pm.save_tuning_state.return_value = None
     # Save/mark methods return None explicitly (MagicMock default is a
     # new MagicMock, not None — we want callers to see None so a naive
     # `if pm.save_*(...)` check doesn't behave unexpectedly.)

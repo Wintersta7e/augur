@@ -11,23 +11,28 @@ from unittest.mock import MagicMock
 import networkx as nx
 import pytest
 
+from blackboard.config import AugurConfig
 from reasoning.correlator import (
-    CORRELATION_WINDOW_S,
     DEFAULT_ESCALATION_MATRIX,
-    PRUNE_WINDOW_S,
     SEVERITY_ORDER,
     add_correlation_to_graph,
     add_to_window,
+    compute_prune_window,
     correlate,
     ensure_matrix_seeded,
     flush_graph_to_redis,
-    lookup_escalation,
+    lookup_escalation_n_way,
     new_session_graph,
     node_key,
-    normalize_rule_key,
+    normalize_rule_key_n_way,
     parse_timestamp,
-    query_window,
+    query_recent_other_domain,
 )
+
+_CONFIG = AugurConfig.from_env()
+# Replaces the removed module-level constants for tests that relied on them.
+CORRELATION_WINDOW_S: float = _CONFIG.correlation_window_s
+PRUNE_WINDOW_S: float = compute_prune_window(CORRELATION_WINDOW_S)
 
 
 def _make_anomaly(
@@ -58,32 +63,32 @@ def _make_anomaly(
 class TestNormalizeRuleKey:
     def test_rank_order_not_alphabetical(self) -> None:
         # Alphabetical would give 'HIGH+LOW' — wrong
-        assert normalize_rule_key("HIGH", "LOW") == "LOW+HIGH"
+        assert normalize_rule_key_n_way(["HIGH", "LOW"]) == "LOW+HIGH"
 
     def test_low_medium_rank_ordered(self) -> None:
-        assert normalize_rule_key("MEDIUM", "LOW") == "LOW+MEDIUM"
+        assert normalize_rule_key_n_way(["MEDIUM", "LOW"]) == "LOW+MEDIUM"
 
     def test_medium_high_rank_ordered(self) -> None:
-        assert normalize_rule_key("HIGH", "MEDIUM") == "MEDIUM+HIGH"
+        assert normalize_rule_key_n_way(["HIGH", "MEDIUM"]) == "MEDIUM+HIGH"
 
     def test_same_severity_pair(self) -> None:
-        assert normalize_rule_key("LOW", "LOW") == "LOW+LOW"
-        assert normalize_rule_key("MEDIUM", "MEDIUM") == "MEDIUM+MEDIUM"
-        assert normalize_rule_key("HIGH", "HIGH") == "HIGH+HIGH"
+        assert normalize_rule_key_n_way(["LOW", "LOW"]) == "LOW+LOW"
+        assert normalize_rule_key_n_way(["MEDIUM", "MEDIUM"]) == "MEDIUM+MEDIUM"
+        assert normalize_rule_key_n_way(["HIGH", "HIGH"]) == "HIGH+HIGH"
 
     def test_lowercase_inputs_are_uppercased(self) -> None:
         # Detector emits lowercase — correlator is the boundary
-        assert normalize_rule_key("low", "high") == "LOW+HIGH"
-        assert normalize_rule_key("low", "low") == "LOW+LOW"
+        assert normalize_rule_key_n_way(["low", "high"]) == "LOW+HIGH"
+        assert normalize_rule_key_n_way(["low", "low"]) == "LOW+LOW"
 
     def test_mixed_case_inputs(self) -> None:
-        assert normalize_rule_key("Low", "Medium") == "LOW+MEDIUM"
-        assert normalize_rule_key("HIGH", "low") == "LOW+HIGH"
+        assert normalize_rule_key_n_way(["Low", "Medium"]) == "LOW+MEDIUM"
+        assert normalize_rule_key_n_way(["HIGH", "low"]) == "LOW+HIGH"
 
     def test_unknown_severity_returns_none(self) -> None:
-        assert normalize_rule_key("CRITICAL", "LOW") is None
-        assert normalize_rule_key("LOW", "UNKNOWN") is None
-        assert normalize_rule_key("", "LOW") is None
+        assert normalize_rule_key_n_way(["CRITICAL", "LOW"]) is None
+        assert normalize_rule_key_n_way(["LOW", "UNKNOWN"]) is None
+        assert normalize_rule_key_n_way(["", "LOW"]) is None
 
 
 class TestConstants:
@@ -100,59 +105,69 @@ class TestConstants:
 
 
 class TestLookupEscalation:
-    """lookup_escalation(sev1, sev2, matrix) -> (combined, rule_label)."""
+    """lookup_escalation_n_way([sev1, sev2], matrix) -> (combined, rule_label)."""
 
     def test_low_low_escalates_to_medium(self) -> None:
-        combined, rule = lookup_escalation("low", "low", DEFAULT_ESCALATION_MATRIX)
+        combined, rule = lookup_escalation_n_way(
+            ["low", "low"], DEFAULT_ESCALATION_MATRIX
+        )
         assert combined == "MEDIUM"
         assert rule == "LOW+LOW→MEDIUM"
 
     def test_low_high_escalates_to_high(self) -> None:
-        combined, rule = lookup_escalation("low", "high", DEFAULT_ESCALATION_MATRIX)
+        combined, rule = lookup_escalation_n_way(
+            ["low", "high"], DEFAULT_ESCALATION_MATRIX
+        )
         assert combined == "HIGH"
         assert rule == "LOW+HIGH→HIGH"
 
     def test_medium_medium_escalates_to_high(self) -> None:
-        combined, rule = lookup_escalation(
-            "medium", "medium", DEFAULT_ESCALATION_MATRIX
+        combined, rule = lookup_escalation_n_way(
+            ["medium", "medium"], DEFAULT_ESCALATION_MATRIX
         )
         assert combined == "HIGH"
         assert rule == "MEDIUM+MEDIUM→HIGH"
 
     def test_high_high_stays_high(self) -> None:
-        combined, rule = lookup_escalation("high", "high", DEFAULT_ESCALATION_MATRIX)
+        combined, rule = lookup_escalation_n_way(
+            ["high", "high"], DEFAULT_ESCALATION_MATRIX
+        )
         assert combined == "HIGH"
         assert rule == "HIGH+HIGH→HIGH"
 
     def test_all_six_defined_pairs_present(self) -> None:
         # Guard against a future edit removing matrix entries
         pairs = [
-            ("low", "low"),
-            ("low", "medium"),
-            ("low", "high"),
-            ("medium", "medium"),
-            ("medium", "high"),
-            ("high", "high"),
+            ["low", "low"],
+            ["low", "medium"],
+            ["low", "high"],
+            ["medium", "medium"],
+            ["medium", "high"],
+            ["high", "high"],
         ]
-        for s1, s2 in pairs:
-            combined, _ = lookup_escalation(s1, s2, DEFAULT_ESCALATION_MATRIX)
+        for pair in pairs:
+            combined, _ = lookup_escalation_n_way(pair, DEFAULT_ESCALATION_MATRIX)
             assert combined in {"MEDIUM", "HIGH"}
 
     def test_unknown_rule_falls_back_to_higher_severity(self) -> None:
         # Matrix missing the requested entry
         sparse_matrix = {"version": "1.0", "rules": {"LOW+LOW": "MEDIUM"}}
-        combined, rule = lookup_escalation("low", "high", sparse_matrix)
+        combined, rule = lookup_escalation_n_way(["low", "high"], sparse_matrix)
         assert combined == "HIGH"
         assert rule is None  # fallback path signals no matrix hit
 
     def test_unknown_severity_falls_back_to_higher(self) -> None:
-        combined, rule = lookup_escalation("weird", "high", DEFAULT_ESCALATION_MATRIX)
+        combined, rule = lookup_escalation_n_way(
+            ["weird", "high"], DEFAULT_ESCALATION_MATRIX
+        )
         assert combined == "HIGH"
         assert rule is None
 
     def test_unknown_severity_both_sides_uppercases_and_picks_first(self) -> None:
-        # Pathological case: both unknown — return the first uppercased, no rule
-        combined, rule = lookup_escalation("weird", "other", DEFAULT_ESCALATION_MATRIX)
+        # Pathological case: both unknown — n_way fallback returns upper[0], no rule
+        combined, rule = lookup_escalation_n_way(
+            ["weird", "other"], DEFAULT_ESCALATION_MATRIX
+        )
         assert combined == "WEIRD"  # caller already dropped in real flow
         assert rule is None
 
@@ -173,7 +188,7 @@ class TestAddToWindow:
         mock_redis = MagicMock()
         anomaly = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
 
-        add_to_window(mock_redis, anomaly)
+        add_to_window(mock_redis, anomaly, PRUNE_WINDOW_S)
 
         mock_redis.zadd.assert_called_once()
         args, _ = mock_redis.zadd.call_args
@@ -190,7 +205,7 @@ class TestAddToWindow:
         mock_redis = MagicMock()
         anomaly = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
 
-        add_to_window(mock_redis, anomaly)
+        add_to_window(mock_redis, anomaly, PRUNE_WINDOW_S)
 
         # ZREMRANGEBYSCORE is the pruning primitive
         mock_redis.zremrangebyscore.assert_called_once()
@@ -223,7 +238,7 @@ class TestQueryWindow:
             json.dumps(primary).encode(),
         ]
 
-        results = query_window(mock_redis, primary)
+        results = query_recent_other_domain(mock_redis, primary, CORRELATION_WINDOW_S)
 
         assert len(results) == 1
         assert results[0]["domain"] == "typing"
@@ -235,7 +250,7 @@ class TestQueryWindow:
         mock_redis = MagicMock()
         mock_redis.zrangebyscore.return_value = []
 
-        query_window(mock_redis, primary)
+        query_recent_other_domain(mock_redis, primary, CORRELATION_WINDOW_S)
 
         args, _ = mock_redis.zrangebyscore.call_args
         key, min_score, max_score = args
@@ -250,7 +265,9 @@ class TestQueryWindow:
         mock_redis = MagicMock()
         mock_redis.zrangebyscore.return_value = [json.dumps(primary).encode()]
 
-        assert query_window(mock_redis, primary) == []
+        assert (
+            query_recent_other_domain(mock_redis, primary, CORRELATION_WINDOW_S) == []
+        )
 
     def test_handles_string_members_from_decoded_redis(self) -> None:
         primary = _make_anomaly("chess", "white", "low", "2026-03-17T14:30:00+00:00")
@@ -259,7 +276,7 @@ class TestQueryWindow:
         mock_redis = MagicMock()
         mock_redis.zrangebyscore.return_value = [json.dumps(other)]  # str, not bytes
 
-        results = query_window(mock_redis, primary)
+        results = query_recent_other_domain(mock_redis, primary, CORRELATION_WINDOW_S)
         assert len(results) == 1
         assert results[0]["domain"] == "typing"
 
@@ -285,7 +302,7 @@ class TestCorrelate:
         mock_redis = MagicMock()
         self._setup_window(mock_redis, [typing_low, primary])
 
-        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX, _CONFIG)
 
         assert result is not None
         assert result["correlation_found"] is True
@@ -303,7 +320,7 @@ class TestCorrelate:
         mock_redis = MagicMock()
         self._setup_window(mock_redis, [primary])  # only itself
 
-        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX, _CONFIG)
 
         assert result is not None
         assert result["correlation_found"] is False
@@ -319,7 +336,7 @@ class TestCorrelate:
         mock_redis = MagicMock()
         self._setup_window(mock_redis, [primary])
 
-        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX, _CONFIG)
 
         assert result is not None
         assert result["correlation_found"] is False
@@ -330,7 +347,7 @@ class TestCorrelate:
         mock_redis = MagicMock()
         self._setup_window(mock_redis, [primary])  # only itself in window
 
-        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX, _CONFIG)
 
         assert result is None
 
@@ -346,7 +363,7 @@ class TestCorrelate:
         mock_redis = MagicMock()
         self._setup_window(mock_redis, [typing_older, typing_newer, primary])
 
-        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX, _CONFIG)
 
         assert result is not None
         assert len(result["correlated_events"]) == 1
@@ -363,7 +380,7 @@ class TestCorrelate:
         mock_redis = MagicMock()
         self._setup_window(mock_redis, [typing_ev, focus_ev, primary])
 
-        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX, _CONFIG)
 
         assert result is not None
         assert len(result["correlated_events"]) == 2
@@ -379,7 +396,7 @@ class TestCorrelate:
         mock_redis = MagicMock()
         self._setup_window(mock_redis, [typing_med, primary])
 
-        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX, _CONFIG)
 
         assert result is not None
         assert result["combined_severity"] == "MEDIUM"
@@ -395,7 +412,7 @@ class TestCorrelate:
         # Simulate: zrangebyscore with max=now and min=now-30 includes it
         self._setup_window(mock_redis, [on_boundary, primary])
 
-        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX, _CONFIG)
 
         assert result is not None
         assert result["correlation_found"] is True
@@ -413,7 +430,7 @@ class TestCorrelate:
             call_log.append("query") or []
         )
 
-        correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+        correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX, _CONFIG)
 
         assert call_log.index("zadd") < call_log.index("query")
         assert call_log.index("prune") < call_log.index("query")
@@ -576,15 +593,23 @@ class TestEnsureMatrixSeeded:
         )
         assert result == DEFAULT_ESCALATION_MATRIX
 
-    def test_leaves_existing_matrix_alone(self) -> None:
+    def test_preserves_operator_overrides_and_adds_missing_defaults(self) -> None:
+        # Existing matrix has one operator-overridden rule and is missing all others.
         existing = {"version": "1.5", "rules": {"LOW+LOW": "HIGH"}}
         mock_pm = MagicMock()
         mock_pm.load_escalation_matrix.return_value = existing
 
         result = ensure_matrix_seeded(mock_pm)
 
-        mock_pm.save_escalation_matrix.assert_not_called()
-        assert result == existing
+        # Operator's HIGH override for LOW+LOW is preserved
+        assert result["rules"]["LOW+LOW"] == "HIGH"
+        # Missing defaults are merged in
+        assert result["rules"]["LOW+LOW+LOW"] == "MEDIUM"
+        assert result["rules"]["HIGH+HIGH+HIGH"] == "HIGH"
+        # Version is preserved from existing
+        assert result["version"] == "1.5"
+        # Save was called because defaults were missing
+        mock_pm.save_escalation_matrix.assert_called_once()
 
 
 class TestPayloadRuleKey:
@@ -601,7 +626,7 @@ class TestPayloadRuleKey:
             json.dumps(primary).encode(),
         ]
 
-        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX, _CONFIG)
 
         assert result is not None
         assert result["correlation_found"] is True
@@ -613,7 +638,7 @@ class TestPayloadRuleKey:
         mock_redis = MagicMock()
         mock_redis.zrangebyscore.return_value = [json.dumps(primary).encode()]
 
-        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX, _CONFIG)
 
         assert result is not None
         assert result["correlation_found"] is False
@@ -629,7 +654,7 @@ class TestPayloadRuleKey:
             json.dumps(primary).encode(),
         ]
 
-        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX)
+        result = correlate(primary, mock_redis, DEFAULT_ESCALATION_MATRIX, _CONFIG)
 
         assert result is not None
         assert result["rule_key"] == "LOW+HIGH"

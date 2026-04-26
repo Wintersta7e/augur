@@ -141,3 +141,93 @@ class TestRedisProperties:
         with patch.dict("os.environ", {"AUGUR_REDIS_URL": "redis://myhost:7777"}):
             cfg = AugurConfig.from_env()
         assert cfg.redis_port == 7777
+
+
+class TestCorrelationWindowDefaults:
+    def test_correlation_window_s_default(self) -> None:
+        cfg = AugurConfig.from_env()
+        assert cfg.correlation_window_s == 30.0
+
+    def test_correlation_window_s_env_override(self) -> None:
+        with patch.dict("os.environ", {"AUGUR_CORRELATION_WINDOW_S": "45.0"}):
+            cfg = AugurConfig.from_env()
+        assert cfg.correlation_window_s == 45.0
+
+    def test_correlation_window_min_s_default(self) -> None:
+        cfg = AugurConfig.from_env()
+        assert cfg.correlation_window_min_s == 5.0
+
+    def test_correlation_window_max_s_default(self) -> None:
+        cfg = AugurConfig.from_env()
+        assert cfg.correlation_window_max_s == 120.0
+
+    def test_correlation_window_tuning_alpha_default(self) -> None:
+        cfg = AugurConfig.from_env()
+        assert cfg.correlation_window_tuning_alpha == 0.2
+
+    def test_correlation_window_tuning_fields_overridable(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "AUGUR_CORRELATION_WINDOW_MIN_S": "3.0",
+                "AUGUR_CORRELATION_WINDOW_MAX_S": "180.0",
+                "AUGUR_CORRELATION_WINDOW_TUNING_ALPHA": "0.3",
+                "AUGUR_CORRELATION_WINDOW_LAG_MULTIPLIER": "3.0",
+                "AUGUR_CORRELATION_WINDOW_TUNING_HYSTERESIS_PCT": "0.10",
+            },
+        ):
+            cfg = AugurConfig.from_env()
+        assert cfg.correlation_window_min_s == 3.0
+        assert cfg.correlation_window_max_s == 180.0
+        assert cfg.correlation_window_tuning_alpha == 0.3
+        assert cfg.correlation_window_lag_multiplier == 3.0
+        assert cfg.correlation_window_tuning_hysteresis_pct == 0.10
+
+
+class TestCorrelationWindowBounds:
+    def test_correlation_window_s_below_min_raises(self) -> None:
+        with patch.dict("os.environ", {"AUGUR_CORRELATION_WINDOW_S": "1.0"}):
+            with pytest.raises(ValueError, match="correlation_window_s"):
+                AugurConfig.from_env()
+
+    def test_correlation_window_s_above_max_raises(self) -> None:
+        with patch.dict("os.environ", {"AUGUR_CORRELATION_WINDOW_S": "200.0"}):
+            with pytest.raises(ValueError, match="correlation_window_s"):
+                AugurConfig.from_env()
+
+    def test_correlation_window_max_s_below_window_s_raises(self) -> None:
+        # Default correlation_window_s is 30.0; setting max to 10.0 should fail
+        with patch.dict("os.environ", {"AUGUR_CORRELATION_WINDOW_MAX_S": "10.0"}):
+            with pytest.raises(ValueError, match="correlation_window_max_s"):
+                AugurConfig.from_env()
+
+    def test_correlation_window_lag_multiplier_out_of_range_raises(self) -> None:
+        with patch.dict(
+            "os.environ", {"AUGUR_CORRELATION_WINDOW_LAG_MULTIPLIER": "10.0"}
+        ):
+            with pytest.raises(ValueError, match="lag_multiplier"):
+                AugurConfig.from_env()
+
+    def test_correlation_window_tuning_hysteresis_out_of_range_raises(self) -> None:
+        with patch.dict(
+            "os.environ", {"AUGUR_CORRELATION_WINDOW_TUNING_HYSTERESIS_PCT": "1.5"}
+        ):
+            with pytest.raises(ValueError, match="hysteresis"):
+                AugurConfig.from_env()
+
+    def test_correlation_window_tuning_alpha_out_of_range_raises(self) -> None:
+        with patch.dict("os.environ", {"AUGUR_CORRELATION_WINDOW_TUNING_ALPHA": "1.5"}):
+            with pytest.raises(ValueError, match="alpha"):
+                AugurConfig.from_env()
+
+    def test_correlation_window_min_s_above_window_s_raises(self) -> None:
+        """correlation_window_min_s must not exceed correlation_window_s."""
+        with patch.dict("os.environ", {"AUGUR_CORRELATION_WINDOW_MIN_S": "60.0"}):
+            # Default correlation_window_s is 30.0, so min=60 violates the invariant.
+            with pytest.raises(ValueError, match="correlation_window_min_s"):
+                AugurConfig.from_env()
+
+    def test_correlation_window_min_s_zero_or_negative_raises(self) -> None:
+        with patch.dict("os.environ", {"AUGUR_CORRELATION_WINDOW_MIN_S": "0"}):
+            with pytest.raises(ValueError, match="correlation_window_min_s"):
+                AugurConfig.from_env()

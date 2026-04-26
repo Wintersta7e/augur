@@ -55,6 +55,25 @@ BOLD = "\033[1m"
 RESET = "\033[0m"
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_primary_domain(advice_data: dict) -> str:
+    """Return the actual primary domain for an advice payload.
+
+    Used by on_advice to replace the prior hardcoded "chess" — Augur
+    advice can come from any domain (typing, chess, future code-edit, etc.)
+    and was being misattributed.
+    """
+    return (
+        advice_data.get("domain")
+        or advice_data.get("primary_anomaly", {}).get("domain")
+        or "chess"  # last-resort fallback preserves historical behaviour for malformed payloads
+    )
+
+
+# ---------------------------------------------------------------------------
 # Pending advice tracker
 # ---------------------------------------------------------------------------
 
@@ -74,6 +93,11 @@ class PendingAdvice:
         correlated_domains: list[str] | None = None,
         rule_key: str | None = None,
         escalation_rule: str | None = None,
+        # NEW Phase 3 polish fields:
+        involved_domains: list[str] | None = None,
+        temporal_lag_seconds: float | None = None,
+        correlation_span_s: float | None = None,
+        rule_window_s: float | None = None,
     ) -> None:
         self.advice_id = advice_id
         self.domain = domain
@@ -90,6 +114,11 @@ class PendingAdvice:
         self.correlated_domains = correlated_domains or []
         self.rule_key = rule_key
         self.escalation_rule = escalation_rule
+        # NEW Phase 3 polish fields
+        self.involved_domains = involved_domains or []
+        self.temporal_lag_seconds = temporal_lag_seconds
+        self.correlation_span_s = correlation_span_s
+        self.rule_window_s = rule_window_s
 
     def add_post_move(self, value: float) -> None:
         if len(self.think_times_after) < POST_ADVICE_TRACK_MOVES:
@@ -144,6 +173,11 @@ class PendingAdvice:
             "correlated_domains": self.correlated_domains,
             "rule_key": self.rule_key,
             "escalation_rule": self.escalation_rule,
+            # NEW Phase 3 polish fields
+            "involved_domains": self.involved_domains,
+            "temporal_lag_seconds": self.temporal_lag_seconds,
+            "correlation_span_s": self.correlation_span_s,
+            "rule_window_s": self.rule_window_s,
         }
 
 
@@ -259,6 +293,9 @@ async def run() -> None:
         except (json.JSONDecodeError, UnicodeDecodeError):
             return
 
+        # Pull primary domain from advice payload (was hardcoded "chess")
+        primary_domain = _resolve_primary_domain(data)
+
         entity = data.get("player", "?")
         severity = data.get("severity", "?")
         move = data.get("move", "?")
@@ -269,12 +306,14 @@ async def run() -> None:
         correlated_domains = data.get("correlated_domains") or []
         rule_key = data.get("rule_key")
         escalation_rule = data.get("escalation_rule")
+        # NEW Phase 3 polish fields
+        involved_domains = data.get("involved_domains") or []
+        temporal_lag_seconds = data.get("temporal_lag_seconds")
+        correlation_span_s = data.get("correlation_span_s")
+        rule_window_s = data.get("rule_window_s")
 
-        # Read baseline mean from Redis
-        baseline_raw = pm.load_baseline(
-            "chess",
-            entity,
-        )
+        # Read baseline mean for the ACTUAL primary domain (was hardcoded "chess")
+        baseline_raw = pm.load_baseline(primary_domain, entity)
         baseline_mean = (
             baseline_raw.get("ewma_mean", think_time) if baseline_raw else think_time
         )
@@ -282,7 +321,7 @@ async def run() -> None:
         advice_id = str(uuid.uuid4())[:8]
         pending = PendingAdvice(
             advice_id=advice_id,
-            domain="chess",
+            domain=primary_domain,  # was "chess"
             entity=entity,
             severity=severity,
             baseline_mean=baseline_mean,
@@ -291,6 +330,10 @@ async def run() -> None:
             correlated_domains=correlated_domains,
             rule_key=rule_key,
             escalation_rule=escalation_rule,
+            involved_domains=involved_domains,
+            temporal_lag_seconds=temporal_lag_seconds,
+            correlation_span_s=correlation_span_s,
+            rule_window_s=rule_window_s,
         )
         advice_events.append(pending)
 

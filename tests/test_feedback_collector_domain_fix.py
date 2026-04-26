@@ -1,6 +1,6 @@
 """Tests for the primary_domain fix and new metadata capture in PendingAdvice."""
 
-from perception.feedback_collector import PendingAdvice
+from perception.feedback_collector import PendingAdvice, _resolve_primary_domain
 
 
 def test_pending_advice_records_correct_domain():
@@ -56,7 +56,6 @@ def test_pending_advice_new_fields_default_none():
     assert record["rule_window_s"] is None
 
 
-from perception.feedback_collector import _resolve_primary_domain
 
 
 def test_resolve_primary_domain_from_top_level():

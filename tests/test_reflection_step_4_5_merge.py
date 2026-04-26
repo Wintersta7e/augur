@@ -44,7 +44,7 @@ async def test_step_4_and_5_save_single_merged_matrix():
     redis_client = MagicMock()
     http_client = AsyncMock()
 
-    report = await run_reflection(
+    await run_reflection(
         "session-123",
         feedback,
         pm,

@@ -492,12 +492,10 @@ async def run() -> None:
                 )
                 or "?"
             )
-            value = payload.get("temporal_lag_seconds", 0) or 0
         else:
             primary = payload["primary_anomaly"]
             domain = primary.get("domain", "unknown")
             entity = primary.get("entity", primary.get("player", "?"))
-            value = primary.get("value", primary.get("think_time", 0))
 
         log.info(
             "Event received [%s] path=%s domain=%s entity=%s — querying LLM",

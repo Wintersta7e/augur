@@ -103,70 +103,86 @@ def _derive_domain(feedback: dict) -> str:
 
 def analyze_precision(
     feedback: dict,
-    current_thresholds: dict,
+    current_thresholds_per_domain: dict[str, dict],
     config: AugurConfig,
 ) -> dict:
-    """Evaluate detection precision from session feedback.
+    """Per-domain detection-precision analysis with multi-domain attribution.
 
-    Looks at how many anomalies were fired vs how many received positive
-    explicit feedback or high behavioral scores.
+    Standalone advice contributes 1.0 weight to its primary domain;
+    correlated advice contributes 1/N to each involved domain. A domain
+    needs >= 2.0 weighted-total signal to receive a sigma adjustment.
+
+    Returns:
+      {
+        "analysis": "precision",
+        "per_domain": {<domain>: {total_anomalies, useful, precision_ratio,
+                                   action, sigma_before, sigma_after, reason}, ...},
+        "domains_evaluated": [<domain>, ...],
+      }
     """
-    advice_events = feedback.get("advice_events", [])
-    summary = feedback.get("session_summary", {})
+    from collections import defaultdict
 
-    total = summary.get("total_advice", len(advice_events))
-    if total == 0:
-        return {
-            "analysis": "precision",
-            "total_anomalies": 0,
-            "escalated": 0,
-            "precision_ratio": 1.0,
-            "action": "none",
-            "reason": "No anomalies this session",
-            "sigma_before": current_thresholds.get("sigma_threshold", 2.0),
-            "sigma_after": current_thresholds.get("sigma_threshold", 2.0),
+    weighted_totals: dict[str, float] = defaultdict(float)
+    weighted_useful: dict[str, float] = defaultdict(float)
+
+    for ev in feedback.get("advice_events", []):
+        weights = _attribution_weights(ev)
+        useful = (
+            ev.get("explicit_rating") == "y" or ev.get("behavioral_score", 0) >= 0.7
+        )
+        for domain, w in weights.items():
+            weighted_totals[domain] += w
+            if useful:
+                weighted_useful[domain] += w
+
+    per_domain: dict[str, dict] = {}
+    for domain in sorted(weighted_totals.keys()):
+        total = weighted_totals[domain]
+        useful = weighted_useful[domain]
+        thresholds = current_thresholds_per_domain.get(domain, {"sigma_threshold": 2.0})
+        sigma_before = thresholds.get("sigma_threshold", 2.0)
+        sigma_after = sigma_before
+        action = "none"
+
+        if total < 2.0:
+            reason = f"Insufficient signal for {domain} ({total:.1f} weighted events)"
+        else:
+            precision = useful / total
+            if precision < 0.3:
+                sigma_after = min(
+                    sigma_before + config.sigma_adjust_step, config.sigma_max
+                )
+                action = "raise_sigma"
+                reason = (
+                    f"{domain} precision {precision:.0%} ({useful:.1f}/{total:.1f}); "
+                    f"raising sigma {sigma_before:.1f} -> {sigma_after:.1f}"
+                )
+            elif precision > 0.8:
+                sigma_after = max(
+                    sigma_before - config.sigma_adjust_step, config.sigma_min
+                )
+                action = "lower_sigma"
+                reason = (
+                    f"{domain} precision {precision:.0%} ({useful:.1f}/{total:.1f}); "
+                    f"lowering sigma {sigma_before:.1f} -> {sigma_after:.1f}"
+                )
+            else:
+                reason = f"{domain} precision {precision:.0%} acceptable"
+
+        per_domain[domain] = {
+            "total_anomalies": round(total, 3),
+            "useful": round(useful, 3),
+            "precision_ratio": round(useful / total, 3) if total > 0 else 0.0,
+            "action": action,
+            "sigma_before": sigma_before,
+            "sigma_after": sigma_after,
+            "reason": reason,
         }
-
-    # Count "useful" detections: explicit positive OR high behavioral score
-    useful = 0
-    for ev in advice_events:
-        if ev.get("explicit_rating") == "y":
-            useful += 1
-        elif ev.get("behavioral_score", 0) >= 0.7:
-            useful += 1
-
-    precision = useful / total if total > 0 else 0.0
-    sigma_before = current_thresholds.get("sigma_threshold", 2.0)
-    sigma_after = sigma_before
-    action = "none"
-    reason = f"Precision {precision:.0%} is acceptable"
-
-    if precision < 0.3 and total >= 2:
-        # Too many false positives — raise threshold
-        sigma_after = min(sigma_before + config.sigma_adjust_step, config.sigma_max)
-        action = "raise_sigma"
-        reason = (
-            f"Low precision ({precision:.0%}): {useful}/{total} useful. "
-            f"Raising sigma {sigma_before:.1f} -> {sigma_after:.1f}"
-        )
-    elif precision > 0.8 and total >= 2:
-        # Very high precision — could lower threshold to catch more
-        sigma_after = max(sigma_before - config.sigma_adjust_step, config.sigma_min)
-        action = "lower_sigma"
-        reason = (
-            f"High precision ({precision:.0%}): {useful}/{total} useful. "
-            f"Lowering sigma {sigma_before:.1f} -> {sigma_after:.1f}"
-        )
 
     return {
         "analysis": "precision",
-        "total_anomalies": total,
-        "escalated": useful,
-        "precision_ratio": round(precision, 3),
-        "action": action,
-        "reason": reason,
-        "sigma_before": sigma_before,
-        "sigma_after": sigma_after,
+        "per_domain": per_domain,
+        "domains_evaluated": list(per_domain.keys()),
     }
 
 

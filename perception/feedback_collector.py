@@ -242,7 +242,7 @@ async def run() -> None:
     # State
     current_session_id: str | None = None
     advice_events: list[PendingAdvice] = []
-    active_tracking: dict[str, PendingAdvice] = {}  # entity -> pending advice
+    active_tracking: dict[tuple[str, str], PendingAdvice] = {}  # (domain, entity) -> pending advice
 
     def get_session_id() -> str:
         nonlocal current_session_id
@@ -342,15 +342,16 @@ async def run() -> None:
         # Without this, the displaced advice would stay at behavioural=0.0
         # and finalized=False for the lifetime of the session, silently
         # corrupting the feedback record used by the reflection engine.
-        displaced = active_tracking.get(entity)
+        tracking_key = (primary_domain, entity)
+        displaced = active_tracking.get(tracking_key)
         if displaced is not None and not displaced.finalized:
             displaced._compute_behavioral_score()
             log.debug(
                 "Finalized displaced pending advice %s before overwriting %s",
                 displaced.advice_id,
-                entity,
+                tracking_key,
             )
-        active_tracking[entity] = pending
+        active_tracking[tracking_key] = pending
 
         log.info(
             "Advice received for %s (%s, %s) — awaiting feedback",
@@ -395,10 +396,11 @@ async def run() -> None:
             return
 
         entity = event.entity
-        if entity not in active_tracking:
+        tracking_key = (event.domain, entity)
+        if tracking_key not in active_tracking:
             return
 
-        pending = active_tracking[entity]
+        pending = active_tracking[tracking_key]
         pending.add_post_move(event.value)
 
         log.info(
@@ -417,7 +419,7 @@ async def run() -> None:
                 entity,
                 pending.behavioral_score,
             )
-            del active_tracking[entity]
+            del active_tracking[tracking_key]
             save_current_feedback()
 
     # -- Session end handler -------------------------------------------------

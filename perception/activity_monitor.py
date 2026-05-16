@@ -16,7 +16,6 @@ Run on the Windows host:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import socket
@@ -30,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from blackboard.contracts import PerceptionEvent
+from blackboard.session import get_active_session
 
 log = logging.getLogger("activity_monitor")
 
@@ -289,14 +289,11 @@ class _IntensityWindow:
 
 @dataclass
 class _SessionReader:
-    """Wraps the Redis read of augur:session:current with validity checks.
+    """Wraps get_active_session with last_seen tracking + change detection.
 
     On every read, updates `last_seen` and sets `changed_since_last`
-    when the session_id changed from one read to the next. Callers use
-    `changed_since_last` to know when to flush their NATS buffer.
-    last_read_failed tracks transport errors; when True, changed_since_last
-    should not be used to trigger buffer flushes (transient recovery is not
-    a session change).
+    when the session_id changes between reads. Callers use this signal
+    to flush the drop log and reset state machines.
     """
 
     redis_client: Any  # redis.Redis at runtime
@@ -304,59 +301,9 @@ class _SessionReader:
 
     last_seen: str | None = None
     changed_since_last: bool = False
-    last_read_failed: bool = False
-
-    REDIS_KEY: str = "augur:session:current"
 
     def read_current(self) -> str | None:
-        try:
-            raw = self.redis_client.get(self.REDIS_KEY)
-        except Exception as exc:  # noqa: BLE001
-            # Catch redis.ConnectionError, redis.TimeoutError, or any other
-            # transport-level error. Built-in ConnectionError for test mocks.
-            exc_name = type(exc).__name__
-            if any(
-                x in exc_name for x in ("ConnectionError", "TimeoutError", "OSError")
-            ):
-                log.warning(
-                    "activity_monitor: Redis transport error reading session: %s", exc
-                )
-                self.last_read_failed = True
-                # Don't update last_seen on transport error — keep prior state so
-                # recovery doesn't trigger a spurious session-change signal.
-                return None
-            # Re-raise non-transport errors (e.g., auth failures).
-            raise
-        self.last_read_failed = False
-        if not raw:
-            self._update_seen(None)
-            return None
-        try:
-            data = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            self._update_seen(None)
-            return None
-        if not isinstance(data, dict):
-            self._update_seen(None)
-            return None
-        if data.get("status") != "active":
-            self._update_seen(None)
-            return None
-        session_id = data.get("session_id")
-        if not session_id:
-            self._update_seen(None)
-            return None
-        started_at = data.get("started_at")
-        if started_at:
-            try:
-                started = datetime.fromisoformat(started_at)
-                age = datetime.now(timezone.utc) - started
-            except (ValueError, TypeError):
-                self._update_seen(None)
-                return None
-            if age.total_seconds() > self.max_age_h * 3600:
-                self._update_seen(None)
-                return None
+        session_id = get_active_session(self.redis_client, max_age_h=self.max_age_h)
         self._update_seen(session_id)
         return session_id
 
@@ -487,25 +434,17 @@ class ActivityMonitor:
 
     def _resolve_session(self) -> str | None:
         sid = self.session_reader.read_current()
-        # Don't treat recovery-from-transport-error as a session change.
-        # changed_since_last was set during the prior failed-read path,
-        # and could now fire spuriously. last_read_failed=False at this
-        # point means the current read succeeded; if last_seen flipped,
-        # it's a real change. On session change: reset the state machines
-        # entirely so the next iteration rebuilds fresh _FocusState /
-        # _IntensityWindow under the new session_id. Keeping their carry-over
-        # state would emit a span belonging to the old session tagged with
-        # the new session_id.
-        if (
-            self.session_reader.changed_since_last
-            and not self.session_reader.last_read_failed
-        ):
+        # On session change: reset the state machines entirely so the next
+        # iteration rebuilds fresh _FocusState / _IntensityWindow under the new
+        # session_id. Keeping their carry-over state would emit a span
+        # belonging to the old session tagged with the new session_id.
+        if self.session_reader.changed_since_last:
             self.drops.flush()
             self.focus = None
             self.intensity = None
-            # Counter holds last_input_time; safe to keep (input that
-            # arrived in old session won't be attributed to new since
-            # both classes will be rebuilt from scratch).
+            # Counter holds last_input_time; safe to keep (input that arrived
+            # in old session won't be attributed to new since both classes will
+            # be rebuilt from scratch).
         return sid
 
     def _get_foreground(self) -> tuple[str, str | None]:

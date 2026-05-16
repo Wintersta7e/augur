@@ -207,14 +207,34 @@ def build_activity_focus_prompt(
 ) -> str:
     """Build an LLM prompt for an activity-focus dwell anomaly."""
     ctx = anomaly.get("context", {}) or {}
-    entity = anomaly.get("entity", "?")
-    new_app = ctx.get("new_app", "?")
-    active_dwell = ctx.get("active_dwell_s", "?")
-    idle_dwell = ctx.get("idle_dwell_s", "?")
-    total_dwell = ctx.get("total_dwell_s", "?")
-    baseline_mean = anomaly.get("baseline_mean", "?")
-    deviation = anomaly.get("deviation_score", "?")
-    severity = anomaly.get("severity", "?")
+    entity = anomaly.get("entity")
+    new_app = ctx.get("new_app")
+    active_dwell = ctx.get("active_dwell_s")
+    baseline_mean = anomaly.get("baseline_mean")
+    deviation = anomaly.get("deviation_score")
+    severity = anomaly.get("severity")
+
+    # Validate required fields
+    missing = [
+        k
+        for k, v in (
+            ("entity", entity),
+            ("context.new_app", new_app),
+            ("context.active_dwell_s", active_dwell),
+            ("baseline_mean", baseline_mean),
+            ("deviation_score", deviation),
+            ("severity", severity),
+        )
+        if v is None
+    ]
+    if missing:
+        raise ValueError(
+            f"build_activity_focus_prompt: missing required fields: {missing}"
+        )
+
+    # Optional fields default to 0
+    idle_dwell = ctx.get("idle_dwell_s", 0.0)
+    total_dwell = ctx.get("total_dwell_s", active_dwell)
 
     return f"""{system_prompt}
 

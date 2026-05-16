@@ -1,0 +1,468 @@
+"""Fast integration tests for the activity_focus + activity_intensity pipeline.
+
+Requires Redis + NATS running (docker compose up -d). The tests publish
+hand-crafted PerceptionEvents directly to NATS — the Windows daemon is
+not exercised; that's manual-verification territory.
+
+Marked NOT slow; the Ollama-gated case lives in a separate file with
+@pytest.mark.slow.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import uuid
+
+import pytest
+import redis
+
+from blackboard.config import AugurConfig
+from blackboard.connections import connect_redis
+from blackboard.contracts import PerceptionEvent
+
+
+async def _publish(nc, subject: str, event: PerceptionEvent) -> None:
+    await nc.publish(subject, event.to_bytes())
+
+
+def _focus_event(
+    session_id: str,
+    entity: str = "code",
+    value: float = 4.8,
+    prev_app: str = "code",
+    new_app: str = "chrome",
+    active_dwell_s: float = 25.0,
+) -> PerceptionEvent:
+    return PerceptionEvent(
+        domain="activity_focus",
+        stream_id="activity_focus",
+        entity=entity,
+        event_type="focus_change",
+        value=value,
+        unit="log1p_seconds",
+        context={
+            "prev_app": prev_app,
+            "new_app": new_app,
+            "prev_title": None,
+            "new_title": None,
+            "active_dwell_s": active_dwell_s,
+            "idle_dwell_s": 5.0,
+            "total_dwell_s": active_dwell_s + 5.0,
+            "source_id": "test-host",
+            "span_id": str(uuid.uuid4()),
+        },
+        timestamp="2026-05-16T12:00:00+00:00",
+        session_id=session_id,
+    )
+
+
+def _intensity_event(
+    session_id: str,
+    entity: str = "code",
+    value: float = 240.0,
+    keystrokes: int = 30,
+    mouse_events: int = 10,
+) -> PerceptionEvent:
+    return PerceptionEvent(
+        domain="activity_intensity",
+        stream_id="activity_intensity",
+        entity=entity,
+        event_type="intensity_sample",
+        value=value,
+        unit="ipm",
+        context={
+            "focused_app": entity,
+            "title": None,
+            "keystroke_count": keystrokes,
+            "mouse_event_count": mouse_events,
+            "idle_seconds": 0.5,
+            "window_duration_s": 10.0,
+            "source_id": "test-host",
+            "span_id": str(uuid.uuid4()),
+        },
+        timestamp="2026-05-16T12:00:01+00:00",
+        session_id=session_id,
+    )
+
+
+def _typing_event(session_id: str, value: float = 3.5) -> PerceptionEvent:
+    return PerceptionEvent(
+        domain="typing",
+        stream_id="typing_pause",
+        entity="user",
+        event_type="pause",
+        value=value,
+        unit="seconds",
+        context={"avg_wpm": 45, "keypress_count": 1200},
+        timestamp="2026-05-16T12:00:02+00:00",
+        session_id=session_id,
+    )
+
+
+@pytest.fixture
+def session_id():
+    return f"sess-{uuid.uuid4().hex[:8]}"
+
+
+@pytest.fixture
+def clean_redis(session_id):
+    """Wipe baselines/state so each test starts from a clean baseline."""
+    config = AugurConfig.from_env()
+    r = connect_redis(config)
+    # Clean activity-related keys before the test
+    for pattern in [
+        "augur:profile:activity_*",
+        "augur:history:activity_*",
+        "augur:detection:*",
+        "augur:correlation:*",
+    ]:
+        keys = r.keys(pattern) or []
+        for k in keys:
+            try:
+                r.delete(k)
+            except redis.exceptions.ResponseError:
+                # Some keys may be lists/sets, skip
+                pass
+    yield r
+    # Clean up after the test
+    for pattern in [
+        "augur:profile:activity_*",
+        "augur:history:activity_*",
+        "augur:detection:*",
+        "augur:correlation:*",
+    ]:
+        keys = r.keys(pattern) or []
+        for k in keys:
+            try:
+                r.delete(k)
+            except redis.exceptions.ResponseError:
+                # Some keys may be lists/sets, skip
+                pass
+
+
+@pytest.fixture
+def clean_redis_sync():
+    """Sync Redis fixture for non-async tests (T17)."""
+    config = AugurConfig.from_env()
+    r = connect_redis(config)
+    # Clean up session-related keys for T17
+    r.delete("augur:session:current")
+    yield r
+    r.delete("augur:session:current")
+
+
+# ---------------------------------------------------------------------------
+# T12: activity_focus baseline creation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pipeline", [["detector"]], indirect=True)
+@pytest.mark.asyncio
+async def test_activity_focus_event_creates_baseline(pipeline, clean_redis, session_id):
+    """Publishing focus events through NATS creates a per-(domain, entity) baseline."""
+    import nats
+
+    config = AugurConfig.from_env()
+    nc = await nats.connect(config.nats_url)
+    try:
+        for i in range(max(3, config.min_observations) + 1):
+            ev = _focus_event(session_id=session_id, value=3.0 + 0.1 * i)
+            await _publish(nc, "augur.perception.activity_focus", ev)
+        await nc.flush()
+        await asyncio.sleep(2.0)
+    finally:
+        await nc.drain()
+
+    raw = clean_redis.get("augur:profile:activity_focus:code")
+    assert raw is not None, "baseline for (activity_focus, code) was not created"
+    bl = json.loads(raw)
+    assert "ewma_mean" in bl
+    assert bl["ewma_mean"] > 0
+
+
+# ---------------------------------------------------------------------------
+# T13: activity_intensity baseline creation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pipeline", [["detector"]], indirect=True)
+@pytest.mark.asyncio
+async def test_activity_intensity_event_creates_baseline(
+    pipeline, clean_redis, session_id
+):
+    import nats
+
+    config = AugurConfig.from_env()
+    nc = await nats.connect(config.nats_url)
+    try:
+        for i in range(max(3, config.min_observations) + 1):
+            ev = _intensity_event(session_id=session_id, value=50.0 + 10.0 * i)
+            await _publish(nc, "augur.perception.activity_intensity", ev)
+        await nc.flush()
+        await asyncio.sleep(2.0)
+    finally:
+        await nc.drain()
+
+    raw = clean_redis.get("augur:profile:activity_intensity:code")
+    assert raw is not None, "baseline for (activity_intensity, code) was not created"
+    bl = json.loads(raw)
+    assert bl["ewma_mean"] > 0
+
+
+# ---------------------------------------------------------------------------
+# T14: cross-domain activity_focus + typing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pipeline", [["detector", "correlator"]], indirect=True)
+@pytest.mark.asyncio
+async def test_activity_focus_and_typing_correlate_cross_domain(
+    pipeline, clean_redis, session_id
+):
+    """Co-occurring activity_focus + typing anomalies should produce a
+    correlation event with both domains in involved_domains."""
+    import nats
+
+    config = AugurConfig.from_env()
+    nc = await nats.connect(config.nats_url)
+
+    received: list[dict] = []
+
+    async def _capture(msg):
+        received.append(json.loads(msg.data.decode()))
+
+    sub = await nc.subscribe("augur.correlation.detected", cb=_capture)
+    try:
+        # Build baselines with varied normal values
+        baseline_focus = [4.5, 5.2, 4.8, 5.5, 4.3, 5.1, 4.7, 5.3, 4.9, 5.0]
+        baseline_typing = [3.2, 3.8, 3.5, 4.0, 3.1, 3.9, 3.3, 3.7, 3.4, 3.6]
+
+        for val_f, val_t in zip(baseline_focus, baseline_typing):
+            await _publish(
+                nc,
+                "augur.perception.activity_focus",
+                _focus_event(session_id, value=val_f),
+            )
+            await _publish(
+                nc, "augur.perception.typing", _typing_event(session_id, value=val_t)
+            )
+        await nc.flush()
+        await asyncio.sleep(2.0)
+
+        # Publish extreme outliers in both domains
+        await _publish(
+            nc,
+            "augur.perception.activity_focus",
+            _focus_event(session_id, value=50.0, active_dwell_s=600.0),
+        )
+        await asyncio.sleep(0.5)
+        await _publish(
+            nc, "augur.perception.typing", _typing_event(session_id, value=50.0)
+        )
+        await nc.flush()
+        await asyncio.sleep(3.0)
+    finally:
+        await sub.unsubscribe()
+        await nc.drain()
+
+    cross = [
+        c
+        for c in received
+        if set(c.get("involved_domains", [])) >= {"activity_focus", "typing"}
+    ]
+    assert cross, (
+        "expected a correlation event involving both activity_focus and typing; "
+        f"got {[set(c.get('involved_domains', [])) for c in received]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# T15: cross-stream activity_focus + activity_intensity
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pipeline", [["detector", "correlator"]], indirect=True)
+@pytest.mark.asyncio
+async def test_activity_focus_and_intensity_correlate_cross_domain(
+    pipeline, clean_redis, session_id
+):
+    """activity_focus and activity_intensity are SEPARATE domains by design,
+    so the correlator's same-domain filter does NOT exclude them — they
+    should correlate when their anomalies co-occur."""
+    import nats
+
+    config = AugurConfig.from_env()
+    nc = await nats.connect(config.nats_url)
+
+    received: list[dict] = []
+
+    async def _capture(msg):
+        received.append(json.loads(msg.data.decode()))
+
+    sub = await nc.subscribe("augur.correlation.detected", cb=_capture)
+    try:
+        # Build baselines with varied normal values
+        baseline_focus = [4.5, 5.2, 4.8, 5.5, 4.3, 5.1, 4.7, 5.3, 4.9, 5.0]
+        baseline_intensity = [
+            60.0,
+            70.0,
+            65.0,
+            75.0,
+            62.0,
+            72.0,
+            68.0,
+            74.0,
+            66.0,
+            73.0,
+        ]
+
+        for val_f, val_i in zip(baseline_focus, baseline_intensity):
+            await _publish(
+                nc,
+                "augur.perception.activity_focus",
+                _focus_event(session_id, value=val_f),
+            )
+            await _publish(
+                nc,
+                "augur.perception.activity_intensity",
+                _intensity_event(session_id, value=val_i),
+            )
+        await nc.flush()
+        await asyncio.sleep(2.0)
+
+        # Publish extreme outliers in both domains
+        await _publish(
+            nc,
+            "augur.perception.activity_focus",
+            _focus_event(session_id, value=50.0, active_dwell_s=500.0),
+        )
+        await asyncio.sleep(0.5)
+        await _publish(
+            nc,
+            "augur.perception.activity_intensity",
+            _intensity_event(session_id, value=350.0),
+        )
+        await nc.flush()
+        await asyncio.sleep(3.0)
+    finally:
+        await sub.unsubscribe()
+        await nc.drain()
+
+    cross = [
+        c
+        for c in received
+        if set(c.get("involved_domains", []))
+        >= {"activity_focus", "activity_intensity"}
+    ]
+    assert cross, (
+        "expected a correlation event involving both activity_focus and "
+        f"activity_intensity; got {[set(c.get('involved_domains', [])) for c in received]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# T16: feedback collector keying isolation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pipeline", [["feedback"]], indirect=True)
+@pytest.mark.asyncio
+async def test_feedback_keying_separates_focus_and_intensity_tracking(
+    pipeline, clean_redis, session_id, nats_conn
+):
+    """Two advice events for the same entity 'code' but different domains
+    (activity_focus vs activity_intensity) must create independent
+    PendingAdvice records in the feedback collector."""
+    nc = nats_conn
+    advice_focus = {
+        "advice_id": "adv-focus",
+        "player": "code",
+        "severity": "HIGH",
+        "move": "n/a",
+        "think_time": 0,
+        "domain": "activity_focus",
+        "primary_domain": "activity_focus",
+        "involved_domains": ["activity_focus"],
+    }
+    advice_intensity = {
+        "advice_id": "adv-intensity",
+        "player": "code",
+        "severity": "HIGH",
+        "move": "n/a",
+        "think_time": 0,
+        "domain": "activity_intensity",
+        "primary_domain": "activity_intensity",
+        "involved_domains": ["activity_intensity"],
+    }
+    await nc.publish("augur.reasoning.advice", json.dumps(advice_focus).encode())
+    await nc.publish("augur.reasoning.advice", json.dumps(advice_intensity).encode())
+    await nc.flush()
+    await asyncio.sleep(2.0)
+
+    all_keys = clean_redis.keys("augur:feedback:*")
+    found_focus = False
+    found_intensity = False
+    for k in all_keys:
+        try:
+            v = clean_redis.get(k)
+            if not v:
+                continue
+            text = v.decode() if isinstance(v, bytes) else v
+            data = json.loads(text)
+            # Check if this feedback session contains advice for both domains
+            if "advice_events" in data:
+                for event in data["advice_events"]:
+                    if event.get("domain") == "activity_focus":
+                        found_focus = True
+                    if event.get("domain") == "activity_intensity":
+                        found_intensity = True
+        except (redis.exceptions.ResponseError, json.JSONDecodeError):
+            # Some keys are lists/sets or not JSON, skip
+            pass
+    assert found_focus and found_intensity, (
+        "expected both activity_focus and activity_intensity advice tracked; "
+        f"focus={found_focus}, intensity={found_intensity}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# T17: get_active_session against real Redis
+# ---------------------------------------------------------------------------
+
+
+def test_get_active_session_helper_returns_none_for_ended_session(clean_redis_sync):
+    """Direct check of the validity helper using real Redis."""
+    from datetime import datetime, timezone
+
+    from blackboard.session import get_active_session
+
+    clean_redis_sync.set(
+        "augur:session:current",
+        json.dumps(
+            {
+                "session_id": "sess-stale",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "status": "ended",
+            }
+        ),
+    )
+    assert get_active_session(clean_redis_sync, max_age_h=12.0) is None
+
+
+def test_get_active_session_helper_returns_id_for_active_fresh(clean_redis_sync):
+    from datetime import datetime, timezone
+
+    from blackboard.session import get_active_session
+
+    clean_redis_sync.set(
+        "augur:session:current",
+        json.dumps(
+            {
+                "session_id": "sess-live",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "status": "active",
+            }
+        ),
+    )
+    assert get_active_session(clean_redis_sync, max_age_h=12.0) == "sess-live"

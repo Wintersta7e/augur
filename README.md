@@ -1,5 +1,11 @@
 # Augur
 
+[![CI](https://github.com/Wintersta7e/augur/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Wintersta7e/augur/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Wintersta7e/augur/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/Wintersta7e/augur/actions/workflows/codeql.yml)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
+[![Code style: ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A hybrid neurosymbolic AI system that combines neural perception with symbolic reasoning to detect, interpret, and respond to complex patterns in streaming behavioral data. Augur detects anomalies across independent perception domains, correlates signals that fire together, asks a local LLM for advice, collects feedback, and tunes its own parameters after every session.
 
 > **Status:** active personal research project. Currently validated with four independent perception domains (chess move timing, system-wide typing rhythm, per-app focus dwell, per-app interaction intensity) sharing the same detection, correlation, and reasoning pipeline. Cross-domain reasoning verified end-to-end against a local Ollama `qwen2.5:32b` model.

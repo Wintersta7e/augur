@@ -2,7 +2,7 @@
 
 A hybrid neurosymbolic AI system that combines neural perception with symbolic reasoning to detect, interpret, and respond to complex patterns in streaming behavioral data. Augur detects anomalies across independent perception domains, correlates signals that fire together, asks a local LLM for advice, collects feedback, and tunes its own parameters after every session.
 
-> **Status:** active personal research project. Currently validated with two independent perception domains (chess move timing and system-wide typing rhythm) sharing the same detection, correlation, and reasoning pipeline. Cross-domain reasoning verified end-to-end against a local Ollama `qwen2.5:32b` model.
+> **Status:** active personal research project. Currently validated with four independent perception domains (chess move timing, system-wide typing rhythm, per-app focus dwell, per-app interaction intensity) sharing the same detection, correlation, and reasoning pipeline. Cross-domain reasoning verified end-to-end against a local Ollama `qwen2.5:32b` model.
 
 ## What makes it different
 
@@ -51,13 +51,13 @@ At session end, the correlator flushes the in-memory NetworkX DiGraph to Redis f
 | Directory | Purpose |
 |---|---|
 | `blackboard/` | Shared state layer: `AugurConfig` (env-var config), `PerceptionEvent` contract, `SessionManager`, `PersistenceManager` (all Redis I/O) |
-| `perception/` | Input sources publishing to `augur.perception.<domain>`. Includes `chess_board.py`, `typing_monitor.py`, `feedback_collector.py` |
+| `perception/` | Input sources publishing to `augur.perception.<domain>`. Includes `chess_board.py`, `typing_monitor.py`, `activity_monitor.py` (Windows-host), `feedback_collector.py` |
 | `detection/` | Domain-agnostic anomaly detector (EWMA + River HalfSpaceTrees, wildcard NATS subscription) |
 | `reasoning/` | `correlator.py` (cross-domain), `augur_advisor.py` (Ollama LLM), `reflection_engine.py` (self-improvement) |
 | `output/` | ANSI terminal display with domain-scoped dedup and correlation rendering |
 | `augur_mcp/` | FastMCP server with 21 tools (lifecycle, injection, inspection, control) |
 | `infrastructure/` | Launcher script (6-slot pipeline), connectivity and persistence smoke tests |
-| `tests/` | 415 tests — 390 unit (mocked) + 25 fast integration (real Redis/NATS) + 3 slow (real Ollama) |
+| `tests/` | ~495 tests — 462 unit (mocked) + 32 fast integration (real Redis/NATS) + 4 slow (real Ollama) |
 
 ## Prerequisites
 
@@ -123,11 +123,27 @@ There are no hardcoded connection strings anywhere in the codebase.
 
 The design rule is: **a new perception source must require zero changes to detection or reasoning**. In practice:
 
-1. Create `perception/<your_source>.py` that publishes `PerceptionEvent`s to `augur.perception.<your_domain>`
-2. Add a `describe_signal` case in `reasoning/correlator.py` (one-liner formatter)
-3. Add a `DOMAIN_HANDLERS` entry in `reasoning/augur_advisor.py` (domain-specific prompt prefix)
+1. Create `perception/<your_source>.py` that publishes `PerceptionEvent`s to `augur.perception.<your_domain>`.
+2. In `reasoning/augur_advisor.py`, register a prompt builder in `DOMAIN_HANDLERS` and a one-line summary function in `DOMAIN_DESCRIBERS`. A test (`tests/test_advisor_activity.py::test_domain_handlers_and_describers_keys_match`) pins the two registries to identical keys so future drift is caught.
+3. Optionally extend `output/console_display.py` with a domain-aware branch in `render_anomaly_line` / `render_advice` so anomalies surface human-meaningful values instead of the generic fallback.
 
 The detector picks up the new domain automatically (wildcard NATS subscription). The correlator will start finding cross-domain patterns as soon as two domains emit anomalies inside the same correlation window (default 30s, adaptive per pairwise rule via the reflection engine).
+
+## Optional Windows companion: activity perception
+
+`perception/activity_monitor.py` is a Windows-host daemon that observes the foreground app, its dwell time, and the interaction intensity within it (keystrokes + mouse activity per 10s window). It publishes two streams — `activity_focus` (per-app dwell) and `activity_intensity` (per-app interaction rate) — to the same NATS instance the rest of the pipeline uses, so cross-domain correlations against chess or typing come for free.
+
+The daemon runs separately from `infrastructure/run_augur.sh` (which is WSL/Linux-side only). It refuses to start without its Win32 deps or without reaching NATS + Redis, and prints explicit remediation hints. It does NOT create sessions — it reads `augur:session:current` from Redis and waits until another perception source (chess_board or typing_monitor) has populated it.
+
+```bash
+# On the Windows host (NOT in WSL):
+pip install -r requirements-windows.txt
+python -m perception.activity_monitor
+```
+
+Window titles are NEVER captured by default. The `AUGUR_ACTIVITY_TITLE_ALLOWLIST` environment variable opts in per app (e.g., `AUGUR_ACTIVITY_TITLE_ALLOWLIST="code,terminal"`); apps not on the allowlist contribute only their executable name to events.
+
+The daemon's NATS publish layer is a best-effort drop log (capacity-bounded `_DroppedEventLog`), not a replay buffer. Events lost during a NATS disconnect are surfaced in logs (`dropped_total`) and discarded — replaying them across session boundaries would contaminate the detector's receive-time anomaly stamps.
 
 ## MCP server
 
@@ -135,7 +151,7 @@ The `augur_mcp` package exposes a FastMCP server with 21 tools covering pipeline
 
 ## Dependencies
 
-Runtime:
+Runtime (`requirements.txt`):
 
 ```
 python-chess    # Chess rules and move validation (GPL-3.0 — see License note below)
@@ -147,6 +163,14 @@ httpx           # Async HTTP client for Ollama (BSD-3)
 keyboard        # System-wide keypress capture for typing_monitor (MIT)
 fastmcp         # MCP server framework (Apache-2.0)
 networkx        # Session correlation DiGraph (BSD-3)
+```
+
+Optional Windows-host companion (`requirements-windows.txt` — install only on the machine running `activity_monitor.py`):
+
+```
+pywin32         # Win32 API access for active-window detection (PSF/BSD-style)
+psutil          # Process introspection (BSD-3)
+pynput          # Global keyboard/mouse listeners (LGPL-3.0)
 ```
 
 Dev:
@@ -187,13 +211,15 @@ Augur was built as a personal research project with substantial AI-assisted deve
 - Phase 2.5 infrastructure (AugurConfig, MCP server, Docker dual-mode, integration test framework)
 - **Phase 3 symbolic reasoning** — NetworkX knowledge graph, escalation matrix symbolic rules, cross-domain correlation, self-tuning via EWMA confidence. Live Ollama verification confirmed cross-domain reasoning produces qualitatively richer advice than per-signal alone.
 - **Phase 3 polish** — N-way correlation with default 3-way rules, adaptive per-rule correlation windows tuned by EWMA over observed lag, per-domain feedback attribution with 1/N weighting, atomic state persistence (single MULTI/EXEC pipeline for matrix + state), unified tuning marker that only commits when all writes succeed.
+- **Workstation activity perception (Phase 1 of a planned 3-phase progression)** — two new perception domains (`activity_focus`, `activity_intensity`) emitted by an optional Windows-host daemon. Validates that the domain-agnostic plumbing generalizes beyond timing-of-an-event-stream domains. Pipeline prerequisite fixes shipped alongside: session validity helper, `(domain, entity)` keying for feedback tracking.
 
 **In progress / open:**
-- Cross-session pattern mining — per-session graphs are persisted but not yet queried across sessions (may be subsumed by Phase 6)
-- 4-way and higher correlation rules — matrix supports it structurally; defaults ship up to 3-way; adaptive windows are pairwise-only
+- Cross-session pattern mining — per-session graphs are persisted but not yet queried across sessions (may be subsumed by Phase 6).
+- 4-way and higher correlation rules — matrix supports it structurally; defaults ship up to 3-way; adaptive windows are pairwise-only.
+- Adaptive-window EWMA defaults need verification against ~10 real sessions before tuning further.
 
 **Future phases:**
-- Phase 4 — richer behavioral inference (session fingerprinting, longitudinal modeling)
-- Phase 5 — additional perception domains (code editing, application focus)
-- Phase 6 — Hot/Warm/Cold knowledge store with long-term cross-session memory
-- Phase 7 — self-modification beyond parameters and prompts (symbolic rule mutation with rollback)
+- Workstation Phase 2 — OS-level signals as a separate `system` domain (CPU/memory pressure, network bursts, screen-lock).
+- Workstation Phase 3 — biometric signals as a separate `biometric` domain (webcam attention, mic ambient, wearables).
+- Hot/Warm/Cold knowledge store with long-term cross-session memory.
+- Self-modification beyond parameters and prompts (symbolic rule mutation with rollback).

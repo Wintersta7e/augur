@@ -692,8 +692,8 @@ async def run() -> None:
 
         async with reasoning_lock:
             if path == "correlation":
+                # Correlation prompt is self-contained — no system_prompt needed.
                 prompt = build_correlation_prompt(payload)
-                system_prompt = None  # correlation prompt is self-contained
             else:
                 primary = payload["primary_anomaly"]
                 stored_prompt = pm.load_prompt(domain)

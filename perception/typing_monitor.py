@@ -209,6 +209,8 @@ async def run() -> None:
             try:
                 event_queue.put_nowait(result)
             except asyncio.QueueFull:
+                # Backpressure: consumer is slow, drop this keypress rather than
+                # block the keyboard hook thread (would freeze the UI).
                 pass
 
     # Register global hook

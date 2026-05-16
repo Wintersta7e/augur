@@ -337,8 +337,18 @@ class _SessionReader:
 class _BufferedPublisher:
     """Bounded FIFO of NATS payload dicts. Drops oldest on overflow.
 
-    flush() is called on session change (don't replay events into a new
-    session — detector stamps receive time, correlator ignores session_id).
+    Best-effort buffer that absorbs `publish()` failures during brief
+    NATS disconnects. nats-py auto-reconnects at the connection layer;
+    once it succeeds, subsequent `publish()` calls succeed too and no
+    replay is needed. Buffered events from the disconnect window are
+    NOT replayed — they accumulate until session change, then `flush()`
+    clears them (replaying into a new session would contaminate detection
+    because the detector stamps receive time, not source event time, and
+    the correlator ignores session_id).
+
+    `drain()` is exposed for cleanup/testing; production code never
+    needs to call it. The buffer is effectively a recent-failures log
+    with a hard ceiling at `capacity` to prevent unbounded growth.
     """
 
     def __init__(self, capacity: int = 200) -> None:
@@ -470,7 +480,7 @@ class ActivityMonitor:
           4. if sampling_s elapsed since last intensity sample, emit one
         """
         sampling = self.config.activity_sampling_s
-        last_sampled = time.monotonic()
+        last_sampled: float | None = None
         last_app: str | None = None
         last_title: str | None = None
 
@@ -508,6 +518,9 @@ class ActivityMonitor:
 
                 if self.focus is None:
                     self.focus = self._build_focus_state(sid)
+                    last_sampled = (
+                        time.monotonic()
+                    )  # start sampling timer from focus init
                 if self.intensity is None:
                     self.intensity = self._build_intensity_window(sid)
                     self.intensity.reset(
@@ -550,7 +563,7 @@ class ActivityMonitor:
                     last_app, last_title = app, title
 
                 # Periodic intensity sample?
-                elif now_mono - last_sampled >= sampling:
+                elif last_sampled is not None and now_mono - last_sampled >= sampling:
                     ev = self.intensity.build(
                         focused_app=app, focused_title=title, now=now_mono
                     )

@@ -82,7 +82,6 @@ def render_anomaly_line(data: dict) -> str:
     ts = _short_ts(data.get("timestamp", ""))
     dev = data.get("deviation_score", 0)
 
-    # Chess domain (legacy)
     if domain == "chess":
         player = data.get("player", "?")
         move = data.get("move", "?")
@@ -94,9 +93,8 @@ def render_anomaly_line(data: dict) -> str:
             f"think={think:.1f}s  dev={dev:.1f}σ{RESET}"
         )
 
-    # Typing domain
     if domain == "typing":
-        wpm = data.get("wpm", "?")
+        wpm = (data.get("context") or {}).get("avg_wpm", "?")
         return (
             f"{DIM}{ts}{RESET}  "
             f"{badge}  "
@@ -104,7 +102,6 @@ def render_anomaly_line(data: dict) -> str:
             f"wpm={wpm}  dev={dev:.1f}σ{RESET}"
         )
 
-    # Activity focus domain
     if domain == "activity_focus":
         ctx = data.get("context", {}) or {}
         active = ctx.get("active_dwell_s", "?")
@@ -118,7 +115,6 @@ def render_anomaly_line(data: dict) -> str:
             f"baseline {baseline} log1p_s. dev {dev:.1f}σ{RESET}"
         )
 
-    # Activity intensity domain
     if domain == "activity_intensity":
         ctx = data.get("context", {}) or {}
         value = data.get("value", "?")
@@ -430,7 +426,7 @@ BANNER = f"""{FG_CYAN}{BOLD}
     ║      ██║  ██║╚██████╔╝╚██████╔╝╚██████╔╝██║  ██║          ║
     ║      ╚═╝  ╚═╝ ╚═════╝  ╚═════╝  ╚═════╝ ╚═╝  ╚═╝          ║
     ║                                                           ║
-    ║          Neurosymbolic Chess Timing Analyzer              ║
+    ║          Neurosymbolic Cognitive Assistant                ║
     ║                                                           ║
     ╚═══════════════════════════════════════════════════════════╝
 {RESET}

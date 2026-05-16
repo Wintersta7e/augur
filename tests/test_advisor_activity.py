@@ -75,8 +75,37 @@ def test_build_activity_focus_prompt_includes_system_prompt_and_fields():
     assert "chrome" in prompt
     assert "120" in prompt  # active dwell seconds
     assert "HIGH" in prompt
-    # No raw-title leakage when allowlist denied them.
-    assert "None" in prompt or "title" not in prompt.lower()
+
+
+def test_build_activity_focus_prompt_does_not_leak_unfiltered_title():
+    """If a title sneaks into context (e.g., allowlist applied at wrong layer),
+    the prompt builder still doesn't expose it via the default templates.
+
+    Sentinel: a unique string only used here. If it appears in the prompt,
+    the privacy contract is broken.
+    """
+    sentinel = "SENTINEL_LEAK_CHECK_ZXQW_8675309"
+    anomaly = {
+        "domain": "activity_focus",
+        "entity": "code",
+        "value": 4.8,
+        "unit": "log1p_seconds",
+        "context": {
+            "active_dwell_s": 120.0,
+            "idle_dwell_s": 30.0,
+            "total_dwell_s": 150.0,
+            "new_app": "chrome",
+            "prev_title": sentinel,  # would-be leak; daemon-side filter should have removed it
+            "new_title": sentinel,
+        },
+        "baseline_mean": 3.2,
+        "deviation_score": 2.5,
+        "severity": "HIGH",
+    }
+    prompt = build_activity_focus_prompt(anomaly, MagicMock(), "You are Augur.")
+    assert sentinel not in prompt, (
+        f"Sentinel leaked into prompt — privacy contract broken. Got: {prompt!r}"
+    )
 
 
 def test_build_activity_intensity_prompt_includes_relevant_fields():

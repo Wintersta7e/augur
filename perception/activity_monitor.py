@@ -15,19 +15,19 @@ Run on the Windows host:
 
 from __future__ import annotations
 
-import asyncio  # noqa: F401
-import json  # noqa: F401
+import asyncio
+import json
 import logging
-import math  # noqa: F401
-import socket  # noqa: F401
-import sys  # noqa: F401
+import math
+import socket
+import sys
 import threading
-import time  # noqa: F401
-import uuid  # noqa: F401
-from collections import deque  # noqa: F401
+import time
+import uuid
+from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone  # noqa: F401
-from typing import Any  # noqa: F401
+from datetime import datetime, timezone
+from typing import Any
 
 log = logging.getLogger("activity_monitor")
 
@@ -98,7 +98,7 @@ class _CounterState:
     """Mutable, thread-safe input counters for an intensity window.
 
     drain() atomically reads keystrokes + mouse_events and zeroes them.
-    last_input_time is the unix timestamp of the most recent input; it
+    last_input_time is the monotonic-clock timestamp of the most recent input; it
     is NOT reset by drain because it's used to compute idle_seconds in
     the NEXT sample as well.
     """
@@ -594,8 +594,8 @@ class ActivityMonitor:
             for listener in listeners:
                 try:
                     listener.stop()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("activity_monitor: listener.stop() failed: %s", exc)
 
 
 def main() -> None:  # pragma: no cover - CLI entrypoint

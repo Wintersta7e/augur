@@ -1,9 +1,8 @@
 """Regression tests: render_anomaly_line + render_advice for chess/typing.
 
-T10 of activity-perception introduced a domain-dispatch in
-output/console_display.py but accidentally keyed it on file names
-(chess_board, typing_monitor) instead of the actual domain values
-(chess, typing). These tests lock the correct keys in place.
+The render dispatch in output/console_display.py was once accidentally
+keyed on file names (chess_board, typing_monitor) instead of the actual
+domain values (chess, typing). These tests lock the correct keys in place.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ def test_render_anomaly_line_typing_uses_entity_wpm_format():
     data = {
         "domain": "typing",
         "entity": "user",
-        "wpm": 42,
+        "context": {"avg_wpm": 42, "keypress_count": 1200},
         "deviation_score": 1.3,
         "severity": "LOW",
         "timestamp": "2026-05-16T12:00:00+00:00",

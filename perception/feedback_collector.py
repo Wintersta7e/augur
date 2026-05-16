@@ -59,17 +59,14 @@ RESET = "\033[0m"
 # ---------------------------------------------------------------------------
 
 
-def _resolve_primary_domain(advice_data: dict) -> str:
-    """Return the actual primary domain for an advice payload.
+def _resolve_primary_domain(advice_data: dict) -> str | None:
+    """Return the actual primary domain for an advice payload, or None if missing.
 
-    Used by on_advice to replace the prior hardcoded "chess" — Augur
-    advice can come from any domain (typing, chess, future code-edit, etc.)
-    and was being misattributed.
+    Used by on_advice. Returns None for malformed payloads so the caller can
+    log+skip rather than silently mis-attributing to a default domain.
     """
-    return (
-        advice_data.get("domain")
-        or advice_data.get("primary_anomaly", {}).get("domain")
-        or "chess"  # last-resort fallback preserves historical behaviour for malformed payloads
+    return advice_data.get("domain") or advice_data.get("primary_anomaly", {}).get(
+        "domain"
     )
 
 
@@ -297,6 +294,12 @@ async def run() -> None:
 
         # Pull primary domain from advice payload (was hardcoded "chess")
         primary_domain = _resolve_primary_domain(data)
+        if primary_domain is None:
+            log.error(
+                "on_advice: missing domain in advice payload; skipping: %s",
+                data.get("advice_id", "?"),
+            )
+            return
 
         entity = data.get("player", "?")
         severity = data.get("severity", "?")

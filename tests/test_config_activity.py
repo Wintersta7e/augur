@@ -25,7 +25,7 @@ def test_defaults_present():
     [
         ("activity_sampling_s", 0.5),
         ("activity_sampling_s", 60.1),
-        ("activity_intensity_min_events", -1),
+        ("activity_intensity_min_events", 0),
         ("activity_intensity_min_events", 101),
         ("activity_intensity_min_window_s", 0.05),
         ("activity_intensity_min_window_s", 30.1),

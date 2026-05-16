@@ -131,9 +131,9 @@ class AugurConfig:
             raise ValueError(
                 f"activity_sampling_s={self.activity_sampling_s} outside [1.0, 60.0]"
             )
-        if not (0 <= self.activity_intensity_min_events <= 100):
+        if not (1 <= self.activity_intensity_min_events <= 100):
             raise ValueError(
-                f"activity_intensity_min_events={self.activity_intensity_min_events} outside [0, 100]"
+                f"activity_intensity_min_events={self.activity_intensity_min_events} outside [1, 100]"
             )
         if not (0.1 <= self.activity_intensity_min_window_s <= 30.0):
             raise ValueError(

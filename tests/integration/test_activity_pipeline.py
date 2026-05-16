@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 
 import pytest
@@ -24,6 +25,18 @@ from blackboard.contracts import PerceptionEvent
 
 async def _publish(nc, subject: str, event: PerceptionEvent) -> None:
     await nc.publish(subject, event.to_bytes())
+
+
+async def _wait_until(
+    condition_fn, timeout_s: float = 10.0, interval_s: float = 0.1
+) -> bool:
+    """Poll condition_fn until it returns truthy or timeout (in seconds)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if condition_fn():
+            return True
+        await asyncio.sleep(interval_s)
+    return False
 
 
 def _focus_event(
@@ -167,7 +180,10 @@ async def test_activity_focus_event_creates_baseline(pipeline, clean_redis, sess
             ev = _focus_event(session_id=session_id, value=3.0 + 0.1 * i)
             await _publish(nc, "augur.perception.activity_focus", ev)
         await nc.flush()
-        await asyncio.sleep(2.0)
+        assert await _wait_until(
+            lambda: clean_redis.get("augur:profile:activity_focus:code") is not None,
+            timeout_s=5.0,
+        ), "baseline not created within timeout"
     finally:
         await nc.drain()
 
@@ -197,7 +213,12 @@ async def test_activity_intensity_event_creates_baseline(
             ev = _intensity_event(session_id=session_id, value=50.0 + 10.0 * i)
             await _publish(nc, "augur.perception.activity_intensity", ev)
         await nc.flush()
-        await asyncio.sleep(2.0)
+        assert await _wait_until(
+            lambda: (
+                clean_redis.get("augur:profile:activity_intensity:code") is not None
+            ),
+            timeout_s=5.0,
+        ), "baseline not created within timeout"
     finally:
         await nc.drain()
 
@@ -245,7 +266,10 @@ async def test_activity_focus_and_typing_correlate_cross_domain(
                 nc, "augur.perception.typing", _typing_event(session_id, value=val_t)
             )
         await nc.flush()
-        await asyncio.sleep(2.0)
+        assert await _wait_until(
+            lambda: clean_redis.get("augur:profile:activity_focus:code") is not None,
+            timeout_s=5.0,
+        ), "typing baseline not created within timeout"
 
         # Publish extreme outliers in both domains
         await _publish(
@@ -258,7 +282,13 @@ async def test_activity_focus_and_typing_correlate_cross_domain(
             nc, "augur.perception.typing", _typing_event(session_id, value=50.0)
         )
         await nc.flush()
-        await asyncio.sleep(3.0)
+        await _wait_until(
+            lambda: any(
+                set(c.get("involved_domains", [])) >= {"activity_focus", "typing"}
+                for c in received
+            ),
+            timeout_s=10.0,
+        )
     finally:
         await sub.unsubscribe()
         await nc.drain()
@@ -326,7 +356,12 @@ async def test_activity_focus_and_intensity_correlate_cross_domain(
                 _intensity_event(session_id, value=val_i),
             )
         await nc.flush()
-        await asyncio.sleep(2.0)
+        assert await _wait_until(
+            lambda: (
+                clean_redis.get("augur:profile:activity_intensity:code") is not None
+            ),
+            timeout_s=5.0,
+        ), "intensity baseline not created within timeout"
 
         # Publish extreme outliers in both domains
         await _publish(
@@ -341,7 +376,14 @@ async def test_activity_focus_and_intensity_correlate_cross_domain(
             _intensity_event(session_id, value=350.0),
         )
         await nc.flush()
-        await asyncio.sleep(3.0)
+        await _wait_until(
+            lambda: any(
+                set(c.get("involved_domains", []))
+                >= {"activity_focus", "activity_intensity"}
+                for c in received
+            ),
+            timeout_s=10.0,
+        )
     finally:
         await sub.unsubscribe()
         await nc.drain()
@@ -395,7 +437,10 @@ async def test_feedback_keying_separates_focus_and_intensity_tracking(
     await nc.publish("augur.reasoning.advice", json.dumps(advice_focus).encode())
     await nc.publish("augur.reasoning.advice", json.dumps(advice_intensity).encode())
     await nc.flush()
-    await asyncio.sleep(2.0)
+    assert await _wait_until(
+        lambda: len(clean_redis.keys("augur:feedback:*") or []) > 0,
+        timeout_s=10.0,
+    ), "feedback keys not created within timeout"
 
     # Strengthened: confirm both activity_focus and activity_intensity advice
     # appear as DISTINCT entries in the same feedback session.

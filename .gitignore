@@ -43,5 +43,8 @@ CLAUDE.md
 # Codex CLI scratch
 .codex
 
+# Serena MCP cache
+.serena/
+
 # Git worktrees (isolated workspaces for feature branches)
 .worktrees/

@@ -15,6 +15,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal, NamedTuple
 
 import nats
 import redis
@@ -24,6 +25,17 @@ from blackboard.config import AugurConfig
 from blackboard.connections import connect_redis
 from blackboard.contracts import PerceptionEvent
 from blackboard.persistence import PersistenceManager
+
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+
+class TrackingKey(NamedTuple):
+    domain: str
+    entity: str
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -59,17 +71,14 @@ RESET = "\033[0m"
 # ---------------------------------------------------------------------------
 
 
-def _resolve_primary_domain(advice_data: dict) -> str:
-    """Return the actual primary domain for an advice payload.
+def _resolve_primary_domain(advice_data: dict) -> str | None:
+    """Return the actual primary domain for an advice payload, or None if missing.
 
-    Used by on_advice to replace the prior hardcoded "chess" — Augur
-    advice can come from any domain (typing, chess, future code-edit, etc.)
-    and was being misattributed.
+    Used by on_advice. Returns None for malformed payloads so the caller can
+    log+skip rather than silently mis-attributing to a default domain.
     """
-    return (
-        advice_data.get("domain")
-        or advice_data.get("primary_anomaly", {}).get("domain")
-        or "chess"  # last-resort fallback preserves historical behaviour for malformed payloads
+    return advice_data.get("domain") or advice_data.get("primary_anomaly", {}).get(
+        "domain"
     )
 
 
@@ -105,7 +114,7 @@ class PendingAdvice:
         self.severity = severity
         self.baseline_mean = baseline_mean
         self.timestamp = timestamp
-        self.explicit_rating: str = "no_response"
+        self.explicit_rating: Literal["y", "n", "no_response"] = "no_response"
         self.think_times_after: list[float] = []
         self.behavioral_score: float = 0.0
         self.finalized = False
@@ -242,12 +251,17 @@ async def run() -> None:
     # State
     current_session_id: str | None = None
     advice_events: list[PendingAdvice] = []
-    active_tracking: dict[str, PendingAdvice] = {}  # entity -> pending advice
+    active_tracking: dict[
+        TrackingKey, PendingAdvice
+    ] = {}  # (domain, entity) -> pending advice
 
     def get_session_id() -> str:
+        # Intentionally laxer than blackboard.session.get_active_session:
+        # accepts ended sessions (so late-arriving feedback for a just-ended
+        # session is still attributed correctly) and falls back to a fresh
+        # uuid rather than dropping feedback on a session-record race.
         nonlocal current_session_id
         if current_session_id is None:
-            # Try to read from Redis
             raw = redis_client.get("augur:session:current")
             if raw:
                 data = json.loads(raw)
@@ -295,6 +309,12 @@ async def run() -> None:
 
         # Pull primary domain from advice payload (was hardcoded "chess")
         primary_domain = _resolve_primary_domain(data)
+        if primary_domain is None:
+            log.error(
+                "on_advice: missing domain in advice payload; skipping: %s",
+                data.get("advice_id", "?"),
+            )
+            return
 
         entity = data.get("player", "?")
         severity = data.get("severity", "?")
@@ -342,15 +362,16 @@ async def run() -> None:
         # Without this, the displaced advice would stay at behavioural=0.0
         # and finalized=False for the lifetime of the session, silently
         # corrupting the feedback record used by the reflection engine.
-        displaced = active_tracking.get(entity)
+        tracking_key = TrackingKey(primary_domain, entity)
+        displaced = active_tracking.get(tracking_key)
         if displaced is not None and not displaced.finalized:
             displaced._compute_behavioral_score()
             log.debug(
                 "Finalized displaced pending advice %s before overwriting %s",
                 displaced.advice_id,
-                entity,
+                tracking_key,
             )
-        active_tracking[entity] = pending
+        active_tracking[tracking_key] = pending
 
         log.info(
             "Advice received for %s (%s, %s) — awaiting feedback",
@@ -395,10 +416,11 @@ async def run() -> None:
             return
 
         entity = event.entity
-        if entity not in active_tracking:
+        tracking_key = TrackingKey(event.domain, entity)
+        if tracking_key not in active_tracking:
             return
 
-        pending = active_tracking[entity]
+        pending = active_tracking[tracking_key]
         pending.add_post_move(event.value)
 
         log.info(
@@ -417,7 +439,7 @@ async def run() -> None:
                 entity,
                 pending.behavioral_score,
             )
-            del active_tracking[entity]
+            del active_tracking[tracking_key]
             save_current_feedback()
 
     # -- Session end handler -------------------------------------------------

@@ -196,6 +196,96 @@ Keep your response concise (2-4 sentences). Be supportive, not intrusive. Focus 
 
 
 # ---------------------------------------------------------------------------
+# Activity focus and intensity prompt builders
+# ---------------------------------------------------------------------------
+
+
+def build_activity_focus_prompt(
+    anomaly: dict,
+    _r: "redis.Redis",
+    system_prompt: str,
+) -> str:
+    """Build an LLM prompt for an activity-focus dwell anomaly."""
+    ctx = anomaly.get("context", {}) or {}
+    entity = anomaly.get("entity")
+    new_app = ctx.get("new_app")
+    active_dwell = ctx.get("active_dwell_s")
+    baseline_mean = anomaly.get("baseline_mean")
+    deviation = anomaly.get("deviation_score")
+    severity = anomaly.get("severity")
+
+    # Validate required fields
+    missing = [
+        k
+        for k, v in (
+            ("entity", entity),
+            ("context.new_app", new_app),
+            ("context.active_dwell_s", active_dwell),
+            ("baseline_mean", baseline_mean),
+            ("deviation_score", deviation),
+            ("severity", severity),
+        )
+        if v is None
+    ]
+    if missing:
+        raise ValueError(
+            f"build_activity_focus_prompt: missing required fields: {missing}"
+        )
+
+    # Optional fields default to 0
+    idle_dwell = ctx.get("idle_dwell_s", 0.0)
+    total_dwell = ctx.get("total_dwell_s", active_dwell)
+
+    return f"""{system_prompt}
+
+## Situation
+- **Event:** unusual dwell in {entity} before switching to {new_app}
+- **Active dwell:** {active_dwell}s   (idle: {idle_dwell}s, total: {total_dwell}s)
+- **Baseline (log1p s):** {baseline_mean}
+- **Deviation:** {deviation} standard deviations
+- **Severity:** {severity}
+
+## Your task
+1. What might this dwell pattern indicate (deep focus vs stuck vs distraction)?
+2. Provide one concrete, short suggestion if the user might benefit from intervention.
+
+Keep your response concise (2-4 sentences). Be supportive, not intrusive."""
+
+
+def build_activity_intensity_prompt(
+    anomaly: dict,
+    _r: "redis.Redis",
+    system_prompt: str,
+) -> str:
+    """Build an LLM prompt for an activity-intensity spike or drop."""
+    ctx = anomaly.get("context", {}) or {}
+    entity = anomaly.get("entity", "?")
+    value = anomaly.get("value", "?")
+    keystrokes = ctx.get("keystroke_count", "?")
+    mouse = ctx.get("mouse_event_count", "?")
+    idle = ctx.get("idle_seconds", "?")
+    window = ctx.get("window_duration_s", "?")
+    baseline_mean = anomaly.get("baseline_mean", "?")
+    deviation = anomaly.get("deviation_score", "?")
+    severity = anomaly.get("severity", "?")
+
+    return f"""{system_prompt}
+
+## Situation
+- **Event:** unusual interaction intensity in {entity}
+- **Rate:** {value} interactions/min   (baseline: {baseline_mean})
+- **Window:** {keystrokes} keystrokes + {mouse} clicks over {window}s ({idle}s idle)
+- **Deviation:** {deviation} standard deviations
+- **Severity:** {severity}
+
+## Your task
+1. What might this intensity pattern indicate (high-energy work, fatigue, automation, or distraction)?
+2. Provide one short suggestion if the user might benefit from intervention.
+
+Keep your response concise (2-4 sentences). Be supportive, not intrusive."""
+
+
+# ---------------------------------------------------------------------------
 # Generic prompt builder (fallback for unknown domains)
 # ---------------------------------------------------------------------------
 
@@ -232,6 +322,63 @@ Analyze this anomaly and provide a concise assessment (2-4 sentences)."""
 # ---------------------------------------------------------------------------
 
 
+def _describe_chess(anomaly: dict) -> str:
+    move = anomaly.get("context", {}).get("move_san") or anomaly.get("move", "?")
+    think = anomaly.get("value", anomaly.get("think_time", 0))
+    baseline = anomaly.get("baseline_mean", "?")
+    deviation = anomaly.get("deviation_score", "?")
+    return (
+        f"CHESS (timing): {anomaly.get('entity', '?')} paused {think}s on "
+        f"move {move}. Baseline: {baseline}s. Deviation: {deviation}σ."
+    )
+
+
+def _describe_typing(anomaly: dict) -> str:
+    pause = anomaly.get("value", 0)
+    unit = anomaly.get("unit", "seconds")
+    ctx = anomaly.get("context", {})
+    avg_wpm = ctx.get("avg_wpm", "?")
+    baseline = anomaly.get("baseline_mean", "?")
+    return (
+        f"TYPING (rhythm): Pause duration {pause}{unit[:1]}. "
+        f"Average speed {avg_wpm} wpm. Baseline pause: {baseline}s."
+    )
+
+
+def _describe_activity_focus(anomaly: dict) -> str:
+    ctx = anomaly.get("context", {}) or {}
+    entity = anomaly.get("entity", "?")
+    new_app = ctx.get("new_app", "?")
+    active = ctx.get("active_dwell_s", "?")
+    baseline = anomaly.get("baseline_mean", "?")
+    deviation = anomaly.get("deviation_score", "?")
+    return (
+        f"ACTIVITY_FOCUS: {entity} dwell {active}s (then switched to {new_app}). "
+        f"Baseline (log1p): {baseline}. Deviation: {deviation}σ."
+    )
+
+
+def _describe_activity_intensity(anomaly: dict) -> str:
+    ctx = anomaly.get("context", {}) or {}
+    entity = anomaly.get("entity", "?")
+    value = anomaly.get("value", "?")
+    keystrokes = ctx.get("keystroke_count", "?")
+    baseline = anomaly.get("baseline_mean", "?")
+    deviation = anomaly.get("deviation_score", "?")
+    return (
+        f"ACTIVITY_INTENSITY: {entity} {value} ipm "
+        f"(keystrokes={keystrokes}). Baseline: {baseline}. Deviation: {deviation}σ."
+    )
+
+
+DOMAIN_DESCRIBERS: dict[str, Callable[[dict], str]] = {
+    "chess": _describe_chess,
+    "typing": _describe_typing,
+    "activity_focus": _describe_activity_focus,
+    "activity_intensity": _describe_activity_intensity,
+}
+
+
 def describe_signal(domain: str, anomaly: dict) -> str:
     """Return a one-line human-readable summary of a single-domain anomaly.
 
@@ -258,6 +405,30 @@ def describe_signal(domain: str, anomaly: dict) -> str:
         return (
             f"TYPING (rhythm): Pause duration {pause}{unit[:1]}. "
             f"Average speed {avg_wpm} wpm. Baseline pause: {baseline}s."
+        )
+
+    if domain == "activity_focus":
+        ctx = anomaly.get("context", {}) or {}
+        entity = anomaly.get("entity", "?")
+        new_app = ctx.get("new_app", "?")
+        active = ctx.get("active_dwell_s", "?")
+        baseline = anomaly.get("baseline_mean", "?")
+        deviation = anomaly.get("deviation_score", "?")
+        return (
+            f"ACTIVITY_FOCUS: {entity} dwell {active}s (then switched to {new_app}). "
+            f"Baseline (log1p): {baseline}. Deviation: {deviation}σ."
+        )
+
+    if domain == "activity_intensity":
+        ctx = anomaly.get("context", {}) or {}
+        entity = anomaly.get("entity", "?")
+        value = anomaly.get("value", "?")
+        keystrokes = ctx.get("keystroke_count", "?")
+        baseline = anomaly.get("baseline_mean", "?")
+        deviation = anomaly.get("deviation_score", "?")
+        return (
+            f"ACTIVITY_INTENSITY: {entity} {value} ipm "
+            f"(keystrokes={keystrokes}). Baseline: {baseline}. Deviation: {deviation}σ."
         )
 
     # Generic fallback
@@ -384,6 +555,8 @@ def _build_advice_event(
 DOMAIN_HANDLERS: dict[str, Callable[[dict, redis.Redis, str], str]] = {
     "chess": build_chess_prompt,
     "typing": build_typing_prompt,
+    "activity_focus": build_activity_focus_prompt,
+    "activity_intensity": build_activity_intensity_prompt,
 }
 
 # ---------------------------------------------------------------------------

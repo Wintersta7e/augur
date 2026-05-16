@@ -117,3 +117,102 @@ def test_drain_counters_thread_safe_under_concurrent_increment(monkeypatch):
     finally:
         stop.set()
         t.join(timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Focus event builder
+# ---------------------------------------------------------------------------
+
+
+def _make_focus_state(mod, sampling_s=10.0, allowlist=()):
+    return mod._FocusState(
+        sampling_s=sampling_s,
+        idle_threshold_s=60.0,
+        title_allowlist=allowlist,
+        source_id="test-host",
+        session_id="sess-1",
+    )
+
+
+def test_focus_event_skipped_on_first_change(monkeypatch):
+    mod = _import_module()
+    state = _make_focus_state(mod)
+    monkeypatch.setattr(mod.time, "monotonic", lambda: 100.0)
+    # No prior focus: first change should return None.
+    ev = state.on_focus_change(
+        new_app="code",
+        new_title="main.py - VS Code",
+        now=100.0,
+    )
+    assert ev is None
+    # State now remembers code as the active focus.
+    assert state.current_app == "code"
+    assert state.current_title == "main.py - VS Code"
+    assert state.current_focus_started_at == 100.0
+
+
+def test_focus_event_built_on_second_change():
+    import math
+
+    mod = _import_module()
+    state = _make_focus_state(mod, allowlist=("code", "chrome"))
+    # Prime with a first focus at t=100s.
+    state.on_focus_change(new_app="code", new_title="main.py", now=100.0)
+    # 30s later (with 5s idle inside the span), switch to chrome.
+    state.last_input_time = 125.0  # last input was 5s before the switch
+    ev = state.on_focus_change(new_app="chrome", new_title="news.com", now=130.0)
+    assert ev is not None
+    assert ev["domain"] == "activity_focus"
+    assert ev["stream_id"] == "activity_focus"
+    assert ev["entity"] == "code"  # entity = PREVIOUS app (whose dwell this measures)
+    assert ev["event_type"] == "focus_change"
+    assert ev["unit"] == "log1p_seconds"
+    # value = log1p(active_dwell). active = 30s total - 5s idle = 25s.
+    assert ev["value"] == pytest.approx(math.log1p(25.0), rel=1e-6)
+    ctx = ev["context"]
+    assert ctx["prev_app"] == "code"
+    assert ctx["new_app"] == "chrome"
+    assert ctx["prev_title"] == "main.py"
+    assert ctx["new_title"] == "news.com"
+    assert ctx["active_dwell_s"] == pytest.approx(25.0, rel=1e-6)
+    assert ctx["idle_dwell_s"] == pytest.approx(5.0, rel=1e-6)
+    assert ctx["total_dwell_s"] == pytest.approx(30.0, rel=1e-6)
+    assert ctx["source_id"] == "test-host"
+    assert ctx["span_id"]  # uuid for the PREVIOUS span
+    assert ev["session_id"] == "sess-1"
+    assert ev["timestamp"]  # ISO format from datetime.now(timezone.utc)
+
+
+def test_focus_event_titles_filtered_when_app_not_in_allowlist():
+    mod = _import_module()
+    state = _make_focus_state(mod, allowlist=("code",))
+    state.on_focus_change(new_app="code", new_title="main.py", now=100.0)
+    state.last_input_time = 130.0
+    ev = state.on_focus_change(new_app="chrome", new_title="secret-doc", now=130.0)
+    ctx = ev["context"]
+    assert ctx["prev_title"] == "main.py"  # allowed
+    assert ctx["new_title"] is None  # filtered
+
+
+def test_focus_event_clamps_idle_to_total_dwell():
+    """Defensive: if last_input_time precedes focus start, idle == total."""
+    mod = _import_module()
+    state = _make_focus_state(mod)
+    state.on_focus_change(new_app="code", new_title="x", now=100.0)
+    # last_input_time is BEFORE current focus started (stale)
+    state.last_input_time = 50.0
+    ev = state.on_focus_change(new_app="chrome", new_title="y", now=110.0)
+    ctx = ev["context"]
+    assert ctx["total_dwell_s"] == pytest.approx(10.0, rel=1e-6)
+    assert ctx["idle_dwell_s"] == pytest.approx(10.0, rel=1e-6)
+    assert ctx["active_dwell_s"] == 0.0
+
+
+def test_focus_event_assigns_new_span_id_after_change():
+    mod = _import_module()
+    state = _make_focus_state(mod)
+    state.on_focus_change(new_app="code", new_title="x", now=100.0)
+    first_span = state.current_span_id
+    state.last_input_time = 110.0
+    state.on_focus_change(new_app="chrome", new_title="y", now=110.0)
+    assert state.current_span_id != first_span

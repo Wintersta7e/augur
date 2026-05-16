@@ -16,8 +16,12 @@ Run on the Windows host:
 from __future__ import annotations
 
 import logging
+import math  # noqa: F401
 import threading
+import time  # noqa: F401
+import uuid  # noqa: F401
 from dataclasses import dataclass, field
+from datetime import datetime, timezone  # noqa: F401
 
 log = logging.getLogger("activity_monitor")
 
@@ -105,6 +109,85 @@ class _CounterState:
             self.keystrokes = 0
             self.mouse_events = 0
             return k, m, t
+
+
+@dataclass
+class _FocusState:
+    """Tracks the current focused app + the dwell window for the previous app.
+
+    on_focus_change emits a focus_change event for the PREVIOUS span on
+    every transition AFTER the first. The first transition primes state
+    only (no zero-dwell sample).
+    """
+
+    sampling_s: float
+    idle_threshold_s: float
+    title_allowlist: tuple[str, ...]
+    source_id: str
+    session_id: str
+
+    current_app: str | None = None
+    current_title: str | None = None
+    current_focus_started_at: float | None = None
+    current_span_id: str | None = None
+    last_input_time: float = 0.0
+
+    def on_focus_change(
+        self,
+        new_app: str,
+        new_title: str | None,
+        now: float,
+    ) -> dict | None:
+        """Return a focus_change PerceptionEvent dict, or None on the first call."""
+        prev_app = self.current_app
+        prev_title = self.current_title
+        prev_started = self.current_focus_started_at
+        prev_span = self.current_span_id
+
+        # Advance state to the NEW focus regardless of whether we emit.
+        self.current_app = new_app
+        self.current_title = new_title
+        self.current_focus_started_at = now
+        self.current_span_id = str(uuid.uuid4())
+
+        if prev_app is None or prev_started is None:
+            return None  # first-event skip
+
+        total_dwell = max(0.0, now - prev_started)
+        # idle = time the user stopped giving input before the focus changed.
+        # If last_input_time predates the focus start (stale), treat the whole
+        # span as idle.
+        if self.last_input_time < prev_started:
+            idle_dwell = total_dwell
+        else:
+            idle_dwell = max(0.0, now - self.last_input_time)
+            if idle_dwell > total_dwell:
+                idle_dwell = total_dwell
+        active_dwell = total_dwell - idle_dwell
+
+        ctx = {
+            "prev_app": prev_app,
+            "new_app": new_app,
+            "prev_title": _resolve_title(prev_app, prev_title, self.title_allowlist),
+            "new_title": _resolve_title(new_app, new_title, self.title_allowlist),
+            "active_dwell_s": active_dwell,
+            "idle_dwell_s": idle_dwell,
+            "total_dwell_s": total_dwell,
+            "source_id": self.source_id,
+            "span_id": prev_span,
+        }
+
+        return {
+            "domain": "activity_focus",
+            "stream_id": "activity_focus",
+            "entity": prev_app,
+            "event_type": "focus_change",
+            "value": math.log1p(active_dwell),
+            "unit": "log1p_seconds",
+            "context": ctx,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "session_id": self.session_id,
+        }
 
 
 class ActivityMonitor:

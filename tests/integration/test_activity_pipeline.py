@@ -252,9 +252,13 @@ async def test_activity_focus_and_typing_correlate_cross_domain(
 
     sub = await nc.subscribe("augur.correlation.detected", cb=_capture)
     try:
-        # Build baselines with varied normal values
-        baseline_focus = [4.5, 5.2, 4.8, 5.5, 4.3, 5.1, 4.7, 5.3, 4.9, 5.0]
-        baseline_typing = [3.2, 3.8, 3.5, 4.0, 3.1, 3.9, 3.3, 3.7, 3.4, 3.6]
+        # Build baselines with varied normal values. Size adapts to
+        # config.min_observations so future bumps don't break this test.
+        _warm = config.min_observations + 5
+        _focus_pool = [4.5, 5.2, 4.8, 5.5, 4.3, 5.1, 4.7, 5.3, 4.9, 5.0]
+        _typing_pool = [3.2, 3.8, 3.5, 4.0, 3.1, 3.9, 3.3, 3.7, 3.4, 3.6]
+        baseline_focus = [_focus_pool[i % len(_focus_pool)] for i in range(_warm)]
+        baseline_typing = [_typing_pool[i % len(_typing_pool)] for i in range(_warm)]
 
         for val_f, val_t in zip(baseline_focus, baseline_typing):
             await _publish(
@@ -329,19 +333,14 @@ async def test_activity_focus_and_intensity_correlate_cross_domain(
 
     sub = await nc.subscribe("augur.correlation.detected", cb=_capture)
     try:
-        # Build baselines with varied normal values
-        baseline_focus = [4.5, 5.2, 4.8, 5.5, 4.3, 5.1, 4.7, 5.3, 4.9, 5.0]
+        # Build baselines with varied normal values. Adaptive sizing so
+        # future config.min_observations bumps don't break this test.
+        _warm = config.min_observations + 5
+        _focus_pool = [4.5, 5.2, 4.8, 5.5, 4.3, 5.1, 4.7, 5.3, 4.9, 5.0]
+        _intensity_pool = [60.0, 70.0, 65.0, 75.0, 62.0, 72.0, 68.0, 74.0, 66.0, 73.0]
+        baseline_focus = [_focus_pool[i % len(_focus_pool)] for i in range(_warm)]
         baseline_intensity = [
-            60.0,
-            70.0,
-            65.0,
-            75.0,
-            62.0,
-            72.0,
-            68.0,
-            74.0,
-            66.0,
-            73.0,
+            _intensity_pool[i % len(_intensity_pool)] for i in range(_warm)
         ]
 
         for val_f, val_i in zip(baseline_focus, baseline_intensity):

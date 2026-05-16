@@ -75,17 +75,70 @@ def severity_badge(severity: str) -> str:
 
 def render_anomaly_line(data: dict) -> str:
     """One-line notification for low-severity anomalies."""
-    player = data.get("player", "?")
-    move = data.get("move", "?")
-    think = data.get("think_time", 0)
-    dev = data.get("deviation_score", 0)
-    badge = severity_badge(data.get("severity", "low"))
+    domain = data.get("domain", "?")
+    entity = data.get("entity", "?")
+    severity = data.get("severity", "low")
+    badge = severity_badge(severity)
     ts = _short_ts(data.get("timestamp", ""))
+    dev = data.get("deviation_score", 0)
+
+    # Chess domain (legacy)
+    if domain == "chess_board":
+        player = data.get("player", "?")
+        move = data.get("move", "?")
+        think = data.get("think_time", 0)
+        return (
+            f"{DIM}{ts}{RESET}  "
+            f"{badge}  "
+            f"{FG_GRAY}{player} played {move}  "
+            f"think={think:.1f}s  dev={dev:.1f}σ{RESET}"
+        )
+
+    # Typing domain
+    if domain == "typing_monitor":
+        wpm = data.get("wpm", "?")
+        return (
+            f"{DIM}{ts}{RESET}  "
+            f"{badge}  "
+            f"{FG_GRAY}{entity}  "
+            f"wpm={wpm}  dev={dev:.1f}σ{RESET}"
+        )
+
+    # Activity focus domain
+    if domain == "activity_focus":
+        ctx = data.get("context", {}) or {}
+        active = ctx.get("active_dwell_s", "?")
+        new_app = ctx.get("new_app", "?")
+        baseline = data.get("baseline_mean", "?")
+        return (
+            f"{DIM}{ts}{RESET}  "
+            f"{badge}  "
+            f"{FG_GRAY}ACTIVITY_FOCUS/{entity}: "
+            f"dwell {active}s (then {new_app}). "
+            f"baseline {baseline} log1p_s. dev {dev:.1f}σ{RESET}"
+        )
+
+    # Activity intensity domain
+    if domain == "activity_intensity":
+        ctx = data.get("context", {}) or {}
+        value = data.get("value", "?")
+        keystrokes = ctx.get("keystroke_count", "?")
+        baseline = data.get("baseline_mean", "?")
+        return (
+            f"{DIM}{ts}{RESET}  "
+            f"{badge}  "
+            f"{FG_GRAY}ACTIVITY_INTENSITY/{entity}: "
+            f"{value} ipm (keys={keystrokes}). baseline {baseline}. dev {dev:.1f}σ{RESET}"
+        )
+
+    # Generic fallback for unknown domains
+    value = data.get("value", "?")
+    baseline = data.get("baseline_mean", "?")
     return (
         f"{DIM}{ts}{RESET}  "
         f"{badge}  "
-        f"{FG_GRAY}{player} played {move}  "
-        f"think={think:.1f}s  dev={dev:.1f}σ{RESET}"
+        f"{FG_GRAY}{domain}/{entity}: "
+        f"value={value} baseline={baseline} dev={dev:.1f}σ{RESET}"
     )
 
 
@@ -193,28 +246,48 @@ def update_last_rendered(last_rendered: dict, anomaly: dict) -> None:
 
 def render_advice(data: dict) -> str:
     """Multi-line formatted block for LLM advice."""
-    player = data.get("player", "?")
-    move = data.get("move", "?")
+    domain = data.get("domain", "?")
     severity = data.get("severity", "?")
-    think_time = data.get("think_time", 0)
     advice_text = data.get("advice", "(no advice)")
     model = data.get("model", "?")
     latency_ms = data.get("latency_ms", 0)
 
     badge = severity_badge(severity)
-    player_color = FG_WHITE + BOLD if player == "white" else FG_CYAN + BOLD
 
     # Word-wrap the advice text
     wrapped = textwrap.fill(advice_text, width=WRAP_WIDTH - 4)
     indented = "\n".join(f"  {line}" for line in wrapped.splitlines())
 
+    # Chess domain (legacy)
+    if domain == "chess_board":
+        player = data.get("player", "?")
+        move = data.get("move", "?")
+        think_time = data.get("think_time", 0)
+        player_color = FG_WHITE + BOLD if player == "white" else FG_CYAN + BOLD
+
+        lines = [
+            "",
+            THICK_SEPARATOR,
+            f"  {BOLD}AUGUR ADVISOR{RESET}  {badge}  "
+            f"{player_color}{player.upper()}{RESET} played {BOLD}{move}{RESET}",
+            SEPARATOR,
+            f"  {FG_GRAY}Think time:{RESET}  {BOLD}{think_time:.1f}s{RESET}",
+            SEPARATOR,
+            f"{FG_WHITE}{indented}{RESET}",
+            SEPARATOR,
+            f"  {FG_GRAY}Model: {model}  |  LLM latency: {latency_ms:.0f}ms{RESET}",
+            THICK_SEPARATOR,
+            "",
+        ]
+        return "\n".join(lines)
+
+    # Activity or typing domains
+    entity = data.get("entity", "?")
     lines = [
         "",
         THICK_SEPARATOR,
         f"  {BOLD}AUGUR ADVISOR{RESET}  {badge}  "
-        f"{player_color}{player.upper()}{RESET} played {BOLD}{move}{RESET}",
-        SEPARATOR,
-        f"  {FG_GRAY}Think time:{RESET}  {BOLD}{think_time:.1f}s{RESET}",
+        f"{FG_CYAN}{domain.upper()}{RESET}/{entity}",
         SEPARATOR,
         f"{FG_WHITE}{indented}{RESET}",
         SEPARATOR,

@@ -214,7 +214,6 @@ def build_activity_focus_prompt(
     deviation = anomaly.get("deviation_score")
     severity = anomaly.get("severity")
 
-    # Validate required fields
     missing = [
         k
         for k, v in (
@@ -232,7 +231,6 @@ def build_activity_focus_prompt(
             f"build_activity_focus_prompt: missing required fields: {missing}"
         )
 
-    # Optional fields default to 0
     idle_dwell = ctx.get("idle_dwell_s", 0.0)
     total_dwell = ctx.get("total_dwell_s", active_dwell)
 
@@ -246,10 +244,16 @@ def build_activity_focus_prompt(
 - **Severity:** {severity}
 
 ## Your task
-1. What might this dwell pattern indicate (deep focus vs stuck vs distraction)?
-2. Provide one concrete, short suggestion if the user might benefit from intervention.
+1. Interpret the dwell pattern. Consider all plausible explanations:
+   - A normal task duration that simply differs from the per-app baseline (most common reason).
+   - A varied task — e.g., long-form reading, watching, drafting — that genuinely takes longer.
+   - Deep focused work.
+   - Being stuck on a problem.
+   - Distraction or context switching.
+   Default to "normal varied task duration" unless other context clearly points elsewhere. Baselines form in only a few observations, so early sessions over-report.
+2. Only if a brief, gentle intervention is clearly warranted, suggest one. Otherwise say none is needed.
 
-Keep your response concise (2-4 sentences). Be supportive, not intrusive."""
+Keep your response concise (2-3 sentences). Be supportive, not intrusive."""
 
 
 def build_activity_intensity_prompt(
@@ -274,15 +278,19 @@ def build_activity_intensity_prompt(
 ## Situation
 - **Event:** unusual interaction intensity in {entity}
 - **Rate:** {value} interactions/min   (baseline: {baseline_mean})
-- **Window:** {keystrokes} keystrokes + {mouse} clicks over {window}s ({idle}s idle)
+- **Breakdown:** {keystrokes} keystrokes + {mouse} clicks/scrolls over {window}s ({idle}s idle)
 - **Deviation:** {deviation} standard deviations
 - **Severity:** {severity}
 
 ## Your task
-1. What might this intensity pattern indicate (high-energy work, fatigue, automation, or distraction)?
-2. Provide one short suggestion if the user might benefit from intervention.
+1. Interpret the pattern. Weigh the keystrokes and clicks breakdown:
+   - Click-heavy with few keystrokes → likely normal browsing, scrolling, gaming, or media use of a click-driven app.
+   - Typing-heavy → focused writing, coding, or messaging.
+   - Both elevated → engaged work.
+   Default to "normal heavy use of this app" unless the breakdown or context clearly points to fatigue, automation, or distraction. Note: deviation alone is not enough — every new app's baseline forms in only a few observations, so early sessions over-report.
+2. Only if a brief, gentle intervention is clearly warranted, suggest one. Otherwise say none is needed.
 
-Keep your response concise (2-4 sentences). Be supportive, not intrusive."""
+Keep your response concise (2-3 sentences). Be supportive, not intrusive."""
 
 
 # ---------------------------------------------------------------------------

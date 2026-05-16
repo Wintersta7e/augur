@@ -15,14 +15,19 @@ Run on the Windows host:
 
 from __future__ import annotations
 
+import asyncio  # noqa: F401
 import json  # noqa: F401
 import logging
 import math  # noqa: F401
+import socket  # noqa: F401
+import sys  # noqa: F401
 import threading
 import time  # noqa: F401
 import uuid  # noqa: F401
+from collections import deque  # noqa: F401
 from dataclasses import dataclass, field
 from datetime import datetime, timezone  # noqa: F401
+from typing import Any  # noqa: F401
 
 log = logging.getLogger("activity_monitor")
 
@@ -329,9 +334,286 @@ class _SessionReader:
         self.last_seen = session_id
 
 
-class ActivityMonitor:
-    """Windows-host daemon. See module docstring."""
+class _BufferedPublisher:
+    """Bounded FIFO of NATS payload dicts. Drops oldest on overflow.
 
-    def __init__(self) -> None:
-        # Concrete construction lands in Tasks 5–8.
-        raise NotImplementedError("ActivityMonitor wiring lands in later tasks")
+    flush() is called on session change (don't replay events into a new
+    session — detector stamps receive time, correlator ignores session_id).
+    """
+
+    def __init__(self, capacity: int = 200) -> None:
+        self._capacity = capacity
+        self._dq: deque[dict[str, Any]] = deque(maxlen=capacity)
+
+    def enqueue(self, payload: dict[str, Any]) -> None:
+        if len(self._dq) == self._capacity:
+            log.warning("activity_monitor: buffer overflow, dropping oldest event")
+        self._dq.append(payload)
+
+    def drain(self) -> list[dict[str, Any]]:
+        out = list(self._dq)
+        self._dq.clear()
+        return out
+
+    def flush(self) -> None:
+        if self._dq:
+            log.info("activity_monitor: flushing %d buffered events", len(self._dq))
+        self._dq.clear()
+
+
+def _probe_nats_reachable(nats_url: str, timeout_s: float = 5.0) -> bool:
+    """TCP-connect probe. Real protocol handshake happens later via nats-py."""
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(nats_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 4222
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+class ActivityMonitor:
+    """Windows-host daemon. Composes the helpers above + NATS/Redis I/O."""
+
+    SUBJECT_FOCUS = "augur.perception.activity_focus"
+    SUBJECT_INTENSITY = "augur.perception.activity_intensity"
+
+    def __init__(
+        self,
+        config: Any,  # AugurConfig at runtime
+        redis_client: object,
+        nats_client: Any,
+    ) -> None:
+        self.config = config
+        self.redis_client = redis_client
+        self.nats = nats_client
+        self.counter = _CounterState()
+        self.buffer = _BufferedPublisher(capacity=200)
+        self.session_reader = _SessionReader(
+            redis_client, max_age_h=config.session_max_age_h
+        )
+        self.focus: _FocusState | None = None
+        self.intensity: _IntensityWindow | None = None
+        self.allowlist = tuple(
+            s.strip() for s in config.activity_title_allowlist.split(",") if s.strip()
+        )
+
+    def _build_focus_state(self, session_id: str) -> _FocusState:
+        return _FocusState(
+            sampling_s=self.config.activity_sampling_s,
+            idle_threshold_s=self.config.activity_idle_threshold_s,
+            title_allowlist=self.allowlist,
+            source_id=self.config.activity_source_id,
+            session_id=session_id,
+        )
+
+    def _build_intensity_window(self, session_id: str) -> _IntensityWindow:
+        return _IntensityWindow(
+            sampling_s=self.config.activity_sampling_s,
+            min_events=self.config.activity_intensity_min_events,
+            min_window_s=self.config.activity_intensity_min_window_s,
+            idle_threshold_s=self.config.activity_idle_threshold_s,
+            title_allowlist=self.allowlist,
+            source_id=self.config.activity_source_id,
+            session_id=session_id,
+        )
+
+    def _resolve_session(self) -> str | None:
+        sid = self.session_reader.read_current()
+        if self.session_reader.changed_since_last:
+            self.buffer.flush()
+            if sid is not None and self.focus is not None:
+                self.focus.session_id = sid
+            if sid is not None and self.intensity is not None:
+                self.intensity.session_id = sid
+        return sid
+
+    def _get_foreground(self) -> tuple[str, str | None]:
+        """Return (app_name, window_title). Returns (<unknown>, None) on failure."""
+        if not _WIN32_AVAILABLE:
+            return (_UNKNOWN_APP, None)
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            if not hwnd:
+                return (_UNKNOWN_APP, None)
+            try:
+                title = win32gui.GetWindowText(hwnd) or None
+            except Exception:  # noqa: BLE001
+                title = None
+            try:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                exe = psutil.Process(pid).name() if pid else ""
+            except Exception:  # noqa: BLE001
+                exe = ""
+            return (_normalize_app_name(exe), title)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("activity_monitor: GetForeground failed: %s", exc)
+            return (_UNKNOWN_APP, None)
+
+    async def _publish(self, subject: str, payload: dict[str, Any]) -> None:
+        try:
+            await self.nats.publish(subject, json.dumps(payload).encode())
+        except Exception as exc:  # noqa: BLE001
+            log.warning("activity_monitor: publish failed, buffering: %s", exc)
+            self.buffer.enqueue({"subject": subject, "payload": payload})
+
+    async def run(self) -> None:  # pragma: no cover - exercised manually
+        """Main loop. Real Win32 hook wiring happens here.
+
+        On every poll tick we:
+          1. resolve the current session (returns None if absent/stale/ended)
+          2. if no session, sleep + retry
+          3. poll active window; on change, emit focus_change + reset intensity
+          4. if sampling_s elapsed since last intensity sample, emit one
+        """
+        sampling = self.config.activity_sampling_s
+        last_sampled = time.monotonic()
+        last_app: str | None = None
+        last_title: str | None = None
+
+        # Install global input listeners (best-effort).
+        listeners: list[Any] = []
+        if _WIN32_AVAILABLE:
+
+            def _on_key(_ev: Any) -> None:
+                now = time.time()
+                self.counter.record_keystroke()
+                self.counter.touch(now)
+
+            def _on_mouse(*_args: Any) -> None:
+                now = time.time()
+                self.counter.record_mouse_event()
+                self.counter.touch(now)
+
+            try:
+                kbd = _kb.Listener(on_press=_on_key)  # type: ignore[union-attr]
+                kbd.start()
+                listeners.append(kbd)
+                mse = _mouse.Listener(on_click=_on_mouse, on_scroll=_on_mouse)  # type: ignore[union-attr]
+                mse.start()
+                listeners.append(mse)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("activity_monitor: input listeners failed: %s", exc)
+
+        try:
+            while True:
+                sid = self._resolve_session()
+                if sid is None:
+                    log.info("activity_monitor: waiting for active session...")
+                    await asyncio.sleep(5.0)
+                    continue
+
+                if self.focus is None:
+                    self.focus = self._build_focus_state(sid)
+                if self.intensity is None:
+                    self.intensity = self._build_intensity_window(sid)
+                    self.intensity.reset(
+                        new_started_at=time.monotonic(),
+                        new_span_id=self.focus.current_span_id,
+                    )
+
+                now_mono = time.monotonic()
+                app, title = self._get_foreground()
+
+                # Pull counters and update intensity state.
+                k, m, last_input = self.counter.drain()
+                self.intensity.keystrokes += k
+                self.intensity.mouse_events += m
+                if last_input:
+                    self.intensity.last_input_time = last_input
+                    self.focus.last_input_time = last_input
+
+                # Focus change?
+                if app != last_app:
+                    # Emit any in-flight intensity sample BEFORE the focus change,
+                    # truncated to the current focus span.
+                    if last_app is not None and self.intensity.window_started_at > 0:
+                        ev = self.intensity.build(
+                            focused_app=last_app, focused_title=last_title, now=now_mono
+                        )
+                        if ev is not None:
+                            await self._publish(self.SUBJECT_INTENSITY, ev)
+
+                    ev_focus = self.focus.on_focus_change(
+                        new_app=app, new_title=title, now=now_mono
+                    )
+                    if ev_focus is not None:
+                        await self._publish(self.SUBJECT_FOCUS, ev_focus)
+
+                    self.intensity.reset(
+                        new_started_at=now_mono, new_span_id=self.focus.current_span_id
+                    )
+                    last_sampled = now_mono
+                    last_app, last_title = app, title
+
+                # Periodic intensity sample?
+                elif now_mono - last_sampled >= sampling:
+                    ev = self.intensity.build(
+                        focused_app=app, focused_title=title, now=now_mono
+                    )
+                    if ev is not None:
+                        await self._publish(self.SUBJECT_INTENSITY, ev)
+                    self.intensity.reset(
+                        new_started_at=now_mono, new_span_id=self.focus.current_span_id
+                    )
+                    last_sampled = now_mono
+
+                await asyncio.sleep(0.25)
+        finally:
+            for l in listeners:
+                try:
+                    l.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+
+
+def main() -> None:  # pragma: no cover - CLI entrypoint
+    """CLI entrypoint. Refuses to run if Win32 deps are missing."""
+    if not _WIN32_AVAILABLE:
+        sys.stderr.write(
+            "activity_monitor: Windows dependencies missing.\n"
+            "  Install: pip install -r requirements-windows.txt\n"
+        )
+        sys.exit(2)
+
+    # Lazy imports for runtime-only paths (keeps tests importable).
+    from blackboard.config import AugurConfig
+    from blackboard.connections import connect_redis
+    import nats
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
+
+    config = AugurConfig.from_env()
+    if not _probe_nats_reachable(config.nats_url):
+        sys.stderr.write(
+            f"activity_monitor: NATS unreachable at {config.nats_url}.\n"
+            "  1. Verify WSL2 distro is running:   wsl -l -v\n"
+            "  2. Verify docker-compose is up:     docker compose ps\n"
+            "  3. Or set explicit IP:              "
+            "export AUGUR_NATS_URL=nats://$(wsl hostname -I | awk '{print $1}'):4222\n"
+        )
+        sys.exit(3)
+
+    redis_client = connect_redis(config)
+
+    async def _run() -> None:
+        nc = await nats.connect(
+            config.nats_url, connect_timeout=config.nats_connect_timeout
+        )
+        mon = ActivityMonitor(config, redis_client, nc)
+        try:
+            await mon.run()
+        finally:
+            await nc.drain()
+
+    asyncio.run(_run())
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

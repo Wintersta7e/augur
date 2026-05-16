@@ -459,3 +459,38 @@ def test_session_reader_none_to_valid_signals_change():
     )
     assert reader.read_current() == "sess-new"
     assert reader.changed_since_last is True
+
+
+# ---------------------------------------------------------------------------
+# Buffer + CLI gate
+# ---------------------------------------------------------------------------
+
+
+def test_buffered_publisher_drops_oldest_on_overflow():
+    mod = _import_module()
+    pub = mod._BufferedPublisher(capacity=3)
+    pub.enqueue({"i": 1})
+    pub.enqueue({"i": 2})
+    pub.enqueue({"i": 3})
+    pub.enqueue({"i": 4})
+    drained = pub.drain()
+    assert [d["i"] for d in drained] == [2, 3, 4]
+
+
+def test_buffered_publisher_flushed_drops_all_events():
+    mod = _import_module()
+    pub = mod._BufferedPublisher(capacity=10)
+    pub.enqueue({"i": 1})
+    pub.enqueue({"i": 2})
+    pub.flush()
+    assert pub.drain() == []
+
+
+def test_cli_main_exits_when_win32_unavailable(monkeypatch, capsys):
+    mod = _import_module()
+    monkeypatch.setattr(mod, "_WIN32_AVAILABLE", False)
+    with pytest.raises(SystemExit) as ei:
+        mod.main()
+    assert ei.value.code != 0
+    captured = capsys.readouterr()
+    assert "requirements-windows.txt" in captured.err

@@ -242,7 +242,9 @@ async def run() -> None:
     # State
     current_session_id: str | None = None
     advice_events: list[PendingAdvice] = []
-    active_tracking: dict[tuple[str, str], PendingAdvice] = {}  # (domain, entity) -> pending advice
+    active_tracking: dict[
+        tuple[str, str], PendingAdvice
+    ] = {}  # (domain, entity) -> pending advice
 
     def get_session_id() -> str:
         nonlocal current_session_id

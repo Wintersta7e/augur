@@ -16,11 +16,12 @@ def test_active_tracking_is_keyed_by_domain_and_entity():
     """active_tracking declaration must be dict[tuple[str, str], PendingAdvice]."""
     src = Path("perception/feedback_collector.py").read_text()
     decl = re.search(
-        r"active_tracking:\s*dict\[(.+?),\s*PendingAdvice\]",
+        r"active_tracking:\s*dict\[(.+?),\s*PendingAdvice\s*\]",
         src,
+        re.DOTALL,
     )
     assert decl is not None, "active_tracking declaration not found"
-    key_type = decl.group(1).strip()
+    key_type = " ".join(decl.group(1).split())
     assert key_type == "tuple[str, str]", (
         f"active_tracking must be keyed by tuple[str, str] "
         f"(got {key_type!r}) so domains with overlapping entities "

@@ -577,9 +577,9 @@ class ActivityMonitor:
 
                 await asyncio.sleep(0.25)
         finally:
-            for l in listeners:
+            for listener in listeners:
                 try:
-                    l.stop()
+                    listener.stop()
                 except Exception:  # noqa: BLE001
                     pass
 

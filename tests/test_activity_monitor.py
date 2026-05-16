@@ -404,3 +404,58 @@ def test_session_reader_returns_none_when_redis_raises():
     r.get.side_effect = ConnectionError("Redis down")
     reader = mod._SessionReader(r, max_age_h=12.0)
     assert reader.read_current() is None
+
+
+def test_session_reader_clears_last_seen_on_malformed_json():
+    """After malformed JSON, last_seen must be reset so a later valid
+    session of the SAME id is not treated as already-known."""
+    import json
+    from datetime import datetime, timezone
+
+    mod = _import_module()
+    r = MagicMock()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    r.get.return_value = json.dumps(
+        {"session_id": "sess-1", "started_at": now_iso, "status": "active"}
+    )
+    reader = mod._SessionReader(r, max_age_h=12.0)
+    assert reader.read_current() == "sess-1"
+    assert reader.last_seen == "sess-1"
+
+    # Malformed JSON returned next.
+    r.get.return_value = b"not-json"
+    assert reader.read_current() is None
+    assert reader.last_seen is None  # state cleared
+
+    # Valid session returns (same id) — must NOT signal changed (we cleared, then re-saw).
+    r.get.return_value = json.dumps(
+        {"session_id": "sess-1", "started_at": now_iso, "status": "active"}
+    )
+    assert reader.read_current() == "sess-1"
+    # last_seen was None, now sess-1 → changed_since_last fires (correctly, since we
+    # had no valid session in between)
+    assert reader.last_seen == "sess-1"
+
+
+def test_session_reader_none_to_valid_signals_change():
+    """First read returns None (no key); a later valid session must
+    fire changed_since_last=True."""
+    import json
+    from datetime import datetime, timezone
+
+    mod = _import_module()
+    r = MagicMock()
+    r.get.return_value = None  # no session yet
+    reader = mod._SessionReader(r, max_age_h=12.0)
+    assert reader.read_current() is None
+    assert reader.last_seen is None
+
+    r.get.return_value = json.dumps(
+        {
+            "session_id": "sess-new",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "status": "active",
+        }
+    )
+    assert reader.read_current() == "sess-new"
+    assert reader.changed_since_last is True

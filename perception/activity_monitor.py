@@ -277,7 +277,7 @@ class _SessionReader:
     `changed_since_last` to know when to flush their NATS buffer.
     """
 
-    redis_client: object  # redis.Redis at runtime
+    redis_client: Any  # redis.Redis at runtime
     max_age_h: float
 
     last_seen: str | None = None
@@ -296,14 +296,17 @@ class _SessionReader:
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
+            self._update_seen(None)
             return None
         if not isinstance(data, dict):
+            self._update_seen(None)
             return None
         if data.get("status") != "active":
             self._update_seen(None)
             return None
         session_id = data.get("session_id")
         if not session_id:
+            self._update_seen(None)
             return None
         started_at = data.get("started_at")
         if started_at:
@@ -311,6 +314,7 @@ class _SessionReader:
                 started = datetime.fromisoformat(started_at)
                 age = datetime.now(timezone.utc) - started
             except (ValueError, TypeError):
+                self._update_seen(None)
                 return None
             if age.total_seconds() > self.max_age_h * 3600:
                 self._update_seen(None)

@@ -62,7 +62,12 @@ def get_active_session(
       - if started_at is present, age must be <= max_age_h hours
         (older records without started_at are accepted; they predate the field)
     """
-    raw = r.get(REDIS_KEY_CURRENT)
+    try:
+        raw = r.get(REDIS_KEY_CURRENT)
+    except Exception:
+        # Redis connection error or other transport failure.
+        # Treat as "no valid session" rather than propagating.
+        return None
     if not raw:
         return None
     try:
@@ -80,9 +85,9 @@ def get_active_session(
     if started_at:
         try:
             started = datetime.fromisoformat(started_at)
-        except ValueError:
+            age = datetime.now(timezone.utc) - started
+        except (ValueError, TypeError):
             return None
-        age = datetime.now(timezone.utc) - started
         if age.total_seconds() > max_age_h * 3600:
             return None
     return session_id

@@ -66,3 +66,36 @@ def test_returns_none_when_record_missing_session_id():
     r = MagicMock()
     r.get.return_value = json.dumps({"status": "active"})
     assert get_active_session(r, max_age_h=12.0) is None
+
+
+def test_returns_none_when_started_at_is_naive_datetime():
+    """A naive (no-tz) started_at would TypeError the subtraction — must be caught."""
+    r = MagicMock()
+    r.get.return_value = json.dumps(
+        {
+            "session_id": "sess-naive",
+            "started_at": "2026-05-16T10:30:00",  # no tz suffix
+            "status": "active",
+        }
+    )
+    assert get_active_session(r, max_age_h=12.0) is None
+
+
+def test_returns_none_when_started_at_is_not_a_string():
+    """A non-string started_at would AttributeError fromisoformat — must be caught."""
+    r = MagicMock()
+    r.get.return_value = json.dumps(
+        {
+            "session_id": "sess-bad",
+            "started_at": 12345,
+            "status": "active",
+        }
+    )
+    assert get_active_session(r, max_age_h=12.0) is None
+
+
+def test_returns_none_when_redis_raises():
+    """Redis connection errors should be treated as 'no valid session'."""
+    r = MagicMock()
+    r.get.side_effect = ConnectionError("Redis unreachable")
+    assert get_active_session(r, max_age_h=12.0) is None

@@ -530,9 +530,7 @@ async def test_activity_focus_advisor_returns_advice_via_ollama(
         await sub.unsubscribe()
         await nc.drain()
 
-    activity_advice = [
-        a for a in received if a.get("primary_domain") == "activity_focus"
-    ]
+    activity_advice = [a for a in received if a.get("domain") == "activity_focus"]
     assert activity_advice, "expected at least one activity_focus advice from Ollama"
     msg = activity_advice[0]
     assert msg.get("advice"), "advice field is empty"

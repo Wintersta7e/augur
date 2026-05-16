@@ -388,6 +388,20 @@ def _probe_nats_reachable(nats_url: str, timeout_s: float = 5.0) -> bool:
         return False
 
 
+def _probe_redis_reachable(redis_url: str, timeout_s: float = 5.0) -> bool:
+    """TCP-connect probe for Redis (default port 6379)."""
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(redis_url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 6379
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
 class ActivityMonitor:
     """Windows-host daemon. Composes the helpers above + NATS/Redis I/O."""
 
@@ -613,6 +627,16 @@ def main() -> None:  # pragma: no cover - CLI entrypoint
             "export AUGUR_NATS_URL=nats://$(wsl hostname -I | awk '{print $1}'):4222\n"
         )
         sys.exit(3)
+
+    if not _probe_redis_reachable(config.redis_url):
+        sys.stderr.write(
+            f"activity_monitor: Redis unreachable at {config.redis_url}.\n"
+            "  1. Verify WSL2 distro is running:   wsl -l -v\n"
+            "  2. Verify docker-compose is up:     docker compose ps\n"
+            "  3. Or set explicit IP:              "
+            "export AUGUR_REDIS_URL=redis://$(wsl hostname -I | awk '{print $1}'):6379\n"
+        )
+        sys.exit(4)
 
     redis_client = connect_redis(config)
 

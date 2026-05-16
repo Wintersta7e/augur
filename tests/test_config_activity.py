@@ -13,7 +13,6 @@ from blackboard.config import AugurConfig
 def test_defaults_present():
     cfg = AugurConfig()
     assert cfg.activity_sampling_s == 10.0
-    assert cfg.activity_idle_threshold_s == 60.0
     assert cfg.activity_intensity_min_events == 1
     assert cfg.activity_intensity_min_window_s == 2.0
     assert cfg.activity_title_allowlist == ""
@@ -26,8 +25,6 @@ def test_defaults_present():
     [
         ("activity_sampling_s", 0.5),
         ("activity_sampling_s", 60.1),
-        ("activity_idle_threshold_s", 9.9),
-        ("activity_idle_threshold_s", 600.1),
         ("activity_intensity_min_events", -1),
         ("activity_intensity_min_events", 101),
         ("activity_intensity_min_window_s", 0.05),

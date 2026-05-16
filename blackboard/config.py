@@ -87,7 +87,6 @@ class AugurConfig:
 
     # ── Activity perception (Phase 1) ──────────────────────────────────────
     activity_sampling_s: float = 10.0
-    activity_idle_threshold_s: float = 60.0
     activity_intensity_min_events: int = 1
     activity_intensity_min_window_s: float = 2.0
     activity_title_allowlist: str = ""  # comma-separated; consumers split at use
@@ -131,10 +130,6 @@ class AugurConfig:
         if not (1.0 <= self.activity_sampling_s <= 60.0):
             raise ValueError(
                 f"activity_sampling_s={self.activity_sampling_s} outside [1.0, 60.0]"
-            )
-        if not (10.0 <= self.activity_idle_threshold_s <= 600.0):
-            raise ValueError(
-                f"activity_idle_threshold_s={self.activity_idle_threshold_s} outside [10.0, 600.0]"
             )
         if not (0 <= self.activity_intensity_min_events <= 100):
             raise ValueError(

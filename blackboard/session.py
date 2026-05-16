@@ -47,3 +47,42 @@ class SessionManager:
             data["status"] = "ended"
             self._redis.set(REDIS_KEY_CURRENT, json.dumps(data))
         log.info("Session ended: %s", self.session_id)
+
+
+def get_active_session(
+    r: redis.Redis,
+    max_age_h: float = 12.0,
+) -> str | None:
+    """Return current session_id if active and not stale; else None.
+
+    Validity rules:
+      - augur:session:current must exist
+      - record must parse as JSON with a session_id
+      - status must be "active" (not "ended")
+      - if started_at is present, age must be <= max_age_h hours
+        (older records without started_at are accepted; they predate the field)
+    """
+    raw = r.get(REDIS_KEY_CURRENT)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("status") != "active":
+        return None
+    session_id = data.get("session_id")
+    if not session_id:
+        return None
+    started_at = data.get("started_at")
+    if started_at:
+        try:
+            started = datetime.fromisoformat(started_at)
+        except ValueError:
+            return None
+        age = datetime.now(timezone.utc) - started
+        if age.total_seconds() > max_age_h * 3600:
+            return None
+    return session_id

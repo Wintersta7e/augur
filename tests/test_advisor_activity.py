@@ -130,3 +130,13 @@ def test_build_activity_intensity_prompt_includes_relevant_fields():
     assert "320" in prompt
     assert "60" in prompt  # baseline
     assert "HIGH" in prompt
+
+
+def test_domain_handlers_and_describers_keys_match():
+    """Each domain with a prompt builder must also have a describer (and vice versa)."""
+    from reasoning.augur_advisor import DOMAIN_HANDLERS, DOMAIN_DESCRIBERS
+
+    assert set(DOMAIN_HANDLERS.keys()) == set(DOMAIN_DESCRIBERS.keys()), (
+        f"DOMAIN_HANDLERS keys {set(DOMAIN_HANDLERS.keys())} "
+        f"don't match DOMAIN_DESCRIBERS keys {set(DOMAIN_DESCRIBERS.keys())}"
+    )

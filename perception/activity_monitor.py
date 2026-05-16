@@ -216,12 +216,7 @@ class _FocusState:
 
 @dataclass
 class _IntensityWindow:
-    """Bounded-by-focus-span input-intensity sampler.
-
-    Counts keystrokes + mouse events between resets. build() emits a
-    sample if the window is long enough AND has enough events; otherwise
-    returns None (caller resets either way).
-    """
+    """Bounded-by-focus-span input-intensity sampler."""
 
     sampling_s: float
     min_events: int

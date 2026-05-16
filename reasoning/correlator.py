@@ -141,10 +141,8 @@ def lookup_escalation_n_way(
     return max(valid, key=lambda s: SEVERITY_ORDER[s]), None
 
 
-# NOTE: rule_windows is keyed by severity-combination (rule_key), not by
-# domain pair. Tuning the window for an activity-typing pairwise rule
-# will also affect chess-typing or any other pair with the same severity
-# combination. Future spec to address per-domain windows if needed.
+# NOTE: rule_windows is keyed by severity-combination (rule_key), not domain pair.
+# Window tuning for any activity-X rule affects every pair with the same severity combo.
 def get_rule_window(
     rule_key: str | None,
     matrix: dict,

@@ -322,6 +322,63 @@ Analyze this anomaly and provide a concise assessment (2-4 sentences)."""
 # ---------------------------------------------------------------------------
 
 
+def _describe_chess(anomaly: dict) -> str:
+    move = anomaly.get("context", {}).get("move_san") or anomaly.get("move", "?")
+    think = anomaly.get("value", anomaly.get("think_time", 0))
+    baseline = anomaly.get("baseline_mean", "?")
+    deviation = anomaly.get("deviation_score", "?")
+    return (
+        f"CHESS (timing): {anomaly.get('entity', '?')} paused {think}s on "
+        f"move {move}. Baseline: {baseline}s. Deviation: {deviation}σ."
+    )
+
+
+def _describe_typing(anomaly: dict) -> str:
+    pause = anomaly.get("value", 0)
+    unit = anomaly.get("unit", "seconds")
+    ctx = anomaly.get("context", {})
+    avg_wpm = ctx.get("avg_wpm", "?")
+    baseline = anomaly.get("baseline_mean", "?")
+    return (
+        f"TYPING (rhythm): Pause duration {pause}{unit[:1]}. "
+        f"Average speed {avg_wpm} wpm. Baseline pause: {baseline}s."
+    )
+
+
+def _describe_activity_focus(anomaly: dict) -> str:
+    ctx = anomaly.get("context", {}) or {}
+    entity = anomaly.get("entity", "?")
+    new_app = ctx.get("new_app", "?")
+    active = ctx.get("active_dwell_s", "?")
+    baseline = anomaly.get("baseline_mean", "?")
+    deviation = anomaly.get("deviation_score", "?")
+    return (
+        f"ACTIVITY_FOCUS: {entity} dwell {active}s (then switched to {new_app}). "
+        f"Baseline (log1p): {baseline}. Deviation: {deviation}σ."
+    )
+
+
+def _describe_activity_intensity(anomaly: dict) -> str:
+    ctx = anomaly.get("context", {}) or {}
+    entity = anomaly.get("entity", "?")
+    value = anomaly.get("value", "?")
+    keystrokes = ctx.get("keystroke_count", "?")
+    baseline = anomaly.get("baseline_mean", "?")
+    deviation = anomaly.get("deviation_score", "?")
+    return (
+        f"ACTIVITY_INTENSITY: {entity} {value} ipm "
+        f"(keystrokes={keystrokes}). Baseline: {baseline}. Deviation: {deviation}σ."
+    )
+
+
+DOMAIN_DESCRIBERS: dict[str, Callable[[dict], str]] = {
+    "chess": _describe_chess,
+    "typing": _describe_typing,
+    "activity_focus": _describe_activity_focus,
+    "activity_intensity": _describe_activity_intensity,
+}
+
+
 def describe_signal(domain: str, anomaly: dict) -> str:
     """Return a one-line human-readable summary of a single-domain anomaly.
 

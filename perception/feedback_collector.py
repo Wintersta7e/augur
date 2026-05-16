@@ -15,6 +15,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal, NamedTuple
 
 import nats
 import redis
@@ -24,6 +25,17 @@ from blackboard.config import AugurConfig
 from blackboard.connections import connect_redis
 from blackboard.contracts import PerceptionEvent
 from blackboard.persistence import PersistenceManager
+
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+
+
+class TrackingKey(NamedTuple):
+    domain: str
+    entity: str
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -102,7 +114,7 @@ class PendingAdvice:
         self.severity = severity
         self.baseline_mean = baseline_mean
         self.timestamp = timestamp
-        self.explicit_rating: str = "no_response"
+        self.explicit_rating: Literal["y", "n", "no_response"] = "no_response"
         self.think_times_after: list[float] = []
         self.behavioral_score: float = 0.0
         self.finalized = False
@@ -240,7 +252,7 @@ async def run() -> None:
     current_session_id: str | None = None
     advice_events: list[PendingAdvice] = []
     active_tracking: dict[
-        tuple[str, str], PendingAdvice
+        TrackingKey, PendingAdvice
     ] = {}  # (domain, entity) -> pending advice
 
     def get_session_id() -> str:
@@ -347,7 +359,7 @@ async def run() -> None:
         # Without this, the displaced advice would stay at behavioural=0.0
         # and finalized=False for the lifetime of the session, silently
         # corrupting the feedback record used by the reflection engine.
-        tracking_key = (primary_domain, entity)
+        tracking_key = TrackingKey(primary_domain, entity)
         displaced = active_tracking.get(tracking_key)
         if displaced is not None and not displaced.finalized:
             displaced._compute_behavioral_score()
@@ -401,7 +413,7 @@ async def run() -> None:
             return
 
         entity = event.entity
-        tracking_key = (event.domain, entity)
+        tracking_key = TrackingKey(event.domain, entity)
         if tracking_key not in active_tracking:
             return
 

@@ -13,10 +13,10 @@ from blackboard.contracts import PerceptionEvent
 def test_active_tracking_handles_overlapping_entities_across_domains():
     """Two domains, same entity name. The (domain, entity) keying must
     keep their PendingAdvice records distinct."""
-    from perception.feedback_collector import PendingAdvice
+    from perception.feedback_collector import PendingAdvice, TrackingKey
 
     # Hand-construct the active_tracking dict the way the run() closure does.
-    active_tracking: dict[tuple[str, str], PendingAdvice] = {}
+    active_tracking: dict[TrackingKey, PendingAdvice] = {}
 
     a = PendingAdvice(
         advice_id="adv-focus",
@@ -51,13 +51,13 @@ def test_active_tracking_handles_overlapping_entities_across_domains():
         rule_window_s=None,
     )
 
-    active_tracking[("activity_focus", "code")] = a
-    active_tracking[("activity_intensity", "code")] = b
+    active_tracking[TrackingKey("activity_focus", "code")] = a
+    active_tracking[TrackingKey("activity_intensity", "code")] = b
 
     # Two distinct records exist — no overwrite.
     assert len(active_tracking) == 2
-    assert active_tracking[("activity_focus", "code")] is a
-    assert active_tracking[("activity_intensity", "code")] is b
+    assert active_tracking[TrackingKey("activity_focus", "code")] is a
+    assert active_tracking[TrackingKey("activity_intensity", "code")] is b
 
     # A perception event with domain=activity_focus advances only `a`.
     focus_event = PerceptionEvent(
@@ -72,7 +72,7 @@ def test_active_tracking_handles_overlapping_entities_across_domains():
         session_id="sess-1",
     )
 
-    pending_a = active_tracking.get((focus_event.domain, focus_event.entity))
+    pending_a = active_tracking.get(TrackingKey(focus_event.domain, focus_event.entity))
     assert pending_a is a
     pending_a.add_post_move(focus_event.value)
     assert len(a.think_times_after) == 1
@@ -91,7 +91,9 @@ def test_active_tracking_handles_overlapping_entities_across_domains():
         session_id="sess-1",
     )
 
-    pending_b = active_tracking.get((intensity_event.domain, intensity_event.entity))
+    pending_b = active_tracking.get(
+        TrackingKey(intensity_event.domain, intensity_event.entity)
+    )
     assert pending_b is b
     pending_b.add_post_move(intensity_event.value)
     assert len(a.think_times_after) == 1  # unchanged

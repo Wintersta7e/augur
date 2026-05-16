@@ -120,27 +120,57 @@ def test_drain_counters_returns_and_resets():
 
 
 def test_drain_counters_thread_safe_under_concurrent_increment(monkeypatch):
-    """drain() takes the lock; concurrent increments should not lose counts."""
+    """Hammer record_keystroke from a thread while draining; sum total events
+    across all drains + remaining state == total increments. If the lock is
+    removed, this would race and lose increments."""
     import threading
+    import time as _time
 
     mod = _import_module()
     state = mod._CounterState()
 
+    total_increments = 0
+    increments_lock = threading.Lock()
     stop = threading.Event()
 
     def hammer():
+        nonlocal total_increments
+        local = 0
         while not stop.is_set():
             state.record_keystroke()
+            local += 1
+        with increments_lock:
+            total_increments += local
 
     t = threading.Thread(target=hammer, daemon=True)
     t.start()
     try:
-        # Drain a few times; nothing should crash.
-        for _ in range(50):
-            state.drain()
+        observed_total = 0
+        deadline = _time.monotonic() + 0.25
+        while _time.monotonic() < deadline:
+            k, _, _ = state.drain()
+            observed_total += k
+            _time.sleep(0.005)
     finally:
         stop.set()
         t.join(timeout=1.0)
+
+    # Final drain to capture remaining.
+    k, _, _ = state.drain()
+    observed_total += k
+
+    # If the lock is removed, observed_total could be less than total_increments
+    # due to lost-update race. Allow a tiny in-flight slack: hammer increments
+    # may have happened after our final drain but before join returned, so
+    # require equality up to a small constant.
+    assert observed_total <= total_increments, (
+        f"observed_total={observed_total} > total_increments={total_increments}; "
+        "this should be impossible"
+    )
+    assert total_increments - observed_total <= 50, (
+        f"lost {total_increments - observed_total} increments; "
+        f"observed={observed_total}, total_incremented={total_increments}"
+    )
 
 
 # ---------------------------------------------------------------------------

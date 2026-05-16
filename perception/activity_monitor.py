@@ -52,12 +52,6 @@ except ImportError:  # pragma: no cover - Linux CI path
     _mouse = None  # type: ignore[assignment]
     _WIN32_AVAILABLE = False
 
-# Runtime import; used in _SessionReader.read_current for specific error handling.
-try:
-    import redis  # noqa: F401
-except ImportError:  # pragma: no cover - will be caught at runtime
-    redis = None  # type: ignore[assignment]
-
 
 # ---------------------------------------------------------------------------
 # Pure helpers (no OS calls)

@@ -256,9 +256,12 @@ async def run() -> None:
     ] = {}  # (domain, entity) -> pending advice
 
     def get_session_id() -> str:
+        # Intentionally laxer than blackboard.session.get_active_session:
+        # accepts ended sessions (so late-arriving feedback for a just-ended
+        # session is still attributed correctly) and falls back to a fresh
+        # uuid rather than dropping feedback on a session-record race.
         nonlocal current_session_id
         if current_session_id is None:
-            # Try to read from Redis
             raw = redis_client.get("augur:session:current")
             if raw:
                 data = json.loads(raw)

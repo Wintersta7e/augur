@@ -558,15 +558,22 @@ def test_cli_main_exits_when_win32_unavailable(monkeypatch, capsys):
 
 
 @pytest.mark.skip(
-    reason="synthetic-clock loop test needs more setup; "
-    "schema round-trips below cover value"
+    reason="synthetic-clock loop test needs richer harness; "
+    "schema round-trips below cover producer contract"
 )
 @pytest.mark.asyncio
 async def test_activity_monitor_run_emits_focus_and_intensity_events(monkeypatch):
     """Drive run() with controlled time + mocked foreground polls.
 
-    TODO: Fix asyncio.sleep patching recursion; schema round-trip tests
-    below verify the key invariant (PerceptionEvent schema compatibility).
+    Skipped: asyncio.sleep patching recursion needs a richer harness.
+    Schema round-trip tests below cover PerceptionEvent contract;
+    integration tests cover full pipeline; this is the gap in between.
+
+    Uncovered until this test runs:
+      - Publish ordering in focus-change (intensity-flush before focus_change)
+      - Intensity-window reset timing on focus change
+      - last_app / last_title / last_sampled state advancement
+      - Session-change state reset path (CR-2 invariant)
     """
     pass
 

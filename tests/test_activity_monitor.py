@@ -216,3 +216,118 @@ def test_focus_event_assigns_new_span_id_after_change():
     state.last_input_time = 110.0
     state.on_focus_change(new_app="chrome", new_title="y", now=110.0)
     assert state.current_span_id != first_span
+
+
+# ---------------------------------------------------------------------------
+# Intensity event builder
+# ---------------------------------------------------------------------------
+
+
+def _make_intensity_window(
+    mod,
+    sampling_s=10.0,
+    min_events=1,
+    min_window_s=2.0,
+    allowlist=(),
+):
+    return mod._IntensityWindow(
+        sampling_s=sampling_s,
+        min_events=min_events,
+        min_window_s=min_window_s,
+        idle_threshold_s=60.0,
+        title_allowlist=allowlist,
+        source_id="test-host",
+        session_id="sess-1",
+    )
+
+
+def test_intensity_event_built_for_full_window():
+    mod = _import_module()
+    w = _make_intensity_window(mod, allowlist=("code",))
+    w.window_started_at = 100.0
+    w.span_id = "span-1"
+    w.keystrokes = 30
+    w.mouse_events = 10
+    w.last_input_time = 109.5
+    ev = w.build(focused_app="code", focused_title="main.py", now=110.0)
+    assert ev is not None
+    assert ev["domain"] == "activity_intensity"
+    assert ev["stream_id"] == "activity_intensity"
+    assert ev["entity"] == "code"
+    assert ev["event_type"] == "intensity_sample"
+    assert ev["unit"] == "ipm"
+    # 40 events over 10s = 240 ipm
+    assert ev["value"] == pytest.approx(240.0, rel=1e-6)
+    ctx = ev["context"]
+    assert ctx["focused_app"] == "code"
+    assert ctx["title"] == "main.py"
+    assert ctx["keystroke_count"] == 30
+    assert ctx["mouse_event_count"] == 10
+    assert ctx["window_duration_s"] == pytest.approx(10.0, rel=1e-6)
+    assert ctx["idle_seconds"] == pytest.approx(0.5, rel=1e-6)
+    assert ctx["source_id"] == "test-host"
+    assert ctx["span_id"] == "span-1"
+    assert ev["session_id"] == "sess-1"
+    assert ev["timestamp"]
+
+
+def test_intensity_event_dropped_below_min_events():
+    mod = _import_module()
+    w = _make_intensity_window(mod, min_events=5)
+    w.window_started_at = 100.0
+    w.keystrokes = 2
+    w.mouse_events = 2  # total=4 < 5
+    w.last_input_time = 105.0
+    ev = w.build(focused_app="code", focused_title=None, now=110.0)
+    assert ev is None
+
+
+def test_intensity_event_dropped_below_min_window():
+    mod = _import_module()
+    w = _make_intensity_window(mod, min_window_s=2.0)
+    w.window_started_at = 100.0
+    w.keystrokes = 100  # plenty of events
+    w.mouse_events = 0
+    w.last_input_time = 101.0
+    ev = w.build(focused_app="code", focused_title=None, now=101.5)  # 1.5s < 2.0s
+    assert ev is None
+
+
+def test_intensity_event_title_filtered_when_app_not_in_allowlist():
+    mod = _import_module()
+    w = _make_intensity_window(mod, allowlist=("code",))
+    w.window_started_at = 100.0
+    w.keystrokes = 5
+    w.mouse_events = 0
+    w.last_input_time = 105.0
+    ev = w.build(focused_app="chrome", focused_title="secret-doc", now=110.0)
+    assert ev["context"]["title"] is None
+
+
+def test_intensity_window_reset_clears_counters_and_advances_start():
+    mod = _import_module()
+    w = _make_intensity_window(mod)
+    w.window_started_at = 100.0
+    w.span_id = "old-span"
+    w.keystrokes = 5
+    w.mouse_events = 5
+    w.reset(new_started_at=110.0, new_span_id="new-span")
+    assert w.keystrokes == 0
+    assert w.mouse_events == 0
+    assert w.window_started_at == 110.0
+    assert w.span_id == "new-span"
+    # last_input_time is NOT reset (carries forward for idle calc).
+
+
+def test_intensity_event_idle_clamped_when_last_input_before_window():
+    """If no input arrived in the window, idle == window_duration."""
+    mod = _import_module()
+    w = _make_intensity_window(mod, min_events=0)
+    w.window_started_at = 100.0
+    w.keystrokes = 0
+    w.mouse_events = 0
+    w.last_input_time = 50.0  # before window
+    ev = w.build(focused_app="code", focused_title=None, now=110.0)
+    # 0 events => 0 ipm, but should still emit when min_events=0
+    assert ev["context"]["idle_seconds"] == pytest.approx(10.0, rel=1e-6)
+    assert ev["value"] == 0.0

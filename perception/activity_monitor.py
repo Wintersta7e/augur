@@ -190,6 +190,83 @@ class _FocusState:
         }
 
 
+@dataclass
+class _IntensityWindow:
+    """Bounded-by-focus-span input-intensity sampler.
+
+    Counts keystrokes + mouse events between resets. build() emits a
+    sample if the window is long enough AND has enough events; otherwise
+    returns None (caller resets either way).
+    """
+
+    sampling_s: float
+    min_events: int
+    min_window_s: float
+    idle_threshold_s: float
+    title_allowlist: tuple[str, ...]
+    source_id: str
+    session_id: str
+
+    window_started_at: float = 0.0
+    span_id: str | None = None
+    keystrokes: int = 0
+    mouse_events: int = 0
+    last_input_time: float = 0.0
+
+    def reset(self, new_started_at: float, new_span_id: str | None) -> None:
+        self.window_started_at = new_started_at
+        self.span_id = new_span_id
+        self.keystrokes = 0
+        self.mouse_events = 0
+        # last_input_time is intentionally NOT reset.
+
+    def build(
+        self,
+        focused_app: str,
+        focused_title: str | None,
+        now: float,
+    ) -> dict | None:
+        """Return an intensity_sample PerceptionEvent dict, or None if dropped."""
+        window_duration = max(0.0, now - self.window_started_at)
+        total_events = self.keystrokes + self.mouse_events
+        if window_duration < self.min_window_s:
+            return None
+        if total_events < self.min_events:
+            return None
+
+        ipm = (60.0 * total_events / window_duration) if window_duration > 0 else 0.0
+
+        if self.last_input_time < self.window_started_at:
+            idle_seconds = window_duration
+        else:
+            idle_seconds = max(0.0, now - self.last_input_time)
+            if idle_seconds > window_duration:
+                idle_seconds = window_duration
+
+        ctx = {
+            "focused_app": focused_app,
+            "title": _resolve_title(focused_app, focused_title, self.title_allowlist),
+            "keystroke_count": self.keystrokes,
+            "mouse_event_count": self.mouse_events,
+            "idle_seconds": idle_seconds,
+            "window_duration_s": window_duration,
+            "source_id": self.source_id,
+            "span_id": self.span_id,
+        }
+
+        return {
+            "domain": "activity_intensity",
+            "stream_id": "activity_intensity",
+            "entity": focused_app,
+            "event_type": "intensity_sample",
+            "value": ipm,
+            "unit": "ipm",
+            "context": ctx,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "session_id": self.session_id,
+        }
+
+
 class ActivityMonitor:
     """Windows-host daemon. See module docstring."""
 

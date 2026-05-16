@@ -48,3 +48,9 @@ CLAUDE.md
 
 # Git worktrees (isolated workspaces for feature branches)
 .worktrees/
+
+# Coverage + mypy local artifacts (CI uploads its own copies)
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/

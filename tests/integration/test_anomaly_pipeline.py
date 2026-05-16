@@ -7,10 +7,17 @@ import json
 
 import pytest
 
+from blackboard.config import AugurConfig
 from tests.integration.conftest import (
     inject_perception_event,
     wait_for_redis_key,
 )
+
+
+def _warm_baseline_size() -> int:
+    """Enough samples to flip the detector's min_observations gate to trained,
+    with a small buffer so a future bump doesn't require touching every test."""
+    return AugurConfig().min_observations + 5
 
 
 @pytest.mark.parametrize("pipeline", [["detector"]], indirect=True)
@@ -25,7 +32,10 @@ class TestAnomalyPipeline:
         sid = "anomaly-test"
         # Use varied values to build a baseline with non-zero variance
         # (identical values → std≈0 → deviation forced to 0 by detector)
-        baseline_values = [4.5, 5.2, 4.8, 5.5, 4.3, 5.1, 4.7, 5.3, 4.9, 5.0]
+        baseline_pool = [4.5, 5.2, 4.8, 5.5, 4.3, 5.1, 4.7, 5.3, 4.9, 5.0]
+        baseline_values = [
+            baseline_pool[i % len(baseline_pool)] for i in range(_warm_baseline_size())
+        ]
         for val in baseline_values:
             await inject_perception_event(
                 nats_conn,
@@ -113,7 +123,10 @@ class TestAnomalyPipeline:
     ) -> None:
         """Anomaly events contain all expected fields."""
         sid = "fields-test"
-        baseline_values = [2.8, 3.2, 3.0, 3.5, 2.7, 3.1, 2.9, 3.3, 3.0, 3.4]
+        baseline_pool = [2.8, 3.2, 3.0, 3.5, 2.7, 3.1, 2.9, 3.3, 3.0, 3.4]
+        baseline_values = [
+            baseline_pool[i % len(baseline_pool)] for i in range(_warm_baseline_size())
+        ]
         for val in baseline_values:
             await inject_perception_event(
                 nats_conn,

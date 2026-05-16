@@ -1,0 +1,9 @@
+# One-time install: `pre-commit install` (after `pip install pre-commit`).
+# Runs the same ruff + ruff-format checks CI runs, so format/lint drift is
+# caught locally before pushing instead of after a CI cycle.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.12
+    hooks:
+      - id: ruff
+      - id: ruff-format

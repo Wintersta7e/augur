@@ -53,8 +53,14 @@ async def test_session_end_flushes_graph_to_redis(
     """Correlation event + session.end → graph in Redis."""
     sid = str(uuid.uuid4())
 
-    # Warm chess baseline (need several observations for EWMA to score meaningful)
-    chess_base = [5.2, 6.8, 7.4, 5.9, 8.1, 6.3, 7.0, 5.5, 6.7, 7.8]
+    # Warm chess baseline. Must be long enough that the detector's
+    # min_observations gate flips to trained — pad to (gate + 5) so the test
+    # adapts to future config bumps without rewriting fixed-length arrays.
+    from blackboard.config import AugurConfig  # local import — test-only
+
+    _warm = AugurConfig().min_observations + 5
+    _chess_pool = [5.2, 6.8, 7.4, 5.9, 8.1, 6.3, 7.0, 5.5, 6.7, 7.8]
+    chess_base = [_chess_pool[i % len(_chess_pool)] for i in range(_warm)]
     for v in chess_base:
         await nats_conn.publish(
             "augur.perception.chess",
@@ -71,8 +77,9 @@ async def test_session_end_flushes_graph_to_redis(
         )
         await asyncio.sleep(0.02)
 
-    # Warm typing baseline
-    typing_base = [2.8, 3.4, 2.9, 3.6, 3.1, 2.7, 3.3, 2.5, 3.2, 3.0]
+    # Warm typing baseline (same adaptive pattern)
+    _typing_pool = [2.8, 3.4, 2.9, 3.6, 3.1, 2.7, 3.3, 2.5, 3.2, 3.0]
+    typing_base = [_typing_pool[i % len(_typing_pool)] for i in range(_warm)]
     for v in typing_base:
         await nats_conn.publish(
             "augur.perception.typing",
@@ -159,15 +166,20 @@ async def test_session_end_flushes_graph_to_redis(
     assert len(graph_data["nodes"]) >= 2
     assert len(graph_data["edges"]) >= 1
 
-    # Verify the edge has the expected attributes
-    edge = graph_data["edges"][0]
+    # Find the chess-typing edge specifically. Other tests in this suite can
+    # leak edges into the correlator's in-memory session graph; assert on the
+    # edge this test is actually responsible for, not on graph_data["edges"][0].
+    chess_typing = [
+        e for e in graph_data["edges"] if set(e["domains"]) == {"chess", "typing"}
+    ]
+    assert chess_typing, f"No chess↔typing edge in graph; edges: {graph_data['edges']}"
+    edge = chess_typing[0]
     assert "temporal_lag" in edge
     assert "escalation_rule" in edge
     assert "combined_severity" in edge
     assert "domains" in edge
     # domains is a list after JSON round-trip (was tuple in memory)
     assert isinstance(edge["domains"], list)
-    assert set(edge["domains"]) <= {"chess", "typing"}
 
 
 @pytest.mark.parametrize("pipeline", [["detector", "correlator"]], indirect=True)

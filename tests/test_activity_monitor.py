@@ -331,3 +331,76 @@ def test_intensity_event_idle_clamped_when_last_input_before_window():
     # 0 events => 0 ipm, but should still emit when min_events=0
     assert ev["context"]["idle_seconds"] == pytest.approx(10.0, rel=1e-6)
     assert ev["value"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Session reader
+# ---------------------------------------------------------------------------
+
+
+def test_session_reader_returns_active_session_id():
+    import json
+    from datetime import datetime, timezone
+
+    mod = _import_module()
+    r = MagicMock()
+    r.get.return_value = json.dumps(
+        {
+            "session_id": "sess-xyz",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "status": "active",
+        }
+    )
+    reader = mod._SessionReader(r, max_age_h=12.0)
+    assert reader.read_current() == "sess-xyz"
+
+
+def test_session_reader_returns_none_when_status_ended():
+    import json
+    from datetime import datetime, timezone
+
+    mod = _import_module()
+    r = MagicMock()
+    r.get.return_value = json.dumps(
+        {
+            "session_id": "sess-xyz",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "status": "ended",
+        }
+    )
+    reader = mod._SessionReader(r, max_age_h=12.0)
+    assert reader.read_current() is None
+
+
+def test_session_reader_detects_change_and_signals_buffer_flush():
+    import json
+    from datetime import datetime, timezone
+
+    mod = _import_module()
+    r = MagicMock()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    r.get.return_value = json.dumps(
+        {"session_id": "sess-1", "started_at": now_iso, "status": "active"}
+    )
+    reader = mod._SessionReader(r, max_age_h=12.0)
+    assert reader.read_current() == "sess-1"
+    assert reader.last_seen == "sess-1"
+
+    # Session changes.
+    r.get.return_value = json.dumps(
+        {"session_id": "sess-2", "started_at": now_iso, "status": "active"}
+    )
+    new = reader.read_current()
+    assert new == "sess-2"
+    # Caller is expected to flush the buffer when last_seen != new — verify
+    # the reader at least surfaces the change.
+    assert reader.last_seen == "sess-2"
+    assert reader.changed_since_last is True
+
+
+def test_session_reader_returns_none_when_redis_raises():
+    mod = _import_module()
+    r = MagicMock()
+    r.get.side_effect = ConnectionError("Redis down")
+    reader = mod._SessionReader(r, max_age_h=12.0)
+    assert reader.read_current() is None

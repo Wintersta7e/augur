@@ -15,6 +15,7 @@ Run on the Windows host:
 
 from __future__ import annotations
 
+import json  # noqa: F401
 import logging
 import math  # noqa: F401
 import threading
@@ -265,6 +266,63 @@ class _IntensityWindow:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "session_id": self.session_id,
         }
+
+
+@dataclass
+class _SessionReader:
+    """Wraps the Redis read of augur:session:current with validity checks.
+
+    On every read, updates `last_seen` and sets `changed_since_last`
+    when the session_id changed from one read to the next. Callers use
+    `changed_since_last` to know when to flush their NATS buffer.
+    """
+
+    redis_client: object  # redis.Redis at runtime
+    max_age_h: float
+
+    last_seen: str | None = None
+    changed_since_last: bool = False
+
+    REDIS_KEY: str = "augur:session:current"
+
+    def read_current(self) -> str | None:
+        try:
+            raw = self.redis_client.get(self.REDIS_KEY)
+        except Exception:  # noqa: BLE001 - any Redis error → no session
+            return None
+        if not raw:
+            self._update_seen(None)
+            return None
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        if data.get("status") != "active":
+            self._update_seen(None)
+            return None
+        session_id = data.get("session_id")
+        if not session_id:
+            return None
+        started_at = data.get("started_at")
+        if started_at:
+            try:
+                started = datetime.fromisoformat(started_at)
+                age = datetime.now(timezone.utc) - started
+            except (ValueError, TypeError):
+                return None
+            if age.total_seconds() > self.max_age_h * 3600:
+                self._update_seen(None)
+                return None
+        self._update_seen(session_id)
+        return session_id
+
+    def _update_seen(self, session_id: str | None) -> None:
+        self.changed_since_last = (session_id is not None) and (
+            session_id != self.last_seen
+        )
+        self.last_seen = session_id
 
 
 class ActivityMonitor:

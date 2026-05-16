@@ -81,6 +81,30 @@ def test_resolve_title_handles_none_title():
     assert mod._resolve_title("code", None, ("code",)) is None
 
 
+def test_clamp_idle_seconds_returns_full_span_when_input_predates_start():
+    mod = _import_module()
+    assert mod._clamp_idle_seconds(
+        last_input_time=50.0, span_start=100.0, now=110.0
+    ) == pytest.approx(10.0)
+
+
+def test_clamp_idle_seconds_returns_capped_idle_when_input_within_span():
+    mod = _import_module()
+    # last input at 105, span 100-110 → idle = 110-105 = 5
+    assert mod._clamp_idle_seconds(
+        last_input_time=105.0, span_start=100.0, now=110.0
+    ) == pytest.approx(5.0)
+    # last input at 109.5, span 100-110 → idle = 0.5
+    assert mod._clamp_idle_seconds(
+        last_input_time=109.5, span_start=100.0, now=110.0
+    ) == pytest.approx(0.5)
+    # zero span → idle = 0
+    assert (
+        mod._clamp_idle_seconds(last_input_time=100.0, span_start=100.0, now=100.0)
+        == 0.0
+    )
+
+
 def test_drain_counters_returns_and_resets():
     mod = _import_module()
     state = mod._CounterState()
@@ -127,7 +151,6 @@ def test_drain_counters_thread_safe_under_concurrent_increment(monkeypatch):
 def _make_focus_state(mod, sampling_s=10.0, allowlist=()):
     return mod._FocusState(
         sampling_s=sampling_s,
-        idle_threshold_s=60.0,
         title_allowlist=allowlist,
         source_id="test-host",
         session_id="sess-1",
@@ -234,7 +257,6 @@ def _make_intensity_window(
         sampling_s=sampling_s,
         min_events=min_events,
         min_window_s=min_window_s,
-        idle_threshold_s=60.0,
         title_allowlist=allowlist,
         source_id="test-host",
         session_id="sess-1",

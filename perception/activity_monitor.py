@@ -80,6 +80,19 @@ def _resolve_title(
     return None
 
 
+def _clamp_idle_seconds(last_input_time: float, span_start: float, now: float) -> float:
+    """Compute the idle portion of a [span_start, now] window.
+
+    If last_input_time predates span_start, the whole span is idle.
+    Otherwise idle = max(0, now - last_input_time), clamped to span duration.
+    """
+    span_duration = max(0.0, now - span_start)
+    if last_input_time < span_start:
+        return span_duration
+    idle = max(0.0, now - last_input_time)
+    return min(idle, span_duration)
+
+
 @dataclass
 class _CounterState:
     """Mutable, thread-safe input counters for an intensity window.
@@ -127,7 +140,6 @@ class _FocusState:
     """
 
     sampling_s: float
-    idle_threshold_s: float
     title_allowlist: tuple[str, ...]
     source_id: str
     session_id: str
@@ -163,12 +175,7 @@ class _FocusState:
         # idle = time the user stopped giving input before the focus changed.
         # If last_input_time predates the focus start (stale), treat the whole
         # span as idle.
-        if self.last_input_time < prev_started:
-            idle_dwell = total_dwell
-        else:
-            idle_dwell = max(0.0, now - self.last_input_time)
-            if idle_dwell > total_dwell:
-                idle_dwell = total_dwell
+        idle_dwell = _clamp_idle_seconds(self.last_input_time, prev_started, now)
         active_dwell = total_dwell - idle_dwell
 
         ctx = {
@@ -208,7 +215,6 @@ class _IntensityWindow:
     sampling_s: float
     min_events: int
     min_window_s: float
-    idle_threshold_s: float
     title_allowlist: tuple[str, ...]
     source_id: str
     session_id: str
@@ -242,12 +248,9 @@ class _IntensityWindow:
 
         ipm = (60.0 * total_events / window_duration) if window_duration > 0 else 0.0
 
-        if self.last_input_time < self.window_started_at:
-            idle_seconds = window_duration
-        else:
-            idle_seconds = max(0.0, now - self.last_input_time)
-            if idle_seconds > window_duration:
-                idle_seconds = window_duration
+        idle_seconds = _clamp_idle_seconds(
+            self.last_input_time, self.window_started_at, now
+        )
 
         ctx = {
             "focused_app": focused_app,
@@ -414,7 +417,6 @@ class ActivityMonitor:
     def _build_focus_state(self, session_id: str) -> _FocusState:
         return _FocusState(
             sampling_s=self.config.activity_sampling_s,
-            idle_threshold_s=self.config.activity_idle_threshold_s,
             title_allowlist=self.allowlist,
             source_id=self.config.activity_source_id,
             session_id=session_id,
@@ -425,7 +427,6 @@ class ActivityMonitor:
             sampling_s=self.config.activity_sampling_s,
             min_events=self.config.activity_intensity_min_events,
             min_window_s=self.config.activity_intensity_min_window_s,
-            idle_threshold_s=self.config.activity_idle_threshold_s,
             title_allowlist=self.allowlist,
             source_id=self.config.activity_source_id,
             session_id=session_id,
@@ -489,12 +490,12 @@ class ActivityMonitor:
         if _WIN32_AVAILABLE:
 
             def _on_key(_ev: Any) -> None:
-                now = time.time()
+                now = time.monotonic()
                 self.counter.record_keystroke()
                 self.counter.touch(now)
 
             def _on_mouse(*_args: Any) -> None:
-                now = time.time()
+                now = time.monotonic()
                 self.counter.record_mouse_event()
                 self.counter.touch(now)
 

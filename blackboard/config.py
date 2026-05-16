@@ -85,6 +85,16 @@ class AugurConfig:
     correlation_window_lag_multiplier: float = 2.5
     correlation_window_tuning_hysteresis_pct: float = 0.20
 
+    # ── Activity perception (Phase 1) ──────────────────────────────────────
+    activity_sampling_s: float = 10.0
+    activity_intensity_min_events: int = 1
+    activity_intensity_min_window_s: float = 2.0
+    activity_title_allowlist: str = ""  # comma-separated; consumers split at use
+    activity_source_id: str = "windows-host"
+
+    # ── Session validity ───────────────────────────────────────────────────
+    session_max_age_h: float = 12.0
+
     def __post_init__(self) -> None:
         """Validate bounds on tuning fields. Raises ValueError on out-of-range.
 
@@ -117,6 +127,24 @@ class AugurConfig:
             raise ValueError(
                 f"correlation_window_tuning_alpha={self.correlation_window_tuning_alpha} outside [0.0, 1.0]"
             )
+        if not (1.0 <= self.activity_sampling_s <= 60.0):
+            raise ValueError(
+                f"activity_sampling_s={self.activity_sampling_s} outside [1.0, 60.0]"
+            )
+        if not (1 <= self.activity_intensity_min_events <= 100):
+            raise ValueError(
+                f"activity_intensity_min_events={self.activity_intensity_min_events} outside [1, 100]"
+            )
+        if not (0.1 <= self.activity_intensity_min_window_s <= 30.0):
+            raise ValueError(
+                f"activity_intensity_min_window_s={self.activity_intensity_min_window_s} outside [0.1, 30.0]"
+            )
+        if not (0.5 <= self.session_max_age_h <= 72.0):
+            raise ValueError(
+                f"session_max_age_h={self.session_max_age_h} outside [0.5, 72.0]"
+            )
+        if not self.activity_source_id.strip():
+            raise ValueError("activity_source_id must be a non-empty string")
 
     # ── Constructors ───────────────────────────────────────────────────────
 

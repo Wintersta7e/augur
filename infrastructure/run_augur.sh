@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # Start all Augur backend components in the correct order.
 # Chess board (perception/chess_board.py) is started separately by the user.
+#
+# Optional Windows companion (not started by this script):
+#   On the Windows host (NOT in WSL), install requirements-windows.txt
+#   and run:
+#     python -m perception.activity_monitor
+#   It will publish to WSL NATS via localhost:4222 and read the current
+#   session from Redis. Make sure a perception source that calls
+#   session_mgr.start() (chess_board or typing_monitor) has already
+#   populated augur:session:current — the activity monitor reads, does
+#   not create, the session.
 
 set -euo pipefail
 

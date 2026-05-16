@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Literal
+
+# Known perception domains. New domains MUST be added here.
+# Treat unknown domain values as a programming error caught at the
+# ingestion boundary (PerceptionEvent.__post_init__) — kept loose
+# for backward compatibility; tighten when all callers updated.
+Domain = Literal["chess", "typing", "activity_focus", "activity_intensity"]
 
 # Fields required to construct a valid PerceptionEvent. Used by
 # from_json() to surface schema-level problems at the ingestion boundary

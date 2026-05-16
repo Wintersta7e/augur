@@ -78,5 +78,6 @@ def test_resolve_primary_domain_top_level_wins_over_primary_anomaly():
     )
 
 
-def test_resolve_primary_domain_falls_back_to_chess():
-    assert _resolve_primary_domain({}) == "chess"
+def test_resolve_primary_domain_returns_none_when_missing():
+    """Malformed payloads with no domain should return None, not silently fallback."""
+    assert _resolve_primary_domain({}) is None

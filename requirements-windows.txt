@@ -1,0 +1,15 @@
+# Windows-host-only dependencies for perception/activity_monitor.py.
+# DO NOT add these to requirements.txt — they fail to install on Linux.
+#
+# Install on Windows (where you run the activity_monitor daemon):
+#   pip install -r requirements-windows.txt
+#
+# The daemon publishes PerceptionEvents to WSL's NATS over localhost,
+# and reads augur:session:current from WSL's Redis over localhost
+# (WSL2 forwards 127.0.0.1-bound ports to Windows automatically).
+
+nats-py>=2.6
+redis>=5.0
+pywin32>=306
+psutil>=5.9
+pynput>=1.7

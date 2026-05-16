@@ -466,3 +466,65 @@ def test_get_active_session_helper_returns_id_for_active_fresh(clean_redis_sync)
         ),
     )
     assert get_active_session(clean_redis_sync, max_age_h=12.0) == "sess-live"
+
+
+# ---------------------------------------------------------------------------
+# T18: Slow Ollama-gated activity_focus advice
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "pipeline", [["detector", "correlator", "advisor"]], indirect=True
+)
+@pytest.mark.asyncio
+async def test_activity_focus_advisor_returns_advice_via_ollama(
+    pipeline, clean_redis, session_id
+):
+    """Activity-only outlier → advisor → Ollama. Asserts shape only,
+    not content. Gated on AUGUR_OLLAMA_URL being set."""
+    import os
+
+    if not os.environ.get("AUGUR_OLLAMA_URL"):
+        pytest.skip("AUGUR_OLLAMA_URL not set")
+
+    import nats
+
+    config = AugurConfig.from_env()
+    nc = await nats.connect(config.nats_url)
+
+    received: list[dict] = []
+
+    async def _capture(msg):
+        received.append(json.loads(msg.data.decode()))
+
+    sub = await nc.subscribe("augur.reasoning.advice", cb=_capture)
+    try:
+        for i in range(max(6, config.min_observations + 3)):
+            await _publish(
+                nc,
+                "augur.perception.activity_focus",
+                _focus_event(session_id, value=3.0),
+            )
+        await nc.flush()
+        await asyncio.sleep(2.0)
+        # Outlier.
+        await _publish(
+            nc,
+            "augur.perception.activity_focus",
+            _focus_event(session_id, value=10.0, active_dwell_s=600.0),
+        )
+        await nc.flush()
+        # Ollama cold start can be 60s+; give generous slack.
+        await asyncio.sleep(90.0)
+    finally:
+        await sub.unsubscribe()
+        await nc.drain()
+
+    activity_advice = [
+        a for a in received if a.get("primary_domain") == "activity_focus"
+    ]
+    assert activity_advice, "expected at least one activity_focus advice from Ollama"
+    msg = activity_advice[0]
+    assert msg.get("advice"), "advice field is empty"
+    assert isinstance(msg["advice"], str)

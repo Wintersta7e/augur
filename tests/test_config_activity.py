@@ -46,6 +46,11 @@ def test_source_id_must_be_non_empty():
         AugurConfig(activity_source_id="")
 
 
+def test_source_id_rejects_whitespace_only():
+    with pytest.raises(ValueError, match="activity_source_id"):
+        AugurConfig(activity_source_id="   ")
+
+
 def test_env_override_sampling():
     with patch.dict(os.environ, {"AUGUR_ACTIVITY_SAMPLING_S": "5.0"}, clear=False):
         cfg = AugurConfig.from_env()

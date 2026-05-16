@@ -148,7 +148,7 @@ class AugurConfig:
             raise ValueError(
                 f"session_max_age_h={self.session_max_age_h} outside [0.5, 72.0]"
             )
-        if not self.activity_source_id:
+        if not self.activity_source_id.strip():
             raise ValueError("activity_source_id must be a non-empty string")
 
     # ── Constructors ───────────────────────────────────────────────────────

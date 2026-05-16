@@ -34,8 +34,8 @@ class AugurConfig:
     """Immutable configuration snapshot for the Augur system."""
 
     # ── Transport ──────────────────────────────────────────────────────────
-    nats_url: str = "nats://localhost:4222"
-    redis_url: str = "redis://localhost:6379"
+    nats_url: str = "nats://127.0.0.1:4222"
+    redis_url: str = "redis://127.0.0.1:6379"
     nats_connect_timeout: int = 5
     redis_connect_timeout: int = 5
 
@@ -50,7 +50,7 @@ class AugurConfig:
     hst_n_trees: int = 10
     hst_height: int = 8
     hst_window_size: int = 50
-    min_observations: int = 3
+    min_observations: int = 15
     hst_threshold: float = 0.7
     severity_medium_sigma: float = 2.5
     severity_high_sigma: float = 4.0

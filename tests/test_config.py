@@ -17,11 +17,21 @@ from blackboard.config import AugurConfig  # noqa: E402
 class TestDefaults:
     def test_nats_url_default(self) -> None:
         cfg = AugurConfig()
-        assert cfg.nats_url == "nats://localhost:4222"
+        # IPv4 literal: localhost resolves to ::1 first on some Windows asyncio
+        # event loops, but Docker bindings are IPv4-only. Pinning the literal
+        # avoids a silent connect timeout on the daemon's NATS client.
+        assert cfg.nats_url == "nats://127.0.0.1:4222"
 
     def test_redis_url_default(self) -> None:
         cfg = AugurConfig()
-        assert cfg.redis_url == "redis://localhost:6379"
+        assert cfg.redis_url == "redis://127.0.0.1:6379"
+
+    def test_min_observations_default(self) -> None:
+        cfg = AugurConfig()
+        # Raised from 3 → 15: a 3-sample baseline forms so quickly that the 4th
+        # observation almost always looks anomalous in apps just opened, which
+        # drove low-quality LLM advice during live testing.
+        assert cfg.min_observations == 15
 
     def test_ollama_url_default(self) -> None:
         cfg = AugurConfig()
@@ -65,7 +75,7 @@ class TestFromEnv:
         }
         with patch.dict("os.environ", env_without, clear=True):
             cfg = AugurConfig.from_env()
-        assert cfg.nats_url == "nats://localhost:4222"
+        assert cfg.nats_url == "nats://127.0.0.1:4222"
 
 
 class TestFrozenImmutability:
@@ -115,8 +125,8 @@ class TestAsDict:
     def test_values_match_defaults(self) -> None:
         cfg = AugurConfig()
         d = cfg.as_dict()
-        assert d["nats_url"] == "nats://localhost:4222"
-        assert d["redis_url"] == "redis://localhost:6379"
+        assert d["nats_url"] == "nats://127.0.0.1:4222"
+        assert d["redis_url"] == "redis://127.0.0.1:6379"
         assert d["ollama_url"] == "http://host.docker.internal:11434"
         assert d["ollama_timeout"] == 120
         assert d["default_sigma_threshold"] == 2.0
@@ -126,7 +136,7 @@ class TestAsDict:
 class TestRedisProperties:
     def test_redis_host_default(self) -> None:
         cfg = AugurConfig()
-        assert cfg.redis_host == "localhost"
+        assert cfg.redis_host == "127.0.0.1"
 
     def test_redis_port_default(self) -> None:
         cfg = AugurConfig()
@@ -141,6 +151,22 @@ class TestRedisProperties:
         with patch.dict("os.environ", {"AUGUR_REDIS_URL": "redis://myhost:7777"}):
             cfg = AugurConfig.from_env()
         assert cfg.redis_port == 7777
+
+
+class TestDetectorConfigParity:
+    """Guard the duplication between AugurConfig and detection.anomaly_detector.
+
+    DEFAULT_THRESHOLDS in the detector currently shadows AugurConfig values; if
+    they drift, the MCP server reports one number while the detector behaves with
+    another. This test fails immediately when somebody changes one without the
+    other.
+    """
+
+    def test_detector_default_min_observations_matches_config(self) -> None:
+        from detection.anomaly_detector import DEFAULT_THRESHOLDS
+
+        cfg = AugurConfig()
+        assert DEFAULT_THRESHOLDS["min_observations"] == cfg.min_observations
 
 
 class TestCorrelationWindowDefaults:

@@ -29,7 +29,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff pip-audit
+          pip install ruff pip-audit mypy pytest-cov
 
       - name: Audit pinned deps for known CVEs
         run: pip-audit -r requirements.txt
@@ -40,8 +40,30 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
 
+      - name: Type check (report-only)
+        # mypy currently reports ~40 errors, most are false positives from
+        # redis-py / nats-py library typing. Non-blocking until cleaned up
+        # module by module. Issues surface as annotations on PRs.
+        continue-on-error: true
+        run: |
+          mypy --ignore-missing-imports --no-strict-optional \
+            --explicit-package-bases \
+            blackboard/ detection/ reasoning/ perception/ output/ augur_mcp/
+
       - name: Run unit tests
-        run: pytest tests/ --ignore=tests/integration -v
+        run: |
+          pytest tests/ --ignore=tests/integration -v \
+            --cov=blackboard --cov=detection --cov=reasoning \
+            --cov=perception --cov=output --cov=augur_mcp \
+            --cov-report=xml --cov-report=term
+
+      - name: Upload coverage XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          retention-days: 14
 
   integration:
     name: Fast integration tests
@@ -97,3 +119,27 @@ jobs:
           docker logs redis || true
           echo "=== NATS logs ==="
           docker logs nats || true
+
+  docker-build:
+    name: Docker build smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: augur:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-import core modules
+        run: |
+          docker run --rm augur:ci python -c "import detection.anomaly_detector; import reasoning.correlator; import reasoning.augur_advisor; import perception.feedback_collector; import perception.activity_monitor; import output.console_display; import augur_mcp.augur_server; print('core modules import OK')"

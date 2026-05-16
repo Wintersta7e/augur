@@ -83,7 +83,7 @@ def render_anomaly_line(data: dict) -> str:
     dev = data.get("deviation_score", 0)
 
     # Chess domain (legacy)
-    if domain == "chess_board":
+    if domain == "chess":
         player = data.get("player", "?")
         move = data.get("move", "?")
         think = data.get("think_time", 0)
@@ -95,7 +95,7 @@ def render_anomaly_line(data: dict) -> str:
         )
 
     # Typing domain
-    if domain == "typing_monitor":
+    if domain == "typing":
         wpm = data.get("wpm", "?")
         return (
             f"{DIM}{ts}{RESET}  "
@@ -259,7 +259,7 @@ def render_advice(data: dict) -> str:
     indented = "\n".join(f"  {line}" for line in wrapped.splitlines())
 
     # Chess domain (legacy)
-    if domain == "chess_board":
+    if domain == "chess":
         player = data.get("player", "?")
         move = data.get("move", "?")
         think_time = data.get("think_time", 0)

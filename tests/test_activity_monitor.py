@@ -185,14 +185,14 @@ def test_focus_event_built_on_second_change():
     state.last_input_time = 125.0  # last input was 5s before the switch
     ev = state.on_focus_change(new_app="chrome", new_title="news.com", now=130.0)
     assert ev is not None
-    assert ev["domain"] == "activity_focus"
-    assert ev["stream_id"] == "activity_focus"
-    assert ev["entity"] == "code"  # entity = PREVIOUS app (whose dwell this measures)
-    assert ev["event_type"] == "focus_change"
-    assert ev["unit"] == "log1p_seconds"
+    assert ev.domain == "activity_focus"
+    assert ev.stream_id == "activity_focus"
+    assert ev.entity == "code"  # entity = PREVIOUS app (whose dwell this measures)
+    assert ev.event_type == "focus_change"
+    assert ev.unit == "log1p_seconds"
     # value = log1p(active_dwell). active = 30s total - 5s idle = 25s.
-    assert ev["value"] == pytest.approx(math.log1p(25.0), rel=1e-6)
-    ctx = ev["context"]
+    assert ev.value == pytest.approx(math.log1p(25.0), rel=1e-6)
+    ctx = ev.context
     assert ctx["prev_app"] == "code"
     assert ctx["new_app"] == "chrome"
     assert ctx["prev_title"] == "main.py"
@@ -202,8 +202,8 @@ def test_focus_event_built_on_second_change():
     assert ctx["total_dwell_s"] == pytest.approx(30.0, rel=1e-6)
     assert ctx["source_id"] == "test-host"
     assert ctx["span_id"]  # uuid for the PREVIOUS span
-    assert ev["session_id"] == "sess-1"
-    assert ev["timestamp"]  # ISO format from datetime.now(timezone.utc)
+    assert ev.session_id == "sess-1"
+    assert ev.timestamp  # ISO format from datetime.now(timezone.utc)
 
 
 def test_focus_event_titles_filtered_when_app_not_in_allowlist():
@@ -212,7 +212,7 @@ def test_focus_event_titles_filtered_when_app_not_in_allowlist():
     state.on_focus_change(new_app="code", new_title="main.py", now=100.0)
     state.last_input_time = 130.0
     ev = state.on_focus_change(new_app="chrome", new_title="secret-doc", now=130.0)
-    ctx = ev["context"]
+    ctx = ev.context
     assert ctx["prev_title"] == "main.py"  # allowed
     assert ctx["new_title"] is None  # filtered
 
@@ -225,7 +225,7 @@ def test_focus_event_clamps_idle_to_total_dwell():
     # last_input_time is BEFORE current focus started (stale)
     state.last_input_time = 50.0
     ev = state.on_focus_change(new_app="chrome", new_title="y", now=110.0)
-    ctx = ev["context"]
+    ctx = ev.context
     assert ctx["total_dwell_s"] == pytest.approx(10.0, rel=1e-6)
     assert ctx["idle_dwell_s"] == pytest.approx(10.0, rel=1e-6)
     assert ctx["active_dwell_s"] == 0.0
@@ -273,14 +273,14 @@ def test_intensity_event_built_for_full_window():
     w.last_input_time = 109.5
     ev = w.build(focused_app="code", focused_title="main.py", now=110.0)
     assert ev is not None
-    assert ev["domain"] == "activity_intensity"
-    assert ev["stream_id"] == "activity_intensity"
-    assert ev["entity"] == "code"
-    assert ev["event_type"] == "intensity_sample"
-    assert ev["unit"] == "ipm"
+    assert ev.domain == "activity_intensity"
+    assert ev.stream_id == "activity_intensity"
+    assert ev.entity == "code"
+    assert ev.event_type == "intensity_sample"
+    assert ev.unit == "ipm"
     # 40 events over 10s = 240 ipm
-    assert ev["value"] == pytest.approx(240.0, rel=1e-6)
-    ctx = ev["context"]
+    assert ev.value == pytest.approx(240.0, rel=1e-6)
+    ctx = ev.context
     assert ctx["focused_app"] == "code"
     assert ctx["title"] == "main.py"
     assert ctx["keystroke_count"] == 30
@@ -289,8 +289,8 @@ def test_intensity_event_built_for_full_window():
     assert ctx["idle_seconds"] == pytest.approx(0.5, rel=1e-6)
     assert ctx["source_id"] == "test-host"
     assert ctx["span_id"] == "span-1"
-    assert ev["session_id"] == "sess-1"
-    assert ev["timestamp"]
+    assert ev.session_id == "sess-1"
+    assert ev.timestamp
 
 
 def test_intensity_event_dropped_below_min_events():
@@ -323,7 +323,7 @@ def test_intensity_event_title_filtered_when_app_not_in_allowlist():
     w.mouse_events = 0
     w.last_input_time = 105.0
     ev = w.build(focused_app="chrome", focused_title="secret-doc", now=110.0)
-    assert ev["context"]["title"] is None
+    assert ev.context["title"] is None
 
 
 def test_intensity_window_reset_clears_counters_and_advances_start():
@@ -351,8 +351,8 @@ def test_intensity_event_idle_clamped_when_last_input_before_window():
     w.last_input_time = 50.0  # before window
     ev = w.build(focused_app="code", focused_title=None, now=110.0)
     # 0 events => 0 ipm, but should still emit when min_events=0
-    assert ev["context"]["idle_seconds"] == pytest.approx(10.0, rel=1e-6)
-    assert ev["value"] == 0.0
+    assert ev.context["idle_seconds"] == pytest.approx(10.0, rel=1e-6)
+    assert ev.value == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -488,24 +488,28 @@ def test_session_reader_none_to_valid_signals_change():
 # ---------------------------------------------------------------------------
 
 
-def test_buffered_publisher_drops_oldest_on_overflow():
+def test_dropped_event_log_drops_oldest_on_overflow():
     mod = _import_module()
-    pub = mod._BufferedPublisher(capacity=3)
-    pub.enqueue({"i": 1})
-    pub.enqueue({"i": 2})
-    pub.enqueue({"i": 3})
-    pub.enqueue({"i": 4})
-    drained = pub.drain()
+    log = mod._DroppedEventLog(capacity=3)
+    log.enqueue({"i": 1})
+    log.enqueue({"i": 2})
+    log.enqueue({"i": 3})
+    assert log.dropped_total == 0
+    log.enqueue({"i": 4})
+    assert log.dropped_total == 1
+    drained = log.drain()
     assert [d["i"] for d in drained] == [2, 3, 4]
 
 
-def test_buffered_publisher_flushed_drops_all_events():
+def test_dropped_event_log_flushed_drops_all_events():
     mod = _import_module()
-    pub = mod._BufferedPublisher(capacity=10)
-    pub.enqueue({"i": 1})
-    pub.enqueue({"i": 2})
-    pub.flush()
-    assert pub.drain() == []
+    log = mod._DroppedEventLog(capacity=10)
+    log.enqueue({"i": 1})
+    log.enqueue({"i": 2})
+    assert log.dropped_total == 0
+    log.flush()
+    assert log.dropped_total == 2
+    assert log.drain() == []
 
 
 def test_cli_main_exits_when_win32_unavailable(monkeypatch, capsys):

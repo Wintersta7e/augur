@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from blackboard.contracts import PerceptionEvent
+
 log = logging.getLogger("activity_monitor")
 
 # Lazy import: keep the module importable on Linux CI. Tests inject fakes
@@ -50,12 +52,21 @@ except ImportError:  # pragma: no cover - Linux CI path
     _mouse = None  # type: ignore[assignment]
     _WIN32_AVAILABLE = False
 
+# Runtime import; used in _SessionReader.read_current for specific error handling.
+try:
+    import redis  # noqa: F401
+except ImportError:  # pragma: no cover - will be caught at runtime
+    redis = None  # type: ignore[assignment]
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers (no OS calls)
 # ---------------------------------------------------------------------------
 
 _UNKNOWN_APP = "<unknown>"
+_NO_FOREGROUND_APP = "<no_foreground>"
+_DENIED_APP = "<denied>"
+_GONE_APP = "<gone>"
 
 
 def _normalize_app_name(exe_path: str | None) -> str:
@@ -155,8 +166,8 @@ class _FocusState:
         new_app: str,
         new_title: str | None,
         now: float,
-    ) -> dict | None:
-        """Return a focus_change PerceptionEvent dict, or None on the first call."""
+    ) -> PerceptionEvent | None:
+        """Return a focus_change PerceptionEvent, or None on the first call."""
         prev_app = self.current_app
         prev_title = self.current_title
         prev_started = self.current_focus_started_at
@@ -190,17 +201,17 @@ class _FocusState:
             "span_id": prev_span,
         }
 
-        return {
-            "domain": "activity_focus",
-            "stream_id": "activity_focus",
-            "entity": prev_app,
-            "event_type": "focus_change",
-            "value": math.log1p(active_dwell),
-            "unit": "log1p_seconds",
-            "context": ctx,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "session_id": self.session_id,
-        }
+        return PerceptionEvent(
+            domain="activity_focus",
+            stream_id="activity_focus",
+            entity=prev_app,
+            event_type="focus_change",
+            value=math.log1p(active_dwell),
+            unit="log1p_seconds",
+            context=ctx,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            session_id=self.session_id,
+        )
 
 
 @dataclass
@@ -237,8 +248,8 @@ class _IntensityWindow:
         focused_app: str,
         focused_title: str | None,
         now: float,
-    ) -> dict | None:
-        """Return an intensity_sample PerceptionEvent dict, or None if dropped."""
+    ) -> PerceptionEvent | None:
+        """Return an intensity_sample PerceptionEvent, or None if dropped."""
         window_duration = max(0.0, now - self.window_started_at)
         total_events = self.keystrokes + self.mouse_events
         if window_duration < self.min_window_s:
@@ -263,17 +274,17 @@ class _IntensityWindow:
             "span_id": self.span_id,
         }
 
-        return {
-            "domain": "activity_intensity",
-            "stream_id": "activity_intensity",
-            "entity": focused_app,
-            "event_type": "intensity_sample",
-            "value": ipm,
-            "unit": "ipm",
-            "context": ctx,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "session_id": self.session_id,
-        }
+        return PerceptionEvent(
+            domain="activity_intensity",
+            stream_id="activity_intensity",
+            entity=focused_app,
+            event_type="intensity_sample",
+            value=ipm,
+            unit="ipm",
+            context=ctx,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            session_id=self.session_id,
+        )
 
 
 @dataclass
@@ -283,6 +294,9 @@ class _SessionReader:
     On every read, updates `last_seen` and sets `changed_since_last`
     when the session_id changed from one read to the next. Callers use
     `changed_since_last` to know when to flush their NATS buffer.
+    last_read_failed tracks transport errors; when True, changed_since_last
+    should not be used to trigger buffer flushes (transient recovery is not
+    a session change).
     """
 
     redis_client: Any  # redis.Redis at runtime
@@ -290,14 +304,30 @@ class _SessionReader:
 
     last_seen: str | None = None
     changed_since_last: bool = False
+    last_read_failed: bool = False
 
     REDIS_KEY: str = "augur:session:current"
 
     def read_current(self) -> str | None:
         try:
             raw = self.redis_client.get(self.REDIS_KEY)
-        except Exception:  # noqa: BLE001 - any Redis error → no session
-            return None
+        except Exception as exc:  # noqa: BLE001
+            # Catch redis.ConnectionError, redis.TimeoutError, or any other
+            # transport-level error. Built-in ConnectionError for test mocks.
+            exc_name = type(exc).__name__
+            if any(
+                x in exc_name for x in ("ConnectionError", "TimeoutError", "OSError")
+            ):
+                log.warning(
+                    "activity_monitor: Redis transport error reading session: %s", exc
+                )
+                self.last_read_failed = True
+                # Don't update last_seen on transport error — keep prior state so
+                # recovery doesn't trigger a spurious session-change signal.
+                return None
+            # Re-raise non-transport errors (e.g., auth failures).
+            raise
+        self.last_read_failed = False
         if not raw:
             self._update_seen(None)
             return None
@@ -337,40 +367,49 @@ class _SessionReader:
         self.last_seen = session_id
 
 
-class _BufferedPublisher:
-    """Bounded FIFO of NATS payload dicts. Drops oldest on overflow.
+class _DroppedEventLog:
+    """Best-effort drop log for NATS publish failures. Does NOT replay.
 
-    Best-effort buffer that absorbs `publish()` failures during brief
-    NATS disconnects. nats-py auto-reconnects at the connection layer;
-    once it succeeds, subsequent `publish()` calls succeed too and no
-    replay is needed. Buffered events from the disconnect window are
-    NOT replayed — they accumulate until session change, then `flush()`
-    clears them (replaying into a new session would contaminate detection
-    because the detector stamps receive time, not source event time, and
-    the correlator ignores session_id).
-
-    `drain()` is exposed for cleanup/testing; production code never
-    needs to call it. The buffer is effectively a recent-failures log
-    with a hard ceiling at `capacity` to prevent unbounded growth.
+    Holds the last N (capacity) payloads that couldn't reach NATS so the
+    operator can see what was lost. `dropped_total` increments on every
+    overflow (oldest pushed out) AND on every flush (events discarded on
+    session change because replaying into a new session would contaminate
+    detection — see spec §8). Surfaced via log warnings; not a buffer to
+    drain back into NATS.
     """
 
     def __init__(self, capacity: int = 200) -> None:
         self._capacity = capacity
         self._dq: deque[dict[str, Any]] = deque(maxlen=capacity)
+        self.dropped_total: int = 0
 
     def enqueue(self, payload: dict[str, Any]) -> None:
         if len(self._dq) == self._capacity:
-            log.warning("activity_monitor: buffer overflow, dropping oldest event")
+            self.dropped_total += 1
+            log.warning(
+                "activity_monitor: drop-log full (capacity=%d, total dropped=%d), "
+                "oldest event evicted",
+                self._capacity,
+                self.dropped_total,
+            )
         self._dq.append(payload)
 
     def drain(self) -> list[dict[str, Any]]:
+        """For tests/inspection only. Production code does not call this."""
         out = list(self._dq)
         self._dq.clear()
         return out
 
     def flush(self) -> None:
-        if self._dq:
-            log.info("activity_monitor: flushing %d buffered events", len(self._dq))
+        n = len(self._dq)
+        if n:
+            self.dropped_total += n
+            log.info(
+                "activity_monitor: drop-log flushed on session change "
+                "(%d events discarded, total dropped=%d)",
+                n,
+                self.dropped_total,
+            )
         self._dq.clear()
 
 
@@ -418,7 +457,7 @@ class ActivityMonitor:
         self.redis_client = redis_client
         self.nats = nats_client
         self.counter = _CounterState()
-        self.buffer = _BufferedPublisher(capacity=200)
+        self.drops = _DroppedEventLog(capacity=200)
         self.session_reader = _SessionReader(
             redis_client, max_age_h=config.session_max_age_h
         )
@@ -448,42 +487,78 @@ class ActivityMonitor:
 
     def _resolve_session(self) -> str | None:
         sid = self.session_reader.read_current()
-        if self.session_reader.changed_since_last:
-            self.buffer.flush()
-            if sid is not None and self.focus is not None:
-                self.focus.session_id = sid
-            if sid is not None and self.intensity is not None:
-                self.intensity.session_id = sid
+        # Don't treat recovery-from-transport-error as a session change.
+        # changed_since_last was set during the prior failed-read path,
+        # and could now fire spuriously. last_read_failed=False at this
+        # point means the current read succeeded; if last_seen flipped,
+        # it's a real change. On session change: reset the state machines
+        # entirely so the next iteration rebuilds fresh _FocusState /
+        # _IntensityWindow under the new session_id. Keeping their carry-over
+        # state would emit a span belonging to the old session tagged with
+        # the new session_id.
+        if (
+            self.session_reader.changed_since_last
+            and not self.session_reader.last_read_failed
+        ):
+            self.drops.flush()
+            self.focus = None
+            self.intensity = None
+            # Counter holds last_input_time; safe to keep (input that
+            # arrived in old session won't be attributed to new since
+            # both classes will be rebuilt from scratch).
         return sid
 
     def _get_foreground(self) -> tuple[str, str | None]:
-        """Return (app_name, window_title). Returns (<unknown>, None) on failure."""
+        """Return (app_name, window_title). Distinguishes failure modes."""
         if not _WIN32_AVAILABLE:
             return (_UNKNOWN_APP, None)
         try:
             hwnd = win32gui.GetForegroundWindow()
             if not hwnd:
-                return (_UNKNOWN_APP, None)
-            try:
-                title = win32gui.GetWindowText(hwnd) or None
-            except Exception:  # noqa: BLE001
-                title = None
-            try:
-                _, pid = win32process.GetWindowThreadProcessId(hwnd)
-                exe = psutil.Process(pid).name() if pid else ""
-            except Exception:  # noqa: BLE001
-                exe = ""
-            return (_normalize_app_name(exe), title)
+                return (_NO_FOREGROUND_APP, None)
         except Exception as exc:  # noqa: BLE001
-            log.debug("activity_monitor: GetForeground failed: %s", exc)
+            log.warning(
+                "activity_monitor: GetForegroundWindow failed (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
             return (_UNKNOWN_APP, None)
-
-    async def _publish(self, subject: str, payload: dict[str, Any]) -> None:
         try:
-            await self.nats.publish(subject, json.dumps(payload).encode())
+            title = win32gui.GetWindowText(hwnd) or None
+        except Exception:  # noqa: BLE001
+            title = None
+        try:
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            if not pid:
+                return (_NO_FOREGROUND_APP, title)
+            exe = psutil.Process(pid).name()
+        except psutil.AccessDenied:
+            return (_DENIED_APP, title)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            return (_GONE_APP, title)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "activity_monitor: process lookup failed (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+            return (_UNKNOWN_APP, title)
+        return (_normalize_app_name(exe), title)
+
+    async def _publish(self, subject: str, payload: PerceptionEvent) -> None:
+        try:
+            await self.nats.publish(subject, payload.to_bytes())
         except Exception as exc:  # noqa: BLE001
             log.warning("activity_monitor: publish failed, buffering: %s", exc)
-            self.buffer.enqueue({"subject": subject, "payload": payload})
+            # Drop log expects dicts (legacy shape); convert before storing.
+            self.drops.enqueue(
+                {
+                    "subject": subject,
+                    "payload": payload.to_json()
+                    if hasattr(payload, "to_json")
+                    else str(payload),
+                }
+            )
 
     async def run(self) -> None:  # pragma: no cover - exercised manually
         """Main loop. Real Win32 hook wiring happens here.
@@ -501,17 +576,24 @@ class ActivityMonitor:
 
         # Install global input listeners (best-effort).
         listeners: list[Any] = []
+        last_listener_check = time.monotonic()
         if _WIN32_AVAILABLE:
 
             def _on_key(_ev: Any) -> None:
-                now = time.monotonic()
-                self.counter.record_keystroke()
-                self.counter.touch(now)
+                try:
+                    now = time.monotonic()
+                    self.counter.record_keystroke()
+                    self.counter.touch(now)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("activity_monitor: _on_key callback failed: %s", exc)
 
             def _on_mouse(*_args: Any) -> None:
-                now = time.monotonic()
-                self.counter.record_mouse_event()
-                self.counter.touch(now)
+                try:
+                    now = time.monotonic()
+                    self.counter.record_mouse_event()
+                    self.counter.touch(now)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("activity_monitor: _on_mouse callback failed: %s", exc)
 
             try:
                 kbd = _kb.Listener(on_press=_on_key)  # type: ignore[union-attr]
@@ -536,6 +618,8 @@ class ActivityMonitor:
                     last_sampled = (
                         time.monotonic()
                     )  # start sampling timer from focus init
+                    last_app = None
+                    last_title = None
                 if self.intensity is None:
                     self.intensity = self._build_intensity_window(sid)
                     self.intensity.reset(
@@ -544,6 +628,18 @@ class ActivityMonitor:
                     )
 
                 now_mono = time.monotonic()
+
+                # Periodic listener health check (every ~10s).
+                if now_mono - last_listener_check >= 10.0:
+                    for listener in listeners:
+                        if hasattr(listener, "is_alive") and not listener.is_alive():
+                            log.error(
+                                "activity_monitor: input listener died (counter drain "
+                                "will return zeros). Daemon will continue but input "
+                                "intensity readings are unreliable."
+                            )
+                    last_listener_check = now_mono
+
                 app, title = self._get_foreground()
 
                 # Pull counters and update intensity state.

@@ -10,6 +10,6 @@
 
 nats-py>=2.6
 redis>=5.0
-pywin32>=306
+pywin32>=311
 psutil>=5.9
 pynput>=1.7

@@ -139,7 +139,7 @@ async def test_marker_set_after_both_writes():
         "session-Y", feedback, pm, MagicMock(), AsyncMock(), nc, AugurConfig.from_env()
     )
 
-    pm.mark_tuning_applied.assert_called_once_with("session-Y")
+    pm.mark_tuning_applied.assert_called_once_with("session-Y", pass_name="correlation")
 
 
 @pytest.mark.asyncio

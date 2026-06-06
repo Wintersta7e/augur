@@ -484,3 +484,32 @@ def test_can_track_gate_state_existing_at_cap(monkeypatch: object) -> None:
     assert pm.can_track_gate_state("augur:gate:channel_stats", "k3") is False
     # Existing key CAN still be tracked even at cap
     assert pm.can_track_gate_state("augur:gate:channel_stats", "k1") is True
+
+
+# ── Task 1.3: save_gate_tuning_state (atomic) + pass_name idempotency ────────
+
+
+def test_gate_tuning_state_atomic_and_independent_marker() -> None:
+    pm = _pm()
+    pm.save_gate_tuning_state(
+        floors={"k": {"floor": 0.2, "last_ts": 1.0}},
+        credibility={"typing:medium": {"cred": 0.7, "n": 4, "last_fb_ts": 1.0}},
+        tolerance_add=["single:x:y"],
+        advice_rate={"rate_ewma": 0.1, "last_ts": 1.0},
+    )
+    assert pm.load_habituation_floor("k")["floor"] == 0.2
+    assert pm.load_credibility("typing:medium")["cred"] == 0.7
+    assert pm.is_self_tolerant("single:x:y")
+    assert pm.load_advice_rate()["rate_ewma"] == 0.1
+
+    pm.mark_tuning_applied("sess1", pass_name="gate")
+    assert pm.is_tuning_applied("sess1", pass_name="gate")
+    assert not pm.is_tuning_applied("sess1", pass_name="correlation")  # independent
+
+
+def test_mark_tuning_applied_default_pass_name_preserves_behavior() -> None:
+    """Default pass_name should match the original 'correlation' key behavior."""
+    pm = _pm()
+    pm.mark_tuning_applied("sess2", pass_name="correlation")
+    assert pm.is_tuning_applied("sess2", pass_name="correlation")
+    assert not pm.is_tuning_applied("sess2", pass_name="gate")

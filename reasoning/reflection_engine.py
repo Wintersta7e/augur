@@ -838,7 +838,7 @@ async def run_reflection(
     # Single matrix load, two analyses, single merged matrix save.
     matrix_tuning: dict[str, Any]
     window_tuning: dict[str, Any]
-    if pm.is_tuning_applied(session_id):
+    if pm.is_tuning_applied(session_id, pass_name="correlation"):
         log.info(
             "Skipping correlation + window tuning — already applied for session %s",
             session_id,
@@ -937,7 +937,7 @@ async def run_reflection(
             and matrix_save_ok
             and state_save_ok
         ):
-            pm.mark_tuning_applied(session_id)
+            pm.mark_tuning_applied(session_id, pass_name="correlation")
         elif not (matrix_save_ok and state_save_ok):
             log.warning(
                 "Skipping mark_tuning_applied because at least one tuning write failed; "

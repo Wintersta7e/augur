@@ -410,18 +410,25 @@ class PersistenceManager:
 
     # -- Correlation tuning idempotency marker ------------------------------
 
-    def mark_tuning_applied(self, session_id: str) -> None:
-        """Mark a session as having had its correlation tuning pass applied.
+    def mark_tuning_applied(
+        self, session_id: str, *, pass_name: str = "correlation"
+    ) -> None:
+        """Mark a session as having had a named tuning pass applied.
 
-        Sets a short-lived (7-day) marker so manual reflect-trigger replays
-        of a recent session do not double-apply the EWMA update.
+        Key: ``augur:tuning_applied:{pass_name}:{session_id}``
+
+        Different passes (e.g. "correlation", "gate") use independent markers
+        so they can be idempotent independently.  Sets a 7-day TTL so manual
+        reflect-trigger replays of a recent session do not double-apply.
         """
-        key = f"augur:correlation:tuning_applied:{session_id}"
+        key = f"augur:tuning_applied:{pass_name}:{session_id}"
         self._r.set(key, "1", ex=TUNING_APPLIED_TTL_S)
 
-    def is_tuning_applied(self, session_id: str) -> bool:
-        """Return True if mark_tuning_applied was called for this session."""
-        key = f"augur:correlation:tuning_applied:{session_id}"
+    def is_tuning_applied(
+        self, session_id: str, *, pass_name: str = "correlation"
+    ) -> bool:
+        """Return True if mark_tuning_applied was called for this session+pass."""
+        key = f"augur:tuning_applied:{pass_name}:{session_id}"
         return bool(self._r.exists(key))
 
     # ── Advisor gate append-logs (spec §6) ───────────────────────────────────
@@ -696,3 +703,44 @@ class PersistenceManager:
             self._r.hexists(hash_name, state_key)
             or self._r.hlen(hash_name) < MAX_GATE_STATE_KEYS
         )
+
+    # ── Task 1.3: atomic gate tuning save (spec §6) ──────────────────────────
+
+    def save_gate_tuning_state(
+        self,
+        *,
+        floors: dict | None = None,
+        credibility: dict | None = None,
+        cost_tier: dict | None = None,
+        tolerance_add: list[str] | None = None,
+        tolerance_remove: list[str] | None = None,
+        advice_rate: dict | None = None,
+    ) -> None:
+        """Atomically persist all gate offline keys in one pipeline (transaction).
+
+        Uses per-field HSET for the dual-written hashes (floors, credibility,
+        cost_tier) so online writers on other fields are never clobbered.
+        Uses SADD/SREM for the self-tolerance set and SET for advice_rate.
+
+        Mirrors save_tuning_state (persistence.py:326-348) but covers the gate
+        offline keys.  pipeline(transaction=True) is redis-py's default.
+        """
+        pipe = self._r.pipeline()  # transaction=True by default
+        if floors:
+            for field, entry in floors.items():
+                pipe.hset("augur:gate:habituation_floor", field, json.dumps(entry))
+        if credibility:
+            for field, entry in credibility.items():
+                pipe.hset("augur:gate:credibility", field, json.dumps(entry))
+        if cost_tier:
+            for field, entry in cost_tier.items():
+                pipe.hset("augur:gate:cost_tier_memory", field, json.dumps(entry))
+        if tolerance_add:
+            for state_key in tolerance_add:
+                pipe.sadd("augur:gate:self_tolerance", state_key)
+        if tolerance_remove:
+            for state_key in tolerance_remove:
+                pipe.srem("augur:gate:self_tolerance", state_key)
+        if advice_rate is not None:
+            pipe.set("augur:gate:advice_rate", json.dumps(advice_rate))
+        pipe.execute()

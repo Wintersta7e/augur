@@ -17,6 +17,7 @@ import pytest
 def fake_win_modules(monkeypatch):
     """Inject fakes for Windows-only deps so the module imports cleanly."""
     fakes = {
+        "win32api": MagicMock(),
         "win32gui": MagicMock(),
         "win32process": MagicMock(),
         "psutil": MagicMock(),
@@ -625,3 +626,113 @@ def test_intensity_event_round_trips_through_perception_event_schema():
     assert roundtripped.domain == "activity_intensity"
     assert roundtripped.entity == "code"
     assert roundtripped.session_id == "sess-rt"
+
+
+# ---------------------------------------------------------------------------
+# _get_foreground: identity cache short-circuit (pid+exe) + FIFO eviction
+# ---------------------------------------------------------------------------
+
+
+def _make_monitor(mod):
+    """Build an ActivityMonitor whose OS deps come from the injected fakes."""
+    config = MagicMock()
+    config.session_max_age_h = 12.0
+    config.activity_title_allowlist = "code"
+    return mod.ActivityMonitor(
+        config, redis_client=MagicMock(), nats_client=MagicMock()
+    )
+
+
+def _wire_foreground(fakes, *, exe_name, exe_path, pid=4321, title="title"):
+    """Point the fake OS modules at a single foreground process.
+
+    Returns the psutil.Process MagicMock instance so the test can assert on
+    proc.exe() call counts.
+    """
+    win32gui = fakes["win32gui"]
+    win32process = fakes["win32process"]
+    psutil = fakes["psutil"]
+
+    win32gui.GetForegroundWindow.return_value = 99  # truthy hwnd
+    win32gui.GetWindowText.return_value = title
+    win32process.GetWindowThreadProcessId.return_value = (1, pid)
+
+    proc = MagicMock()
+    proc.name.return_value = exe_name
+    proc.exe.return_value = exe_path
+    psutil.Process.return_value = proc
+
+    # The except-clauses reference these as exception classes; give them real ones.
+    psutil.AccessDenied = type("AccessDenied", (Exception,), {})
+    psutil.NoSuchProcess = type("NoSuchProcess", (Exception,), {})
+    psutil.ZombieProcess = type("ZombieProcess", (Exception,), {})
+    return proc
+
+
+def test_get_foreground_short_circuits_for_same_pid_and_exe(fake_win_modules):
+    mod = _import_module()
+    mon = _make_monitor(mod)
+    proc = _wire_foreground(
+        fake_win_modules,
+        exe_name="Alpha.exe",
+        exe_path="fake/path/a/Alpha.exe",
+        pid=4321,
+    )
+
+    app1, _, id1 = mon._get_foreground()
+    assert app1 == "alpha"
+    assert proc.exe.call_count == 1  # resolved once
+
+    # Second call, SAME (pid, exe): short-circuit fires, no extra proc.exe().
+    app2, _, id2 = mon._get_foreground()
+    assert app2 == "alpha"
+    assert id2 == id1
+    assert proc.exe.call_count == 1  # NOT called again
+
+
+def test_get_foreground_reresolves_when_exe_changes_at_same_pid(fake_win_modules):
+    """BUG-21: a recycled pid running a different exe must NOT reuse the stale
+    identity — identity is re-resolved against the new exe path."""
+    mod = _import_module()
+    mon = _make_monitor(mod)
+
+    fake_win_modules["win32api"].GetFileVersionInfo.return_value = None
+    proc = _wire_foreground(
+        fake_win_modules,
+        exe_name="Alpha.exe",
+        exe_path="fake/path/a/Alpha.exe",
+        pid=4321,
+    )
+    app1, _, _ = mon._get_foreground()
+    assert app1 == "alpha"
+    assert proc.exe.call_count == 1
+
+    # Same pid, DIFFERENT foreground exe (pid reuse on Windows).
+    proc2 = _wire_foreground(
+        fake_win_modules,
+        exe_name="Beta.exe",
+        exe_path="fake/path/b/Beta.exe",
+        pid=4321,
+    )
+    app2, _, _ = mon._get_foreground()
+    assert app2 == "beta"  # re-resolved, not the stale "alpha"
+    assert proc2.exe.call_count == 1  # exe() invoked again for the new path
+
+
+def test_get_foreground_identity_cache_respects_fifo_cap(fake_win_modules):
+    mod = _import_module()
+    mon = _make_monitor(mod)
+    _wire_foreground(
+        fake_win_modules, exe_name="New.exe", exe_path="fake/path/new/New.exe", pid=7777
+    )
+
+    # Pre-fill the cache to the cap with dummy paths.
+    cap = mod._IDENTITY_CACHE_MAX
+    for i in range(cap):
+        mon._identity_cache[f"fake/path/old/app{i}.exe"] = None
+    assert len(mon._identity_cache) == cap
+
+    # Resolving a NOVEL exe_path evicts the oldest, staying at the cap.
+    mon._get_foreground()
+    assert len(mon._identity_cache) <= cap
+    assert "fake/path/new/New.exe" in mon._identity_cache

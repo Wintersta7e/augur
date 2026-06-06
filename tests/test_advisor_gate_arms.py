@@ -180,3 +180,107 @@ def test_refractory_applies_to_ungateable(fake_pm, cfg):
     d = g.evaluate(build_signature(no_entity), fake_pm, cfg, now=120.0)
     assert d.action == "suppress"
     assert d.reason == "absolute_refractory"
+
+
+# ── Arm 3: novelty_prediction_error (spec §5 Arm 3) ──────────────────────────
+#
+# Gates on value/timing surprise (distinct from habituation's advice-frequency).
+# Maintains a per-state_key EWMA predicted_value over the observed-value window.
+# relative_change = |value - predicted_value| / max(|predicted_value|, _EPS).
+# Familiar (match_count >= NOVELTY_FAMILIAR_MIN) AND relative_change <
+# WEBER_FRACTION → SUPPRESS("fully_predicted_explained_away"); unseen → PASS.
+
+
+def _medium_typing(value: float) -> dict:
+    """A single+medium typing payload with a controllable anomaly value."""
+    return {
+        "combined_severity": "MEDIUM",
+        "correlation_found": False,
+        "primary_anomaly": {
+            "domain": "typing",
+            "entity": "user",
+            "value": value,
+            "severity": "medium",
+        },
+    }
+
+
+def _high_typing(value: float) -> dict:
+    """A single+high typing payload with a controllable anomaly value."""
+    return {
+        "combined_severity": "HIGH",
+        "correlation_found": False,
+        "primary_anomaly": {
+            "domain": "typing",
+            "entity": "user",
+            "value": value,
+            "severity": "high",
+        },
+    }
+
+
+def _seed_observed(fake_pm, state_key: str, values: list[float]) -> None:
+    """Seed the observed-value window for *state_key* (oldest first in *values*)."""
+    for i, v in enumerate(values):
+        fake_pm.save_observed(
+            {"ts": float(i), "state_key": state_key, "value": v, "severity": "medium"}
+        )
+
+
+def test_novelty_suppresses_fully_predicted_familiar_channel(fake_pm, cfg):
+    """Familiar channel + tiny relative_change → fully_predicted_explained_away."""
+    # 3 prior observations all at 2.0 → EWMA predicts 2.0 (>= familiar_min=3).
+    _seed_observed(fake_pm, "single:typing:user", [2.0, 2.0, 2.0])
+    g = Gate()
+    # Current value 2.0 → relative_change = 0 < weber_fraction (0.15) → suppress.
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "suppress"
+    assert d.reason == "fully_predicted_explained_away"
+    assert d.deciding_arm == "novelty_prediction_error"
+    assert d.metrics["predicted_value"] == 2.0
+    assert d.metrics["relative_change"] == 0.0
+
+
+def test_novelty_passes_large_relative_change(fake_pm, cfg):
+    """Familiar channel but a surprising value (above the JND) → PASS → fire."""
+    _seed_observed(fake_pm, "single:typing:user", [2.0, 2.0, 2.0])
+    g = Gate()
+    # Current value 4.0 → relative_change = |4-2|/2 = 1.0 > 0.15 → pass → fire.
+    d = g.evaluate(build_signature(_medium_typing(4.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"
+
+
+def test_novelty_unseen_state_key_passes(fake_pm, cfg):
+    """An unseen/first-time state_key (no observed history) → PASS → fire."""
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"
+
+
+def test_novelty_below_familiar_min_passes(fake_pm, cfg):
+    """Too few observations (match_count < familiar_min) → not familiar → PASS."""
+    # Only 2 observations (< familiar_min=3); even a perfectly-predicted value
+    # must PASS because the channel is not yet familiar enough to explain away.
+    _seed_observed(fake_pm, "single:typing:user", [2.0, 2.0])
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"
+
+
+def test_novelty_high_bypasses(fake_pm, cfg):
+    """HIGH bypass: a standalone high skips the novelty arm even if predicted."""
+    _seed_observed(fake_pm, "single:typing:user", [2.0, 2.0, 2.0])
+    g = Gate()
+    d = g.evaluate(build_signature(_high_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"
+
+
+def test_novelty_disabled_passes(fake_pm):
+    """When gate_novelty_enabled is False, the arm never suppresses."""
+    from blackboard.config import AugurConfig
+
+    cfg = AugurConfig(gate_novelty_enabled=False)
+    _seed_observed(fake_pm, "single:typing:user", [2.0, 2.0, 2.0])
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"

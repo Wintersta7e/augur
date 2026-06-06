@@ -275,7 +275,11 @@ class Gate:
         precedence (central_tolerance → refractory → novelty → habituation →
         reservoir → credibility) is encoded here.  Later tasks append arms 3–6.
         """
-        return [Gate._arm_central_tolerance, Gate._arm_refractory_burden]
+        return [
+            Gate._arm_central_tolerance,
+            Gate._arm_refractory_burden,
+            Gate._arm_novelty_prediction_error,
+        ]
 
     def evaluate(
         self,
@@ -461,4 +465,53 @@ class Gate:
                     metrics={"dt": dt},
                 )
 
+        return None
+
+    def _arm_novelty_prediction_error(
+        self,
+        sig: Signature,
+        state: dict[str, Any],
+        config: Any,
+        now: float,  # noqa: ARG002 — uniform arm signature; deterministic arm
+        rng: random.Random,  # noqa: ARG002 — uniform arm signature; deterministic arm
+    ) -> GateDecision | None:
+        """Arm 3 — RPE / predictive coding (spec §5).
+
+        Gates on **value surprise** (distinct from habituation's advice
+        frequency).  From the per-``state_key`` observed-value window maintain an
+        EWMA ``predicted_value``; the just-noticeable difference is
+        ``relative_change = |value - predicted_value| / max(|predicted_value|,
+        _EPS)``.  A **familiar** channel (``match_count >= NOVELTY_FAMILIAR_MIN``)
+        whose event lands below the Weber JND (``relative_change <
+        WEBER_FRACTION``) is fully predicted → ``SUPPRESS`` with the predicted
+        value + relative change.  An unseen/first-time / not-yet-familiar
+        ``state_key`` → PASS.  (High never reaches this arm — the HIGH bypass in
+        ``evaluate`` skips it.)
+        """
+        if not config.gate_novelty_enabled:
+            return None
+
+        observed = state.get("observed") or []
+        match_count = len(observed)
+        if match_count < config.gate_novelty_familiar_min:
+            return None  # unseen / not yet familiar enough to explain away
+
+        # load_observed returns newest-first; fold oldest→newest into an EWMA so
+        # the prediction is weighted toward the most recent observations.
+        alpha = config.gate_habituation_alpha
+        values = [float(r.get("value", 0.0) or 0.0) for r in reversed(observed)]
+        predicted = values[0]
+        for v in values[1:]:
+            predicted = alpha * v + (1.0 - alpha) * predicted
+
+        relative_change = abs(sig.value - predicted) / max(abs(predicted), _EPS)
+        if relative_change < config.gate_weber_fraction:
+            return GateDecision.suppress(
+                "fully_predicted_explained_away",
+                deciding_arm="novelty_prediction_error",
+                metrics={
+                    "predicted_value": predicted,
+                    "relative_change": relative_change,
+                },
+            )
         return None

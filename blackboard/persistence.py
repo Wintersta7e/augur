@@ -21,6 +21,20 @@ PROMPT_HISTORY_MAX = 100
 # dropped; existing entries can still be updated.
 MAX_APP_DESCRIPTORS = 2000
 
+# ── Advisor gate list-log caps ───────────────────────────────────────────────
+# Each is stored as a Redis list (lpush + ltrim).  The numbers balance
+# diagnostic visibility against memory: silences/emissions/observed are
+# high-frequency, delivery_failures are rare.
+MAX_GATE_SILENCES: int = 2000
+MAX_GATE_EMISSIONS: int = 2000
+MAX_GATE_OBSERVED: int = 2000
+MAX_GATE_DELIVERY_FAILURES: int = 500
+# Cap on distinct per-channel state-key entries in the gate hash stores
+# (habituation, channel_stats, reservoir, credibility, cost_tier_memory).
+# Matches MAX_APP_DESCRIPTORS discipline: new keys beyond this are refused
+# (fail-open / fire-leaning); existing keys keep updating.
+MAX_GATE_STATE_KEYS: int = 2000
+
 # Default TTL for per-session Redis keys (feedback, correlation graph,
 # reflection report). Prevents indefinite growth beyond the 1000-entry
 # index trim boundary. Override in tests by passing ``ttl_s=None`` to the
@@ -409,3 +423,121 @@ class PersistenceManager:
         """Return True if mark_tuning_applied was called for this session."""
         key = f"augur:correlation:tuning_applied:{session_id}"
         return bool(self._r.exists(key))
+
+    # ── Advisor gate append-logs (spec §6) ───────────────────────────────────
+    # All four follow the same pattern: lpush + ltrim (mirror save_feedback
+    # index at persistence.py:78-79).  Loaders decode each entry individually
+    # inside a guarded comprehension so a single corrupt entry returns []
+    # rather than raising (mirror load_rule_window_state corrupt-read guard,
+    # persistence.py:297).
+
+    def save_silence_record(self, record: dict) -> None:
+        """Append a gate suppression record to augur:gate:silences (capped).
+
+        Schema: {ts, decision_id, state_key, domain, entity, severity, arm,
+                 reason, metrics, mrt_eligible, p_withhold}
+        """
+        key = "augur:gate:silences"
+        self._r.lpush(key, json.dumps(record))
+        self._r.ltrim(key, 0, MAX_GATE_SILENCES - 1)
+
+    def load_silence_records(self, *, limit: int = 100) -> list[dict]:
+        """Return up to *limit* recent silence records, newest first.
+
+        Returns [] if the list is absent or any entry is corrupt.
+        """
+        key = "augur:gate:silences"
+        raw_list = self._r.lrange(key, 0, limit - 1)
+        try:
+            return [json.loads(entry) for entry in raw_list]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning("augur:gate:silences contained a corrupt entry; returning []")
+            return []
+
+    def save_emission(self, record: dict) -> None:
+        """Append a gate emission record to augur:gate:emissions (capped).
+
+        Schema: {ts, decision_id, state_key, severity, tier, probe,
+                 audit_only, withheld_reason, mrt_eligible, p_fire}
+        """
+        key = "augur:gate:emissions"
+        self._r.lpush(key, json.dumps(record))
+        self._r.ltrim(key, 0, MAX_GATE_EMISSIONS - 1)
+
+    def load_emissions(self, *, limit: int = 100) -> list[dict]:
+        """Return up to *limit* recent emission records, newest first.
+
+        Returns [] if the list is absent or any entry is corrupt.
+        """
+        key = "augur:gate:emissions"
+        raw_list = self._r.lrange(key, 0, limit - 1)
+        try:
+            return [json.loads(entry) for entry in raw_list]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning("augur:gate:emissions contained a corrupt entry; returning []")
+            return []
+
+    def save_observed(self, record: dict) -> None:
+        """Append a gate observed-value record to augur:gate:observed (capped).
+
+        Schema: {ts, state_key, value, severity}
+        Written by both record_suppression and non-probe record_delivery_success.
+        """
+        key = "augur:gate:observed"
+        self._r.lpush(key, json.dumps(record))
+        self._r.ltrim(key, 0, MAX_GATE_OBSERVED - 1)
+
+    def load_observed(self, state_key: str, *, limit: int = 100) -> list[dict]:
+        """Return up to *limit* observed records for *state_key*, newest first.
+
+        Returns [] if absent or any entry is corrupt.  Filters by state_key
+        after reading so the caller gets only the records relevant to one channel.
+        """
+        key = "augur:gate:observed"
+        raw_list = self._r.lrange(key, 0, limit - 1)
+        try:
+            all_records = [json.loads(entry) for entry in raw_list]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning("augur:gate:observed contained a corrupt entry; returning []")
+            return []
+        return [r for r in all_records if r.get("state_key") == state_key]
+
+    def save_delivery_failure(
+        self,
+        signature: object,
+        reason: str,
+        now: str,
+        decision_id: str,
+    ) -> None:
+        """Append a delivery-failure record to augur:gate:delivery_failures (capped).
+
+        Schema: {ts, decision_id, state_key, domain, entity, reason}
+        Used for infrastructure non-deliveries (busy-skip, Ollama failure, etc.).
+        *signature* must expose .state_key, .domain, and .entity attributes.
+        """
+        record = {
+            "ts": now,
+            "decision_id": decision_id,
+            "state_key": getattr(signature, "state_key", None),
+            "domain": getattr(signature, "domain", None),
+            "entity": getattr(signature, "entity", None),
+            "reason": reason,
+        }
+        key = "augur:gate:delivery_failures"
+        self._r.lpush(key, json.dumps(record))
+        self._r.ltrim(key, 0, MAX_GATE_DELIVERY_FAILURES - 1)
+
+    def load_delivery_failures(self, *, limit: int = 100) -> list[dict]:
+        """Return up to *limit* recent delivery-failure records, newest first.
+
+        Returns [] if the list is absent or any entry is corrupt.
+        """
+        key = "augur:gate:delivery_failures"
+        raw_list = self._r.lrange(key, 0, limit - 1)
+        try:
+            return [json.loads(entry) for entry in raw_list]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning(
+                "augur:gate:delivery_failures contained a corrupt entry; returning []"
+            )
+            return []

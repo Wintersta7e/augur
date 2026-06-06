@@ -273,9 +273,9 @@ class Gate:
 
         Order is load-bearing: the first arm to suppress wins, so the documented
         precedence (central_tolerance → refractory → novelty → habituation →
-        reservoir → credibility) is encoded here.  Later tasks append arms 2–6.
+        reservoir → credibility) is encoded here.  Later tasks append arms 3–6.
         """
-        return [Gate._arm_central_tolerance]
+        return [Gate._arm_central_tolerance, Gate._arm_refractory_burden]
 
     def evaluate(
         self,
@@ -377,3 +377,88 @@ class Gate:
             deciding_arm="central_tolerance",
             metrics={"state_key": sig.state_key},
         )
+
+    def _arm_refractory_burden(
+        self,
+        sig: Signature,
+        state: dict[str, Any],
+        config: Any,
+        now: float,
+        rng: random.Random,  # noqa: ARG002 — uniform arm signature; deterministic arm
+    ) -> GateDecision | None:
+        """Arm 2 — refractory + Treg resolution + sentinel duplicate (spec §5).
+
+        A **global** arm (applies even to an ungateable event and to a HIGH —
+        the HIGH bypass skips only the learned/recurrence arms, not this one).
+        Reads the emission log IGNORING ``probe``/``audit_only`` entries (those
+        are not deliveries that should refract the channel) plus the advice-rate
+        EWMA.  Four sub-reasons checked in order:
+
+        1. **Absolute** — ``now - last_global_emit < ABSOLUTE_REFRACTORY_S`` →
+           ``SUPPRESS("absolute_refractory", {remaining_s})``.
+        2. **Relative** — within ``RELATIVE_REFRACTORY_S`` the bar is raised to
+           ``high`` post-fire and decays linearly to ``medium``; an event whose
+           ``severity_score`` is below the bar →
+           ``SUPPRESS("relative_refractory_raised_bar", {bar, elapsed_s})``.
+        3. **Pressure** — ``min(advice_rate, PRESSURE_CAP) * PRESSURE_WEIGHT >
+           severity_score`` →
+           ``SUPPRESS("active_resolution_recent_advice_pressure", {advice_rate})``.
+        4. **Duplicate** — a per-``state_key`` real emission within
+           ``RELATIVE_REFRACTORY_S`` →
+           ``SUPPRESS("already_covered_recent_equivalent", {dt})``.
+        """
+        if not config.gate_refractory_enabled:
+            return None
+
+        emissions = state.get("emissions") or []
+        # Real emissions only: probe (bet-hedge) + audit_only (exempt) fires are
+        # gating-invisible — they must not refract the channel (spec §5/§6).
+        real = [e for e in emissions if not e.get("probe") and not e.get("audit_only")]
+
+        # ── Absolute + relative both key off the most recent global emission ──
+        last_global_ts = max((float(e.get("ts", 0.0)) for e in real), default=None)
+        if last_global_ts is not None:
+            dt_global = now - last_global_ts
+            if 0.0 <= dt_global < config.gate_absolute_refractory_s:
+                return GateDecision.suppress(
+                    "absolute_refractory",
+                    deciding_arm="refractory_burden",
+                    metrics={
+                        "remaining_s": config.gate_absolute_refractory_s - dt_global
+                    },
+                )
+            # Relative: within the window the bar decays linearly from high (2.0)
+            # to medium (1.0).  An event below the current bar is held.
+            if 0.0 <= dt_global < config.gate_relative_refractory_s:
+                frac = dt_global / config.gate_relative_refractory_s
+                bar_score = 2.0 - (2.0 - 1.0) * frac
+                if sig.severity_score < bar_score:
+                    return GateDecision.suppress(
+                        "relative_refractory_raised_bar",
+                        deciding_arm="refractory_burden",
+                        metrics={"bar": bar_score, "elapsed_s": dt_global},
+                    )
+
+        # ── Pressure: active-resolution back-pressure from the advice-rate EWMA ─
+        rate = float((state.get("advice_rate") or {}).get("rate_ewma", 0.0) or 0.0)
+        effective_rate = min(rate, config.gate_pressure_cap)
+        if effective_rate * config.gate_pressure_weight > sig.severity_score:
+            return GateDecision.suppress(
+                "active_resolution_recent_advice_pressure",
+                deciding_arm="refractory_burden",
+                metrics={"advice_rate": effective_rate},
+            )
+
+        # ── Duplicate: a real same-state_key emission within the relative window ─
+        for e in real:
+            if e.get("state_key") != sig.state_key:
+                continue
+            dt = now - float(e.get("ts", 0.0))
+            if 0.0 <= dt < config.gate_relative_refractory_s:
+                return GateDecision.suppress(
+                    "already_covered_recent_equivalent",
+                    deciding_arm="refractory_burden",
+                    metrics={"dt": dt},
+                )
+
+        return None

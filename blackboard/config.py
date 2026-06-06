@@ -98,6 +98,48 @@ class AugurConfig:
     # ── Session validity ───────────────────────────────────────────────────
     session_max_age_h: float = 12.0
 
+    # ── Advisor gate ───────────────────────────────────────────────────────
+    gate_enabled: bool = True
+    gate_central_tolerance_enabled: bool = True
+    gate_refractory_enabled: bool = True
+    gate_novelty_enabled: bool = True
+    gate_habituation_enabled: bool = True
+    gate_reservoir_enabled: bool = True
+    gate_credibility_enabled: bool = True
+    gate_cost_tier_enabled: bool = True
+    gate_bet_hedge_enabled: bool = True
+    gate_anti_starvation_enabled: bool = True
+    gate_absolute_refractory_s: int = 45
+    gate_relative_refractory_s: int = 180
+    gate_habituation_tau_s: int = 600
+    gate_habituation_alpha: float = 0.3
+    gate_habituation_floor_min: float = 0.2
+    gate_habituation_r_threshold: float = 0.5
+    gate_novelty_familiar_min: int = 3
+    gate_weber_fraction: float = 0.15
+    gate_reservoir_on_count: int = 3
+    gate_reservoir_off_count: int = 1
+    gate_reservoir_leak_tau_s: int = 120
+    gate_pressure_alpha: float = 0.2
+    gate_pressure_weight: float = 1.0
+    gate_pressure_cap: float = 3.0
+    gate_credibility_alpha: float = 0.1
+    gate_credibility_decay_alpha: float = 0.02
+    gate_cred_mid: float = 0.5
+    gate_cred_max_p: float = 0.8
+    gate_behavioral_weight: float = 0.2
+    gate_explicit_weight: float = 1.0
+    gate_behavioral_deadband: float = 0.15
+    gate_behavioral_min_samples: int = 5
+    gate_bet_hedge_epsilon: float = 0.1
+    gate_cost_tier_persistence_count: int = 3
+    gate_max_consecutive_suppressions: int = 8
+    gate_max_channel_silence_s: int = 1800
+    gate_max_release_wait_s: int = 30
+    gate_max_release_overtake: int = 5
+    gate_mrt_withheld_rating: bool = False
+    gate_tier1_mode: str = "note"
+
     def __post_init__(self) -> None:
         """Validate bounds on tuning fields. Raises ValueError on out-of-range.
 
@@ -148,6 +190,11 @@ class AugurConfig:
             )
         if not self.activity_source_id.strip():
             raise ValueError("activity_source_id must be a non-empty string")
+        if not (0 <= self.gate_behavioral_weight <= self.gate_explicit_weight):
+            raise ValueError(
+                f"gate_behavioral_weight={self.gate_behavioral_weight} must be in "
+                f"[0, gate_explicit_weight={self.gate_explicit_weight}]"
+            )
 
     # ── Constructors ───────────────────────────────────────────────────────
 
@@ -198,6 +245,13 @@ class AugurConfig:
         return urlparse(self.redis_url).port or 6379
 
 
+def _coerce_gate_tier1_mode(v: str) -> str:
+    """Validate gate_tier1_mode value; raises ValueError for unknown values."""
+    if v in {"note", "silent"}:
+        return v
+    raise ValueError(f"gate_tier1_mode={v!r} must be 'note' or 'silent'")
+
+
 # Build the type-coercion map now that the class exists.
 #
 # Under ``from __future__ import annotations`` (PEP 563), field.type is a
@@ -212,3 +266,6 @@ for _field in dataclasses.fields(AugurConfig):
         _TYPE_COERCIONS[_field.name] = _coerce_bool
     else:
         _TYPE_COERCIONS[_field.name] = _field_type
+# gate_tier1_mode needs a validating coercion assigned AFTER the auto-build
+# loop, which would otherwise overwrite it with plain str.
+_TYPE_COERCIONS["gate_tier1_mode"] = _coerce_gate_tier1_mode

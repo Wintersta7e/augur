@@ -1,8 +1,9 @@
-"""Tests for gate persistence methods — Tasks 1.1 and 1.2."""
+"""Tests for gate persistence methods — Tasks 1.1, 1.2, 1.3, and 1.4."""
 
 from __future__ import annotations
 
 import fakeredis
+import pytest
 
 from blackboard.persistence import PersistenceManager, MAX_GATE_SILENCES
 
@@ -513,3 +514,69 @@ def test_mark_tuning_applied_default_pass_name_preserves_behavior() -> None:
     pm.mark_tuning_applied("sess2", pass_name="correlation")
     assert pm.is_tuning_applied("sess2", pass_name="correlation")
     assert not pm.is_tuning_applied("sess2", pass_name="gate")
+
+
+# ── Task 1.4: parameterized corrupt-read guard for EVERY gate loader ─────────
+# Invariant C (spec §2C/§6/§11): every load_gate_* must return its safe
+# default ([] for lists, {} for dicts) when the underlying Redis value is
+# corrupt — not just the loaders covered by Tasks 1.1-1.3 individually.
+
+
+
+
+@pytest.mark.parametrize(
+    "seed, loader, expected",
+    [
+        (
+            lambda pm: pm._r.lpush("augur:gate:emissions", "{bad"),
+            lambda pm: pm.load_emissions(limit=10),
+            [],
+        ),
+        (
+            lambda pm: pm._r.lpush("augur:gate:observed", "{bad"),
+            lambda pm: pm.load_observed("k", limit=10),
+            [],
+        ),
+        (
+            lambda pm: pm._r.lpush("augur:gate:delivery_failures", "{bad"),
+            lambda pm: pm.load_delivery_failures(limit=10),
+            [],
+        ),
+        (
+            lambda pm: pm._r.hset("augur:gate:channel_stats", "k", "{bad"),
+            lambda pm: pm.load_channel_stats("k"),
+            {},
+        ),
+        (
+            lambda pm: pm._r.hset("augur:gate:reservoir", "k", "{bad"),
+            lambda pm: pm.load_reservoir("k"),
+            {},
+        ),
+        (
+            lambda pm: pm._r.hset("augur:gate:credibility", "c", "{bad"),
+            lambda pm: pm.load_credibility("c"),
+            {},
+        ),
+        (
+            lambda pm: pm._r.hset("augur:gate:cost_tier_memory", "k", "{bad"),
+            lambda pm: pm.load_cost_tier_memory("k"),
+            {},
+        ),
+        (
+            lambda pm: pm._r.hset("augur:gate:habituation_floor", "k", "{bad"),
+            lambda pm: pm.load_habituation_floor("k"),
+            {},
+        ),
+        (
+            lambda pm: pm._r.set("augur:gate:advice_rate", "{bad"),
+            lambda pm: pm.load_advice_rate(),
+            {},
+        ),
+    ],
+)
+def test_every_gate_loader_guards_corruption(
+    seed: object, loader: object, expected: object
+) -> None:
+    pm = _pm()
+    seed(pm)
+    assert loader(pm) == expected

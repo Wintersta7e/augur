@@ -541,3 +541,158 @@ class PersistenceManager:
                 "augur:gate:delivery_failures contained a corrupt entry; returning []"
             )
             return []
+
+    # ── Task 1.2: per-field hash stores (spec §6) ────────────────────────────
+    # Each save_* returns bool: True if the write succeeded (existing key or
+    # room below the cap), False if refused at cap (new key would exceed
+    # MAX_GATE_STATE_KEYS).  Mirrors the save_app_descriptor refuse-at-cap
+    # pattern (persistence.py:203-216).
+    #
+    # Each load_* guards json.loads / UnicodeDecodeError → {} (safe "unseen"
+    # default), mirroring load_rule_window_state (persistence.py:312-319).
+    #
+    # habituation and habituation_floor are SEPARATE Redis keys (spec §6).
+
+    def _hash_save(self, redis_key: str, field: str, entry: dict) -> bool:
+        """Per-field HSET with refuse-at-cap. Returns True if written."""
+        if (
+            not self._r.hexists(redis_key, field)
+            and self._r.hlen(redis_key) >= MAX_GATE_STATE_KEYS
+        ):
+            log.warning(
+                "gate hash %s full (%d); dropping new field %s",
+                redis_key,
+                MAX_GATE_STATE_KEYS,
+                field,
+            )
+            return False
+        self._r.hset(redis_key, field, json.dumps(entry))
+        return True
+
+    def _hash_load(self, redis_key: str, field: str) -> dict:
+        """Per-field HGET with corrupt-read guard. Returns {} on missing/corrupt."""
+        raw = self._r.hget(redis_key, field)
+        if raw is None:
+            return {}
+        try:
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning("gate hash %s field %s corrupt; returning {}", redis_key, field)
+            return {}
+
+    # -- habituation (online: h, last_event_ts, count) -----------------------
+
+    def save_habituation(self, state_key: str, entry: dict) -> bool:
+        """Store per-channel habituation state. Returns False if refused at cap."""
+        return self._hash_save("augur:gate:habituation", state_key, entry)
+
+    def load_habituation(self, state_key: str) -> dict:
+        """Return habituation entry for state_key, or {} if missing/corrupt."""
+        return self._hash_load("augur:gate:habituation", state_key)
+
+    # -- habituation_floor (offline: floor, last_ts) — separate Redis key ----
+
+    def save_habituation_floor(self, state_key: str, entry: dict) -> bool:
+        """Store per-channel habituation floor. Returns False if refused at cap."""
+        return self._hash_save("augur:gate:habituation_floor", state_key, entry)
+
+    def load_habituation_floor(self, state_key: str) -> dict:
+        """Return habituation floor for state_key, or {} if missing/corrupt."""
+        return self._hash_load("augur:gate:habituation_floor", state_key)
+
+    # -- credibility (offline + conservative online: cred, n, last_fb_ts) ----
+
+    def save_credibility(self, signal_class: str, entry: dict) -> bool:
+        """Store per-class credibility state. Returns False if refused at cap."""
+        return self._hash_save("augur:gate:credibility", signal_class, entry)
+
+    def load_credibility(self, signal_class: str) -> dict:
+        """Return credibility entry for signal_class, or {} if missing/corrupt."""
+        return self._hash_load("augur:gate:credibility", signal_class)
+
+    # -- reservoir (online: count, last_ts) -----------------------------------
+
+    def save_reservoir(self, state_key: str, entry: dict) -> bool:
+        """Store per-channel reservoir state. Returns False if refused at cap."""
+        return self._hash_save("augur:gate:reservoir", state_key, entry)
+
+    def load_reservoir(self, state_key: str) -> dict:
+        """Return reservoir entry for state_key, or {} if missing/corrupt."""
+        return self._hash_load("augur:gate:reservoir", state_key)
+
+    # -- cost_tier_memory (online + offline: earned_tier2, helped, count, last_ts)
+
+    def save_cost_tier_memory(self, state_key: str, entry: dict) -> bool:
+        """Store per-channel cost-tier memory. Returns False if refused at cap."""
+        return self._hash_save("augur:gate:cost_tier_memory", state_key, entry)
+
+    def load_cost_tier_memory(self, state_key: str) -> dict:
+        """Return cost-tier memory for state_key, or {} if missing/corrupt."""
+        return self._hash_load("augur:gate:cost_tier_memory", state_key)
+
+    # -- channel_stats (online: seen, consecutive_suppressions, ...) ----------
+
+    def save_channel_stats(self, state_key: str, entry: dict) -> bool:
+        """Store per-channel tracking stats. Returns False if refused at cap."""
+        return self._hash_save("augur:gate:channel_stats", state_key, entry)
+
+    def load_channel_stats(self, state_key: str) -> dict:
+        """Return channel stats for state_key, or {} if missing/corrupt."""
+        return self._hash_load("augur:gate:channel_stats", state_key)
+
+    # -- advice_rate (string key: rate_ewma, last_ts) -------------------------
+
+    def save_advice_rate(self, entry: dict) -> None:
+        """Persist the global advice-rate EWMA state."""
+        self._r.set("augur:gate:advice_rate", json.dumps(entry))
+
+    def load_advice_rate(self) -> dict:
+        """Return advice-rate state, or {} if missing/corrupt."""
+        raw = self._r.get("augur:gate:advice_rate")
+        if not raw:
+            return {}
+        try:
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning("augur:gate:advice_rate corrupt; returning {}")
+            return {}
+
+    # -- self_tolerance set (offline: SADD/SREM/SISMEMBER/SMEMBERS) -----------
+
+    def add_self_tolerance(self, state_key: str) -> None:
+        """Add state_key to the self-tolerance set."""
+        self._r.sadd("augur:gate:self_tolerance", state_key)
+
+    def remove_self_tolerance(self, state_key: str) -> None:
+        """Remove state_key from the self-tolerance set."""
+        self._r.srem("augur:gate:self_tolerance", state_key)
+
+    def is_self_tolerant(self, state_key: str) -> bool:
+        """Return True if state_key is in the self-tolerance set."""
+        return bool(self._r.sismember("augur:gate:self_tolerance", state_key))
+
+    def load_self_tolerance(self) -> set[str]:
+        """Return the full self-tolerance set (decoded to str)."""
+        raw = self._r.smembers("augur:gate:self_tolerance")
+        return {m.decode() if isinstance(m, bytes) else m for m in raw}
+
+    # -- can_track_gate_state (read-only cap probe) ---------------------------
+
+    def can_track_gate_state(self, hash_name: str, state_key: str) -> bool:
+        """Return True if state_key can be stored in hash_name without exceeding cap.
+
+        True when the field already exists (existing key keeps updating even at
+        cap) or when hlen < MAX_GATE_STATE_KEYS (room available).  This is the
+        read-only probe used by Gate.evaluate() to detect the cap-fail-open
+        condition without writing.
+        """
+        return bool(
+            self._r.hexists(hash_name, state_key)
+            or self._r.hlen(hash_name) < MAX_GATE_STATE_KEYS
+        )

@@ -1,4 +1,4 @@
-"""Tests for gate persistence methods — Task 1.1 (append-log save/load)."""
+"""Tests for gate persistence methods — Tasks 1.1 and 1.2."""
 
 from __future__ import annotations
 
@@ -213,3 +213,274 @@ def test_load_delivery_failures_corrupt_returns_empty() -> None:
     pm = _pm()
     pm._r.lpush("augur:gate:delivery_failures", "{bad")
     assert pm.load_delivery_failures(limit=10) == []
+
+
+# ── Task 1.2: per-field hash stores ─────────────────────────────────────────
+
+
+def test_habituation_per_field_no_clobber() -> None:
+    pm = _pm()
+    pm.save_habituation("single:a:b", {"h": 0.5, "last_event_ts": 1.0, "count": 3})
+    pm.save_habituation_floor(
+        "single:a:b", {"floor": 0.1, "last_ts": 1.0}
+    )  # separate key
+    assert pm.load_habituation("single:a:b")["h"] == 0.5
+    assert pm.load_habituation_floor("single:a:b")["floor"] == 0.1
+
+
+def test_channel_stats_refuse_at_cap(monkeypatch: object) -> None:
+    import blackboard.persistence as P
+
+    monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 2)
+    pm = _pm()
+    assert pm.save_channel_stats("k1", {"seen": 1}) is True
+    assert pm.save_channel_stats("k2", {"seen": 1}) is True
+    assert pm.save_channel_stats("k3", {"seen": 1}) is False  # refused at cap (new key)
+    assert (
+        pm.save_channel_stats("k1", {"seen": 2}) is True
+    )  # existing key still updates
+
+
+def test_load_habituation_corrupt_field_returns_default() -> None:
+    pm = _pm()
+    pm._r.hset("augur:gate:habituation", "k", "{bad")
+    assert pm.load_habituation("k") == {}  # guarded → unseen
+
+
+# ── refuse-at-cap for all six hashes ────────────────────────────────────────
+
+
+def test_habituation_refuse_at_cap(monkeypatch: object) -> None:
+    import blackboard.persistence as P
+
+    monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 1)
+    pm = _pm()
+    assert (
+        pm.save_habituation("k1", {"h": 0.1, "last_event_ts": 1.0, "count": 1}) is True
+    )
+    assert (
+        pm.save_habituation("k2", {"h": 0.2, "last_event_ts": 2.0, "count": 1}) is False
+    )
+    assert (
+        pm.save_habituation("k1", {"h": 0.9, "last_event_ts": 3.0, "count": 2}) is True
+    )  # existing
+
+
+def test_habituation_floor_refuse_at_cap(monkeypatch: object) -> None:
+    import blackboard.persistence as P
+
+    monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 1)
+    pm = _pm()
+    assert pm.save_habituation_floor("k1", {"floor": 0.2, "last_ts": 1.0}) is True
+    assert pm.save_habituation_floor("k2", {"floor": 0.3, "last_ts": 2.0}) is False
+
+
+def test_credibility_refuse_at_cap(monkeypatch: object) -> None:
+    import blackboard.persistence as P
+
+    monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 1)
+    pm = _pm()
+    assert pm.save_credibility("c1", {"cred": 0.7, "n": 4, "last_fb_ts": 1.0}) is True
+    assert pm.save_credibility("c2", {"cred": 0.5, "n": 2, "last_fb_ts": 2.0}) is False
+
+
+def test_reservoir_refuse_at_cap(monkeypatch: object) -> None:
+    import blackboard.persistence as P
+
+    monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 1)
+    pm = _pm()
+    assert pm.save_reservoir("k1", {"count": 1.0, "last_ts": 1.0}) is True
+    assert pm.save_reservoir("k2", {"count": 2.0, "last_ts": 2.0}) is False
+
+
+def test_cost_tier_memory_refuse_at_cap(monkeypatch: object) -> None:
+    import blackboard.persistence as P
+
+    monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 1)
+    pm = _pm()
+    assert (
+        pm.save_cost_tier_memory(
+            "k1", {"earned_tier2": False, "helped": 0, "count": 1, "last_ts": 1.0}
+        )
+        is True
+    )
+    assert (
+        pm.save_cost_tier_memory(
+            "k2", {"earned_tier2": False, "helped": 0, "count": 1, "last_ts": 2.0}
+        )
+        is False
+    )
+
+
+# ── load roundtrips for all hashes ──────────────────────────────────────────
+
+
+def test_habituation_floor_roundtrip() -> None:
+    pm = _pm()
+    pm.save_habituation_floor("k", {"floor": 0.25, "last_ts": 42.0})
+    result = pm.load_habituation_floor("k")
+    assert result["floor"] == 0.25
+    assert result["last_ts"] == 42.0
+
+
+def test_credibility_roundtrip() -> None:
+    pm = _pm()
+    pm.save_credibility("chess:medium", {"cred": 0.8, "n": 10, "last_fb_ts": 99.0})
+    result = pm.load_credibility("chess:medium")
+    assert result["cred"] == 0.8
+    assert result["n"] == 10
+
+
+def test_reservoir_roundtrip() -> None:
+    pm = _pm()
+    pm.save_reservoir("single:typing:user", {"count": 2.5, "last_ts": 50.0})
+    result = pm.load_reservoir("single:typing:user")
+    assert result["count"] == 2.5
+
+
+def test_cost_tier_memory_roundtrip() -> None:
+    pm = _pm()
+    pm.save_cost_tier_memory(
+        "k", {"earned_tier2": True, "helped": 3, "count": 5, "last_ts": 1.0}
+    )
+    result = pm.load_cost_tier_memory("k")
+    assert result["earned_tier2"] is True
+    assert result["count"] == 5
+
+
+def test_channel_stats_roundtrip() -> None:
+    pm = _pm()
+    pm.save_channel_stats(
+        "k",
+        {
+            "seen": 5,
+            "consecutive_suppressions": 2,
+            "suppression_streak_started_ts": 100.0,
+            "last_delivery_ts": 200.0,
+            "last_ts": 250.0,
+        },
+    )
+    result = pm.load_channel_stats("k")
+    assert result["seen"] == 5
+    assert result["consecutive_suppressions"] == 2
+
+
+# ── load returns {} for missing ──────────────────────────────────────────────
+
+
+def test_load_missing_returns_empty_dict() -> None:
+    pm = _pm()
+    assert pm.load_habituation("nonexistent") == {}
+    assert pm.load_habituation_floor("nonexistent") == {}
+    assert pm.load_credibility("nonexistent") == {}
+    assert pm.load_reservoir("nonexistent") == {}
+    assert pm.load_cost_tier_memory("nonexistent") == {}
+    assert pm.load_channel_stats("nonexistent") == {}
+
+
+# ── corrupt field guards for all six hashes ──────────────────────────────────
+
+
+def test_habituation_floor_corrupt_returns_empty() -> None:
+    pm = _pm()
+    pm._r.hset("augur:gate:habituation_floor", "k", "{bad")
+    assert pm.load_habituation_floor("k") == {}
+
+
+def test_credibility_corrupt_returns_empty() -> None:
+    pm = _pm()
+    pm._r.hset("augur:gate:credibility", "c", "{bad")
+    assert pm.load_credibility("c") == {}
+
+
+def test_reservoir_corrupt_returns_empty() -> None:
+    pm = _pm()
+    pm._r.hset("augur:gate:reservoir", "k", "{bad")
+    assert pm.load_reservoir("k") == {}
+
+
+def test_cost_tier_memory_corrupt_returns_empty() -> None:
+    pm = _pm()
+    pm._r.hset("augur:gate:cost_tier_memory", "k", "{bad")
+    assert pm.load_cost_tier_memory("k") == {}
+
+
+def test_channel_stats_corrupt_returns_empty() -> None:
+    pm = _pm()
+    pm._r.hset("augur:gate:channel_stats", "k", "{bad")
+    assert pm.load_channel_stats("k") == {}
+
+
+# ── advice_rate (string key) ─────────────────────────────────────────────────
+
+
+def test_advice_rate_roundtrip() -> None:
+    pm = _pm()
+    pm.save_advice_rate({"rate_ewma": 0.05, "last_ts": 123.0})
+    result = pm.load_advice_rate()
+    assert result["rate_ewma"] == 0.05
+    assert result["last_ts"] == 123.0
+
+
+def test_advice_rate_missing_returns_empty() -> None:
+    pm = _pm()
+    assert pm.load_advice_rate() == {}
+
+
+def test_advice_rate_corrupt_returns_empty() -> None:
+    pm = _pm()
+    pm._r.set("augur:gate:advice_rate", "{bad")
+    assert pm.load_advice_rate() == {}
+
+
+# ── self_tolerance set ops ───────────────────────────────────────────────────
+
+
+def test_self_tolerance_add_is_member() -> None:
+    pm = _pm()
+    pm.add_self_tolerance("single:typing:user")
+    assert pm.is_self_tolerant("single:typing:user") is True
+    assert pm.is_self_tolerant("single:chess:user") is False
+
+
+def test_self_tolerance_remove() -> None:
+    pm = _pm()
+    pm.add_self_tolerance("single:typing:user")
+    pm.remove_self_tolerance("single:typing:user")
+    assert pm.is_self_tolerant("single:typing:user") is False
+
+
+def test_load_self_tolerance_returns_set() -> None:
+    pm = _pm()
+    pm.add_self_tolerance("k1")
+    pm.add_self_tolerance("k2")
+    result = pm.load_self_tolerance()
+    assert isinstance(result, set)
+    assert "k1" in result and "k2" in result
+
+
+def test_load_self_tolerance_empty() -> None:
+    pm = _pm()
+    assert pm.load_self_tolerance() == set()
+
+
+# ── can_track_gate_state probe ───────────────────────────────────────────────
+
+
+def test_can_track_gate_state_empty_hash() -> None:
+    pm = _pm()
+    # No entries yet — new key can be tracked
+    assert pm.can_track_gate_state("augur:gate:channel_stats", "new:key") is True
+
+
+def test_can_track_gate_state_existing_at_cap(monkeypatch: object) -> None:
+    import blackboard.persistence as P
+
+    monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 2)
+    pm = _pm()
+    pm.save_channel_stats("k1", {"seen": 1})
+    pm.save_channel_stats("k2", {"seen": 1})
+    # At cap — new key cannot be tracked
+    assert pm.can_track_gate_state("augur:gate:channel_stats", "k3") is False
+    # Existing key CAN still be tracked even at cap
+    assert pm.can_track_gate_state("augur:gate:channel_stats", "k1") is True

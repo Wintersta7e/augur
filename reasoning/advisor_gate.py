@@ -714,7 +714,11 @@ class Gate:
         if not entry:
             return None  # unseen class → prior → P(suppress)=0 → never suppress
 
-        cred = float(entry.get("cred", prior) or prior)
+        # A stored cred of 0.0 is the worst-credibility class (P(suppress) at the
+        # CRED_MAX_P ceiling), a real value — not "missing" — so do NOT collapse
+        # it to the prior with `or prior` (that would silently yield P=0).
+        cred_raw = entry.get("cred")
+        cred = float(cred_raw if cred_raw is not None else prior)
 
         # Decay toward the prior with elapsed time since the last feedback —
         # a stale (no recent feedback) class relaxes to neutral and self-heals.

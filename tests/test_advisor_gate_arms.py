@@ -565,6 +565,26 @@ def test_credibility_class_for_single_is_domain_severity(fake_pm):
     assert d.metrics["p"] == pytest.approx(0.8)
 
 
+def test_credibility_zero_cred_suppresses_at_max_p(fake_pm):
+    """A stored cred=0.0 (worst class) suppresses at P=CRED_MAX_P.
+
+    A legitimately-stored zero credibility is the maximally-untrustworthy class
+    and MUST drive P(suppress) to its ceiling (CRED_MAX_P=0.8), not collapse to
+    the neutral prior (which would yield P=0 and never suppress).  cred_eff=0.0
+    (no decay at dt=0); p = clamp((0.5-0.0)/0.5, 0, 0.8) = 0.8.
+    """
+    cfg = _cred_cfg()
+    _seed_credibility(fake_pm, "typing:medium", cred=0.0, n=50, last_fb_ts=1.0)
+    g = Gate()
+    rng = _SeqRandom([0.0])  # 0.0 < 0.8 → suppress
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0, rng=rng)
+    assert d.action == "suppress"
+    assert d.reason == "low_credibility_class"
+    assert d.deciding_arm == "signaller_credibility"
+    assert d.metrics["credibility"] == pytest.approx(0.0)
+    assert d.metrics["p"] == pytest.approx(cfg.gate_cred_max_p)
+
+
 def test_credibility_rng_above_p_passes(fake_pm):
     """A draw at/above P(suppress) does not suppress (probabilistic)."""
     cfg = _cred_cfg()

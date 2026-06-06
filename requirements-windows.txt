@@ -8,7 +8,7 @@
 # and reads augur:session:current from WSL's Redis over localhost
 # (WSL2 forwards 127.0.0.1-bound ports to Windows automatically).
 
-nats-py>=2.6
+nats-py>=2.14.0
 redis>=5.0
 pywin32>=311
 psutil>=5.9

@@ -15,6 +15,11 @@ log = logging.getLogger("persistence")
 
 HISTORY_MAX = 1000
 PROMPT_HISTORY_MAX = 100
+# Cap on distinct app-descriptor entries in the Redis hash. Bounds memory +
+# HGETALL latency (the MCP get_app_descriptors tool reads the whole hash) and
+# matches the MAX_BASELINE_ENTITIES discipline. New entities beyond this are
+# dropped; existing entries can still be updated.
+MAX_APP_DESCRIPTORS = 2000
 
 # Default TTL for per-session Redis keys (feedback, correlation graph,
 # reflection report). Prevents indefinite growth beyond the 1000-entry
@@ -178,6 +183,51 @@ class PersistenceManager:
         if raw is None:
             return None
         return json.loads(raw)
+
+    # ── App descriptors (autonomous app->identity map) ────────────────────
+
+    def save_app_descriptor(
+        self, entity: str, descriptor: str, *, overwrite: bool
+    ) -> None:
+        """Store an app's descriptor in the augur:config:app_descriptors hash.
+
+        ``overwrite=True`` (OS FileDescription — authoritative) uses HSET and
+        upgrades any earlier value. ``overwrite=False`` (LLM fallback) uses
+        HSETNX so a late classification can never clobber OS truth or an
+        earlier guess.
+        """
+        key = "augur:config:app_descriptors"
+        if (
+            not self._r.hexists(key, entity)
+            and self._r.hlen(key) >= MAX_APP_DESCRIPTORS
+        ):
+            log.warning(
+                "app_descriptor hash full (%d); dropping new entity %s",
+                MAX_APP_DESCRIPTORS,
+                entity,
+            )
+            return
+        if overwrite:
+            self._r.hset(key, entity, descriptor)
+        else:
+            self._r.hsetnx(key, entity, descriptor)
+
+    def load_app_descriptor(self, entity: str) -> str | None:
+        """Return one app's descriptor (decoded), or None if absent."""
+        raw = self._r.hget("augur:config:app_descriptors", entity)
+        if raw is None:
+            return None
+        return raw.decode() if isinstance(raw, bytes) else raw
+
+    def load_app_descriptors(self) -> dict[str, str]:
+        """Return the full app->descriptor map with keys/values decoded to str."""
+        raw = self._r.hgetall("augur:config:app_descriptors")
+        out: dict[str, str] = {}
+        for k, v in raw.items():
+            key = k.decode() if isinstance(k, bytes) else k
+            val = v.decode() if isinstance(v, bytes) else v
+            out[key] = val
+        return out
 
     # -- Correlation graph (cross-domain correlator) -------------------------
 

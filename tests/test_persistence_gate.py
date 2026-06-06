@@ -522,8 +522,6 @@ def test_mark_tuning_applied_default_pass_name_preserves_behavior() -> None:
 # corrupt — not just the loaders covered by Tasks 1.1-1.3 individually.
 
 
-
-
 @pytest.mark.parametrize(
     "seed, loader, expected",
     [

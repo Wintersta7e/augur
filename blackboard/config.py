@@ -43,6 +43,9 @@ class AugurConfig:
     ollama_url: str = "http://host.docker.internal:11434"
     ollama_timeout: int = 120
     ollama_model: str = "qwen2.5:32b"
+    ollama_classifier_model: str = "qwen2.5:1.5b"
+    ollama_classifier_enabled: bool = True
+    ollama_classifier_timeout: int = 15
 
     # ── Detection ──────────────────────────────────────────────────────────
     default_sigma_threshold: float = 2.0

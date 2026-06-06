@@ -37,6 +37,7 @@ log = logging.getLogger("activity_monitor")
 # via sys.modules BEFORE importing this file; the real CLI entrypoint
 # checks _WIN32_AVAILABLE and exits cleanly if the deps are missing.
 try:
+    import win32api  # type: ignore[import-not-found]
     import win32gui  # type: ignore[import-not-found]
     import win32process  # type: ignore[import-not-found]
     import psutil  # type: ignore[import-not-found]
@@ -45,6 +46,7 @@ try:
 
     _WIN32_AVAILABLE = True
 except ImportError:  # pragma: no cover - Linux CI path
+    win32api = None  # type: ignore[assignment]
     win32gui = None  # type: ignore[assignment]
     win32process = None  # type: ignore[assignment]
     psutil = None  # type: ignore[assignment]
@@ -61,6 +63,7 @@ _UNKNOWN_APP = "<unknown>"
 _NO_FOREGROUND_APP = "<no_foreground>"
 _DENIED_APP = "<denied>"
 _GONE_APP = "<gone>"
+_IDENTITY_CACHE_MAX = 500
 
 
 def _normalize_app_name(exe_path: str | None) -> str:
@@ -72,6 +75,31 @@ def _normalize_app_name(exe_path: str | None) -> str:
     if name.lower().endswith(".exe"):
         name = name[:-4]
     return name.lower() or _UNKNOWN_APP
+
+
+def _resolve_file_description(exe_path: str | None) -> str | None:
+    """Best-effort Windows FileDescription (fallback CompanyName) for an exe path.
+
+    Returns None when win32 is unavailable or any read fails — the LLM fallback
+    covers None.
+    """
+    if not exe_path or not _WIN32_AVAILABLE or win32api is None:
+        return None
+    try:
+        lang, codepage = win32api.GetFileVersionInfo(
+            exe_path, "\\VarFileInfo\\Translation"
+        )[0]
+        base = f"\\StringFileInfo\\{lang:04x}{codepage:04x}\\"
+        for field in ("FileDescription", "CompanyName"):
+            try:
+                value = win32api.GetFileVersionInfo(exe_path, base + field)
+            except Exception:  # noqa: BLE001
+                continue
+            if value and value.strip():
+                return value.strip()[:60]
+        return None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _resolve_title(
@@ -154,24 +182,28 @@ class _FocusState:
     current_focus_started_at: float | None = None
     current_span_id: str | None = None
     last_input_time: float = 0.0
+    current_identity: str | None = None
 
     def on_focus_change(
         self,
         new_app: str,
         new_title: str | None,
         now: float,
+        new_identity: str | None = None,
     ) -> PerceptionEvent | None:
         """Return a focus_change PerceptionEvent, or None on the first call."""
         prev_app = self.current_app
         prev_title = self.current_title
         prev_started = self.current_focus_started_at
         prev_span = self.current_span_id
+        prev_identity = self.current_identity
 
         # Advance state to the NEW focus regardless of whether we emit.
         self.current_app = new_app
         self.current_title = new_title
         self.current_focus_started_at = now
         self.current_span_id = str(uuid.uuid4())
+        self.current_identity = new_identity
 
         if prev_app is None or prev_started is None:
             return None  # first-event skip
@@ -194,6 +226,9 @@ class _FocusState:
             "source_id": self.source_id,
             "span_id": prev_span,
         }
+
+        if prev_identity:
+            ctx["app_identity"] = prev_identity
 
         return PerceptionEvent(
             domain="activity_focus",
@@ -237,6 +272,7 @@ class _IntensityWindow:
         focused_app: str,
         focused_title: str | None,
         now: float,
+        focused_identity: str | None = None,
     ) -> PerceptionEvent | None:
         """Return an intensity_sample PerceptionEvent, or None if dropped."""
         window_duration = max(0.0, now - self.window_started_at)
@@ -262,6 +298,9 @@ class _IntensityWindow:
             "source_id": self.source_id,
             "span_id": self.span_id,
         }
+
+        if focused_identity:
+            ctx["app_identity"] = focused_identity
 
         return PerceptionEvent(
             domain="activity_intensity",
@@ -402,6 +441,10 @@ class ActivityMonitor:
         self.allowlist = tuple(
             s.strip() for s in config.activity_title_allowlist.split(",") if s.strip()
         )
+        self._identity_cache: dict[str, str | None] = {}
+        self._last_identity_pid: int | None = None
+        self._last_identity_exe: str | None = None
+        self._last_identity: str | None = None
 
     def _build_focus_state(self, session_id: str) -> _FocusState:
         return _FocusState(
@@ -436,21 +479,21 @@ class ActivityMonitor:
             # be rebuilt from scratch).
         return sid
 
-    def _get_foreground(self) -> tuple[str, str | None]:
-        """Return (app_name, window_title). Distinguishes failure modes."""
+    def _get_foreground(self) -> tuple[str, str | None, str | None]:
+        """Return (app_name, window_title, app_identity). Distinguishes failures."""
         if not _WIN32_AVAILABLE:
-            return (_UNKNOWN_APP, None)
+            return (_UNKNOWN_APP, None, None)
         try:
             hwnd = win32gui.GetForegroundWindow()
             if not hwnd:
-                return (_NO_FOREGROUND_APP, None)
+                return (_NO_FOREGROUND_APP, None, None)
         except Exception as exc:  # noqa: BLE001
             log.warning(
                 "activity_monitor: GetForegroundWindow failed (%s): %s",
                 type(exc).__name__,
                 exc,
             )
-            return (_UNKNOWN_APP, None)
+            return (_UNKNOWN_APP, None, None)
         try:
             title = win32gui.GetWindowText(hwnd) or None
         except Exception:  # noqa: BLE001
@@ -458,20 +501,38 @@ class ActivityMonitor:
         try:
             _, pid = win32process.GetWindowThreadProcessId(hwnd)
             if not pid:
-                return (_NO_FOREGROUND_APP, title)
-            exe = psutil.Process(pid).name()
+                return (_NO_FOREGROUND_APP, title, None)
+            proc = psutil.Process(pid)
+            exe = proc.name()
         except psutil.AccessDenied:
-            return (_DENIED_APP, title)
+            return (_DENIED_APP, title, None)
         except (psutil.NoSuchProcess, psutil.ZombieProcess):
-            return (_GONE_APP, title)
+            return (_GONE_APP, title, None)
         except Exception as exc:  # noqa: BLE001
             log.warning(
                 "activity_monitor: process lookup failed (%s): %s",
                 type(exc).__name__,
                 exc,
             )
-            return (_UNKNOWN_APP, title)
-        return (_normalize_app_name(exe), title)
+            return (_UNKNOWN_APP, title, None)
+
+        if pid == self._last_identity_pid and exe == self._last_identity_exe:
+            identity = self._last_identity
+        else:
+            identity = None
+            try:
+                exe_path = proc.exe()
+                if exe_path not in self._identity_cache:
+                    if len(self._identity_cache) >= _IDENTITY_CACHE_MAX:
+                        self._identity_cache.pop(next(iter(self._identity_cache)))
+                    self._identity_cache[exe_path] = _resolve_file_description(exe_path)
+                identity = self._identity_cache[exe_path]
+            except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+                pass
+            self._last_identity_pid = pid
+            self._last_identity_exe = exe
+            self._last_identity = identity
+        return (_normalize_app_name(exe), title, identity)
 
     async def _publish(self, subject: str, payload: PerceptionEvent) -> None:
         try:
@@ -501,6 +562,7 @@ class ActivityMonitor:
         last_sampled: float | None = None
         last_app: str | None = None
         last_title: str | None = None
+        last_identity: str | None = None
 
         # Install global input listeners (best-effort).
         listeners: list[Any] = []
@@ -548,6 +610,7 @@ class ActivityMonitor:
                     )  # start sampling timer from focus init
                     last_app = None
                     last_title = None
+                    last_identity = None
                 if self.intensity is None:
                     self.intensity = self._build_intensity_window(sid)
                     self.intensity.reset(
@@ -568,7 +631,7 @@ class ActivityMonitor:
                             )
                     last_listener_check = now_mono
 
-                app, title = self._get_foreground()
+                app, title, identity = self._get_foreground()
 
                 # Pull counters and update intensity state.
                 k, m, last_input = self.counter.drain()
@@ -584,13 +647,19 @@ class ActivityMonitor:
                     # truncated to the current focus span.
                     if last_app is not None and self.intensity.window_started_at > 0:
                         ev = self.intensity.build(
-                            focused_app=last_app, focused_title=last_title, now=now_mono
+                            focused_app=last_app,
+                            focused_title=last_title,
+                            now=now_mono,
+                            focused_identity=last_identity,
                         )
                         if ev is not None:
                             await self._publish(self.SUBJECT_INTENSITY, ev)
 
                     ev_focus = self.focus.on_focus_change(
-                        new_app=app, new_title=title, now=now_mono
+                        new_app=app,
+                        new_title=title,
+                        now=now_mono,
+                        new_identity=identity,
                     )
                     if ev_focus is not None:
                         await self._publish(self.SUBJECT_FOCUS, ev_focus)
@@ -599,12 +668,15 @@ class ActivityMonitor:
                         new_started_at=now_mono, new_span_id=self.focus.current_span_id
                     )
                     last_sampled = now_mono
-                    last_app, last_title = app, title
+                    last_app, last_title, last_identity = app, title, identity
 
                 # Periodic intensity sample?
                 elif last_sampled is not None and now_mono - last_sampled >= sampling:
                     ev = self.intensity.build(
-                        focused_app=app, focused_title=title, now=now_mono
+                        focused_app=app,
+                        focused_title=title,
+                        now=now_mono,
+                        focused_identity=identity,
                     )
                     if ev is not None:
                         await self._publish(self.SUBJECT_INTENSITY, ev)

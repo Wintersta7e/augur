@@ -710,6 +710,17 @@ def get_escalation_matrix() -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+@mcp.tool()
+def get_app_descriptors() -> dict[str, Any]:
+    """Read the autonomously-learned app->descriptor map from Redis."""
+    try:
+        with _persistence_ctx() as pm:
+            descriptors = pm.load_app_descriptors()
+        return {"descriptors": descriptors}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 _VALID_SEVERITIES = {"LOW", "MEDIUM", "HIGH"}
 
 # SEC-04: caps on matrix size. Without these, a caller could pass

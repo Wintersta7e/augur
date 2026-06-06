@@ -29,6 +29,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from blackboard.config import AugurConfig
 from blackboard.connections import connect_redis
 from blackboard.persistence import PersistenceManager
+from reasoning.app_descriptor import (
+    ACTIVITY_DOMAINS,
+    ClassifierLane,
+    classifier_model_available,
+    descriptor_suffix,
+    resolve_app_descriptor,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -237,7 +244,7 @@ def build_activity_focus_prompt(
     return f"""{system_prompt}
 
 ## Situation
-- **Event:** unusual dwell in {entity} before switching to {new_app}
+- **Event:** unusual dwell in {entity}{descriptor_suffix(ctx)} before switching to {new_app}
 - **Active dwell:** {active_dwell}s   (idle: {idle_dwell}s, total: {total_dwell}s)
 - **Baseline (log1p s):** {baseline_mean}
 - **Deviation:** {deviation} standard deviations
@@ -276,7 +283,7 @@ def build_activity_intensity_prompt(
     return f"""{system_prompt}
 
 ## Situation
-- **Event:** unusual interaction intensity in {entity}
+- **Event:** unusual interaction intensity in {entity}{descriptor_suffix(ctx)}
 - **Rate:** {value} interactions/min   (baseline: {baseline_mean})
 - **Breakdown:** {keystrokes} keystrokes + {mouse} clicks/scrolls over {window}s ({idle}s idle)
 - **Deviation:** {deviation} standard deviations
@@ -361,7 +368,7 @@ def _describe_activity_focus(anomaly: dict) -> str:
     baseline = anomaly.get("baseline_mean", "?")
     deviation = anomaly.get("deviation_score", "?")
     return (
-        f"ACTIVITY_FOCUS: {entity} dwell {active}s (then switched to {new_app}). "
+        f"ACTIVITY_FOCUS: {entity}{descriptor_suffix(ctx)} dwell {active}s (then switched to {new_app}). "
         f"Baseline (log1p): {baseline}. Deviation: {deviation}σ."
     )
 
@@ -374,7 +381,7 @@ def _describe_activity_intensity(anomaly: dict) -> str:
     baseline = anomaly.get("baseline_mean", "?")
     deviation = anomaly.get("deviation_score", "?")
     return (
-        f"ACTIVITY_INTENSITY: {entity} {value} ipm "
+        f"ACTIVITY_INTENSITY: {entity}{descriptor_suffix(ctx)} {value} ipm "
         f"(keystrokes={keystrokes}). Baseline: {baseline}. Deviation: {deviation}σ."
     )
 
@@ -394,50 +401,9 @@ def describe_signal(domain: str, anomaly: dict) -> str:
     without rebuilding a full domain-specific prompt. Does not share code
     with the full prompt builders — different purpose, different format.
     """
-    if domain == "chess":
-        move = anomaly.get("context", {}).get("move_san") or anomaly.get("move", "?")
-        think = anomaly.get("value", anomaly.get("think_time", 0))
-        baseline = anomaly.get("baseline_mean", "?")
-        deviation = anomaly.get("deviation_score", "?")
-        return (
-            f"CHESS (timing): {anomaly.get('entity', '?')} paused {think}s on "
-            f"move {move}. Baseline: {baseline}s. Deviation: {deviation}\u03c3."
-        )
-
-    if domain == "typing":
-        pause = anomaly.get("value", 0)
-        unit = anomaly.get("unit", "seconds")
-        ctx = anomaly.get("context", {})
-        avg_wpm = ctx.get("avg_wpm", "?")
-        baseline = anomaly.get("baseline_mean", "?")
-        return (
-            f"TYPING (rhythm): Pause duration {pause}{unit[:1]}. "
-            f"Average speed {avg_wpm} wpm. Baseline pause: {baseline}s."
-        )
-
-    if domain == "activity_focus":
-        ctx = anomaly.get("context", {}) or {}
-        entity = anomaly.get("entity", "?")
-        new_app = ctx.get("new_app", "?")
-        active = ctx.get("active_dwell_s", "?")
-        baseline = anomaly.get("baseline_mean", "?")
-        deviation = anomaly.get("deviation_score", "?")
-        return (
-            f"ACTIVITY_FOCUS: {entity} dwell {active}s (then switched to {new_app}). "
-            f"Baseline (log1p): {baseline}. Deviation: {deviation}σ."
-        )
-
-    if domain == "activity_intensity":
-        ctx = anomaly.get("context", {}) or {}
-        entity = anomaly.get("entity", "?")
-        value = anomaly.get("value", "?")
-        keystrokes = ctx.get("keystroke_count", "?")
-        baseline = anomaly.get("baseline_mean", "?")
-        deviation = anomaly.get("deviation_score", "?")
-        return (
-            f"ACTIVITY_INTENSITY: {entity} {value} ipm "
-            f"(keystrokes={keystrokes}). Baseline: {baseline}. Deviation: {deviation}σ."
-        )
+    describer = DOMAIN_DESCRIBERS.get(domain)
+    if describer:
+        return describer(anomaly)
 
     # Generic fallback
     value = anomaly.get("value", "?")
@@ -447,6 +413,36 @@ def describe_signal(domain: str, anomaly: dict) -> str:
         f"{domain.upper()}: {anomaly.get('event_type', 'event')} "
         f"value={value}{unit}  deviation={deviation}\u03c3"
     )
+
+
+def enrich_payload_descriptors(
+    pm: PersistenceManager, lane: ClassifierLane, path: str, payload: dict
+) -> None:
+    """Enrich the primary anomaly (always) and, for a correlation payload, each
+    correlated event, with app descriptors before prompt-building."""
+    enrich_activity_descriptor(pm, lane, payload["primary_anomaly"])
+    if path == "correlation":
+        for correlated_ev in payload.get("correlated_events", []):
+            enrich_activity_descriptor(pm, lane, correlated_ev)
+
+
+def enrich_activity_descriptor(
+    pm: PersistenceManager, lane: ClassifierLane, anomaly: dict
+) -> None:
+    """Resolve an activity anomaly's descriptor into context['app_descriptor'].
+
+    OS identity is cached + used immediately; a cache miss enqueues a background
+    classification. No-op for non-activity domains. Mutates ``anomaly`` in place.
+    """
+    if anomaly.get("domain") not in ACTIVITY_DOMAINS:
+        return
+    ctx = anomaly.setdefault("context", {})
+    entity = anomaly.get("entity", "")
+    descriptor, needs_classification = resolve_app_descriptor(pm, entity, ctx)
+    if descriptor:
+        ctx["app_descriptor"] = descriptor
+    elif needs_classification:
+        lane.enqueue(entity)
 
 
 def build_correlation_prompt(payload: dict) -> str:
@@ -622,6 +618,7 @@ async def run() -> None:
     log.info("NATS connected (%s)", config.nats_url)
 
     http_client = httpx.AsyncClient()
+    classifier_lane = ClassifierLane(pm, http_client, config)
 
     # Check Ollama reachability at startup (non-fatal)
     try:
@@ -634,6 +631,22 @@ async def run() -> None:
                 "Model '%s' not found locally. "
                 "It will be pulled on first request (may be slow).",
                 config.ollama_model,
+            )
+        if classifier_lane.enabled and not classifier_model_available(
+            config.ollama_classifier_model, models
+        ):
+            log.warning(
+                "Classifier model '%s' not available; disabling LLM descriptor "
+                "fallback for this session (OS metadata still applies).",
+                config.ollama_classifier_model,
+            )
+            classifier_lane.enabled = False
+        elif classifier_lane.enabled:
+            log.info(
+                "App-descriptor classifier lane enabled (model=%s). Requires "
+                "OLLAMA_MAX_LOADED_MODELS>=2 and OLLAMA_NUM_PARALLEL>=2 on the "
+                "Ollama host for true parallelism.",
+                config.ollama_classifier_model,
             )
     except (httpx.HTTPError, httpx.ConnectError) as exc:
         log.warning(
@@ -685,6 +698,11 @@ async def run() -> None:
             domain,
             entity,
         )
+
+        # Populate the app-descriptor map BEFORE the lock-skip so it fills even
+        # when advice is skipped. resolve_app_descriptor guards RedisError and
+        # enqueue() is sync-guarded, so this cannot raise out of the handler.
+        enrich_payload_descriptors(pm, classifier_lane, path, payload)
 
         if reasoning_lock.locked():
             log.warning("LLM reasoning already in progress, skipping")
@@ -778,8 +796,9 @@ async def run() -> None:
         pass
     finally:
         await sub.unsubscribe()
-        await nc.close()
+        await classifier_lane.shutdown()
         await http_client.aclose()
+        await nc.close()
         log.info("Shut down cleanly")
 
 

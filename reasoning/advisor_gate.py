@@ -382,7 +382,7 @@ class Gate:
         self,
         sig: Signature,
         state: dict[str, Any],
-        config: Any,  # noqa: ARG002 — uniform arm signature
+        config: Any,
         now: float,  # noqa: ARG002 — uniform arm signature
         rng: random.Random,  # noqa: ARG002 — uniform arm signature
     ) -> GateDecision | None:
@@ -393,6 +393,8 @@ class Gate:
         ``SUPPRESS("central_tolerance_learned_self")``.  (High never reaches
         this arm — it is skipped by the HIGH bypass in ``evaluate``.)
         """
+        if not config.gate_central_tolerance_enabled:
+            return None
         if sig.severity == "high":
             return None
         if not state.get("self_tolerant"):

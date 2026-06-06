@@ -825,3 +825,132 @@ def test_credibility_disabled_passes(fake_pm):
         rng=_SeqRandom([0.0]),
     )
     assert d.deciding_arm != "signaller_credibility"
+
+
+# ── Arm-ordering precedence (spec §5 Phase 1: "first to suppress wins") ───────
+#
+# The Phase-1 suppressor pipeline runs in a fixed, documented order:
+#   central_tolerance → refractory → novelty → habituation → reservoir →
+#   credibility
+# and evaluate returns the FIRST arm that suppresses.  The tests below seed a
+# single non-high channel so that ALL SIX suppressors would fire simultaneously,
+# then disable the higher-precedence arms one at a time and assert the next arm
+# in line becomes the decider — pinning the exact precedence chain.
+
+
+def _seed_all_suppressors(fake_pm) -> None:
+    """Seed state so every Phase-1 suppressor would fire on single:typing:user.
+
+    The channel is a non-high single+medium typing event at value 2.0:
+      * Arm 1 central_tolerance — state_key in the self-tolerance set;
+      * Arm 2 refractory_burden — a recent non-probe emission on the same
+        state_key (absolute window + per-state_key duplicate);
+      * Arm 3 novelty — 3 prior observations all at 2.0 → relative_change 0;
+      * Arm 4 habituation — h=0.9 with no decay → R below threshold;
+      * Arm 5 reservoir — fresh count (below ON) needs no seed;
+      * Arm 6 credibility — cred=0.1 on the typing:medium class (paired with a
+        0.0 rng draw at evaluate time).
+    """
+    fake_pm.add_self_tolerance("single:typing:user")
+    fake_pm.save_emission(_emit("single:typing:user", "medium", ts=1.0))
+    _seed_observed(fake_pm, "single:typing:user", [2.0, 2.0, 2.0])
+    fake_pm.save_habituation(
+        "single:typing:user", {"h": 0.9, "last_event_ts": 1.0, "count": 7}
+    )
+    _seed_credibility(fake_pm, "typing:medium", cred=0.1, n=20, last_fb_ts=1.0)
+
+
+def test_arm_precedence_first_suppressor_wins(fake_pm):
+    """When all six arms would suppress, evaluate returns them in spec §5 order.
+
+    Disabling the highest-precedence arm each step hands the decision to the next
+    arm in the documented chain (central_tolerance → refractory → novelty →
+    habituation → reservoir → credibility), proving evaluate returns the FIRST
+    suppressor and that the pipeline order matches the spec.
+    """
+    from blackboard.config import AugurConfig
+
+    _seed_all_suppressors(fake_pm)
+    g = Gate()
+    sig = build_signature(_medium_typing(2.0))
+
+    # (config-overrides, expected deciding arm, expected reason) in precedence
+    # order — each row disables the arms ABOVE it so the next one decides.
+    chain = [
+        ({}, "central_tolerance", "central_tolerance_learned_self"),
+        (
+            {"gate_central_tolerance_enabled": False},
+            "refractory_burden",
+            "absolute_refractory",
+        ),
+        (
+            {
+                "gate_central_tolerance_enabled": False,
+                "gate_refractory_enabled": False,
+            },
+            "novelty_prediction_error",
+            "fully_predicted_explained_away",
+        ),
+        (
+            {
+                "gate_central_tolerance_enabled": False,
+                "gate_refractory_enabled": False,
+                "gate_novelty_enabled": False,
+            },
+            "habituation",
+            "habituated",
+        ),
+        (
+            {
+                "gate_central_tolerance_enabled": False,
+                "gate_refractory_enabled": False,
+                "gate_novelty_enabled": False,
+                "gate_habituation_enabled": False,
+            },
+            "coincidence_evidence_reservoir",
+            "single_channel_insufficient",
+        ),
+        (
+            {
+                "gate_central_tolerance_enabled": False,
+                "gate_refractory_enabled": False,
+                "gate_novelty_enabled": False,
+                "gate_habituation_enabled": False,
+                "gate_reservoir_enabled": False,
+            },
+            "signaller_credibility",
+            "low_credibility_class",
+        ),
+    ]
+
+    for overrides, expected_arm, expected_reason in chain:
+        cfg = AugurConfig(**overrides)
+        d = g.evaluate(sig, fake_pm, cfg, now=1.0, rng=_SeqRandom([0.0]))
+        assert d.action == "suppress", f"{expected_arm} should suppress"
+        assert d.deciding_arm == expected_arm
+        assert d.reason == expected_reason
+
+
+def test_arm_precedence_all_disabled_fires(fake_pm):
+    """With every suppressor disabled, the seeded channel passes all arms → fire."""
+    from blackboard.config import AugurConfig
+
+    _seed_all_suppressors(fake_pm)
+    cfg = AugurConfig(
+        gate_central_tolerance_enabled=False,
+        gate_refractory_enabled=False,
+        gate_novelty_enabled=False,
+        gate_habituation_enabled=False,
+        gate_reservoir_enabled=False,
+        gate_credibility_enabled=False,
+    )
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.0]),
+    )
+    assert d.action == "fire"
+    assert d.reason == "passed_all_arms"

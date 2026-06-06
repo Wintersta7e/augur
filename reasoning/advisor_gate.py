@@ -16,12 +16,28 @@ objects only.  All gate decision logic is intentionally side-effect-free here
 
 from __future__ import annotations
 
+import random
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 # Internal module constant guarding divide-by-zero in the novelty arm (spec §5).
 _EPS = 1e-6
+
+# The Redis hash whose cap (MAX_GATE_STATE_KEYS) decides trackability: a new
+# state_key that cannot be created here is untrackable for anti-starvation, so a
+# would-suppress on it fails open to FIRE (cap_fail_open, invariant D / spec §6).
+_CHANNEL_STATS_KEY = "augur:gate:channel_stats"
+
+# An arm is a pure callable over the loaded snapshot returning a SUPPRESS/
+# DOWNGRADE/FIRE GateDecision, or None to pass. Real arms (Phase 4+) are private
+# methods bound into this list; the list is injectable so the skeleton + each arm
+# is testable in isolation.
+Arm = Callable[
+    ["Gate", "Signature", dict[str, Any], Any, float, random.Random],
+    "GateDecision | None",
+]
 
 
 @dataclass(frozen=True)
@@ -207,3 +223,90 @@ def build_signature(payload: dict[str, Any]) -> Signature:
         involved_domains=involved,
         ungateable=ungateable,
     )
+
+
+class Gate:
+    """The advisor receptivity/burden gate (spec §3/§4).
+
+    ``evaluate`` is **strictly read-only**: it reads gate state via the guarded
+    ``load_gate_*`` helpers, runs the (injected) arm pipeline against that one
+    consistent snapshot, and returns a :class:`GateDecision` — it performs no
+    Redis write and no ``await``.  All mutation lives in the ``record_*`` methods
+    (added in later tasks).
+
+    The arm pipeline is **injectable** (``Gate(arms=[...])`` defaulting to an
+    empty list) so the skeleton + each arm are unit-testable in isolation; real
+    arms (Phase 4+) are bound in here as private methods.  Each arm is a pure
+    callable ``arm(self, sig, state, config, now, rng) -> GateDecision | None``
+    (``None`` = pass); the first non-``None`` SUPPRESS/DOWNGRADE/FIRE wins.
+    """
+
+    def __init__(self, arms: list[Arm] | None = None) -> None:
+        self.arms: list[Arm] = arms if arms is not None else []
+
+    def evaluate(
+        self,
+        signature: Signature,
+        pm: Any,
+        config: Any,
+        *,
+        now: float,
+        rng: random.Random = random.Random(),
+    ) -> GateDecision:
+        """Return a :class:`GateDecision` for ``signature`` (read-only).
+
+        Stage 0 / fast exits (no gate-state reads):
+
+        * master-disable (``not config.gate_enabled``) → ``FIRE("gate_disabled")``;
+        * danger exemption (``signature.exempt``) →
+          ``FIRE("exempt_high_correlated")`` performing **no** state read (§2 B).
+
+        Otherwise gate state is loaded up front (read-only) and the arm pipeline
+        runs.  A suppressing arm whose ``state_key`` is **new and untrackable**
+        (``not pm.can_track_gate_state(...)``) fails open to
+        ``FIRE("cap_fail_open")`` preserving the decision id (invariant D / §6).
+        With no arms, the event passes → ``FIRE("passed_all_arms")``.
+        """
+        if not config.gate_enabled:
+            return GateDecision.fire("gate_disabled", deciding_arm="master_disable")
+
+        if signature.exempt:
+            # §2(B): for an exempt signature NO gate state is ever read.
+            return GateDecision.fire(
+                "exempt_high_correlated", deciding_arm="danger_exemption"
+            )
+
+        state = self._load_state(pm, signature)
+
+        for arm in self.arms:
+            decision = arm(self, signature, state, config, now, rng)
+            if decision is None:
+                continue
+            if decision.action == "suppress" and not pm.can_track_gate_state(
+                _CHANNEL_STATS_KEY, signature.state_key
+            ):
+                # Untrackable new channel → cannot anti-starve it → fail open to
+                # FIRE rather than suppress indefinitely (invariant D, spec §6).
+                return decision.as_fire("cap_fail_open")
+            return decision
+
+        return GateDecision.fire("passed_all_arms", deciding_arm="none")
+
+    def _load_state(self, pm: Any, signature: Signature) -> dict[str, Any]:
+        """Load the gate-state snapshot for ``signature`` (read-only, guarded).
+
+        Each ``load_gate_*`` helper guards its own decode errors and returns a
+        safe "unseen" default, so a corrupt/partial read degrades to a clean
+        snapshot (invariant C).  Arms (Phase 4+) read from this dict only.
+        """
+        return {
+            "habituation": pm.load_habituation(signature.state_key),
+            "habituation_floor": pm.load_habituation_floor(signature.state_key),
+            "reservoir": pm.load_reservoir(signature.state_key),
+            "cost_tier_memory": pm.load_cost_tier_memory(signature.state_key),
+            "channel_stats": pm.load_channel_stats(signature.state_key),
+            "self_tolerant": pm.is_self_tolerant(signature.state_key),
+            "advice_rate": pm.load_advice_rate(),
+            "emissions": pm.load_emissions(),
+            "observed": pm.load_observed(signature.state_key),
+        }

@@ -247,3 +247,113 @@ def test_as_fire_resets_suppress_specific_fields() -> None:
     f = d.as_fire("cap_fail_open")
     assert f.action == "fire"
     assert f.deciding_arm == "habituation"  # carried for audit
+
+
+# ── Gate.evaluate skeleton (Task 3.1, spec §3/§4) ────────────────────────────
+
+from tests.conftest import (  # noqa: E402
+    EXEMPT_PAYLOAD,
+    SINGLE_MEDIUM,
+    SINGLE_MEDIUM_NEWKEY_THAT_WOULD_SUPPRESS,
+)
+
+
+def test_exempt_always_fires(fake_pm, cfg) -> None:
+    from reasoning.advisor_gate import Gate
+
+    g = Gate()
+    s = build_signature(EXEMPT_PAYLOAD)
+    d = g.evaluate(s, fake_pm, cfg, now=100.0)
+    assert d.action == "fire"
+    assert d.deciding_arm == "danger_exemption"
+
+
+def test_master_disabled_fires(fake_pm, cfg_disabled) -> None:
+    from reasoning.advisor_gate import Gate
+
+    g = Gate()
+    s = build_signature(SINGLE_MEDIUM)
+    assert g.evaluate(s, fake_pm, cfg_disabled, now=100.0).action == "fire"
+
+
+def test_evaluate_is_readonly(fake_pm, cfg) -> None:
+    # property: evaluate performs no Redis writes
+    from reasoning.advisor_gate import Gate
+
+    g = Gate()
+    s = build_signature(SINGLE_MEDIUM)
+    g.evaluate(s, fake_pm, cfg, now=100.0)
+    assert fake_pm.write_calls == 0  # fake_pm counts any save_*/hset/set/lpush/sadd
+
+
+def test_evaluate_is_not_a_coroutine() -> None:
+    import inspect
+
+    from reasoning.advisor_gate import Gate
+
+    assert inspect.iscoroutinefunction(Gate.evaluate) is False  # §11 no-await proxy
+
+
+def test_exempt_does_no_state_reads(fake_pm, cfg) -> None:
+    from reasoning.advisor_gate import Gate
+
+    g = Gate()
+    s = build_signature(EXEMPT_PAYLOAD)
+    g.evaluate(s, fake_pm, cfg, now=100.0)
+    assert fake_pm.read_calls == 0  # §2(B): exempt reads no gate state
+
+
+def test_no_arms_passes_all(fake_pm, cfg) -> None:
+    from reasoning.advisor_gate import Gate
+
+    g = Gate()  # default empty arm pipeline
+    s = build_signature(SINGLE_MEDIUM)
+    d = g.evaluate(s, fake_pm, cfg, now=100.0)
+    assert d.action == "fire"
+    assert d.reason == "passed_all_arms"
+
+
+def test_cap_fail_open(fake_pm_at_cap, cfg) -> None:
+    # A stub arm WOULD suppress a new state_key, but channel_stats is at
+    # MAX_GATE_STATE_KEYS → the SUPPRESS converts to FIRE("cap_fail_open").
+    from reasoning.advisor_gate import Gate
+
+    def _always_suppress(gate, sig, state, config, now, rng):
+        return GateDecision.suppress("would_suppress", deciding_arm="stub")
+
+    g = Gate(arms=[_always_suppress])
+    s = build_signature(SINGLE_MEDIUM_NEWKEY_THAT_WOULD_SUPPRESS)
+    d = g.evaluate(s, fake_pm_at_cap, cfg, now=100.0)
+    assert d.action == "fire"
+    assert d.reason == "cap_fail_open"
+
+
+def test_cap_fail_open_preserves_decision_id(fake_pm_at_cap, cfg) -> None:
+    from reasoning.advisor_gate import Gate
+
+    captured: dict[str, GateDecision] = {}
+
+    def _always_suppress(gate, sig, state, config, now, rng):
+        d = GateDecision.suppress("would_suppress", deciding_arm="stub")
+        captured["suppress"] = d
+        return d
+
+    g = Gate(arms=[_always_suppress])
+    s = build_signature(SINGLE_MEDIUM_NEWKEY_THAT_WOULD_SUPPRESS)
+    d = g.evaluate(s, fake_pm_at_cap, cfg, now=100.0)
+    assert d.id == captured["suppress"].id  # id PRESERVED through cap conversion
+
+
+def test_suppress_passes_through_when_trackable(fake_pm, cfg) -> None:
+    # When the channel IS trackable, a suppressing arm's SUPPRESS is returned
+    # as-is (no cap conversion).
+    from reasoning.advisor_gate import Gate
+
+    def _always_suppress(gate, sig, state, config, now, rng):
+        return GateDecision.suppress("would_suppress", deciding_arm="stub")
+
+    g = Gate(arms=[_always_suppress])
+    s = build_signature(SINGLE_MEDIUM)
+    d = g.evaluate(s, fake_pm, cfg, now=100.0)
+    assert d.action == "suppress"
+    assert d.reason == "would_suppress"

@@ -16,6 +16,7 @@ objects only.  All gate decision logic is intentionally side-effect-free here
 
 from __future__ import annotations
 
+import math
 import random
 import uuid
 from collections.abc import Callable
@@ -279,6 +280,7 @@ class Gate:
             Gate._arm_central_tolerance,
             Gate._arm_refractory_burden,
             Gate._arm_novelty_prediction_error,
+            Gate._arm_habituation,
         ]
 
     def evaluate(
@@ -512,6 +514,66 @@ class Gate:
                 metrics={
                     "predicted_value": predicted,
                     "relative_change": relative_change,
+                },
+            )
+        return None
+
+    def _arm_habituation(
+        self,
+        sig: Signature,
+        state: dict[str, Any],
+        config: Any,
+        now: float,
+        rng: random.Random,  # noqa: ARG002 — uniform arm signature; deterministic arm
+    ) -> GateDecision | None:
+        """Arm 4 — Aplysia depression + immune anergy (spec §5).
+
+        Gates on **advice frequency** (distinct from novelty's value surprise).
+        Each non-probe delivery on a ``state_key`` advances its habituation
+        ``h ∈ [0, 1]`` (offline in ``record_delivery_success``); here we read it,
+        leak it toward 0 since the last event, and suppress a routine event whose
+        leaky response ``R`` has fallen below ``R_THRESHOLD``:
+
+        * ``dt = now - last_event_ts``;
+        * ``h_eff = min(h * exp(-dt / TAU_S), 1 - max(FLOOR_MIN, floor))`` — the
+          floor-guard caps habituation so an offline-lowered ``floor`` keeps a
+          channel responsive;
+        * ``R = severity_score * (1 - h_eff)``;
+        * ``R < R_THRESHOLD`` → ``SUPPRESS("habituated", {count, interval_s,
+          h_eff, dt})``.
+
+        An unseen channel (no habituation state) has ``h = 0`` → ``h_eff = 0`` →
+        ``R = severity_score`` ≥ threshold → PASS.  (High never reaches this arm
+        — the HIGH bypass in ``evaluate`` skips it.)  Per-channel: a fresh key
+        per domain/entity.
+        """
+        if not config.gate_habituation_enabled:
+            return None
+
+        hab = state.get("habituation") or {}
+        h = float(hab.get("h", 0.0) or 0.0)
+        if h <= 0.0:
+            return None  # unseen / fully recovered channel — nothing to habituate
+
+        last_event_ts = float(hab.get("last_event_ts", now) or now)
+        dt = now - last_event_ts
+
+        floor = float((state.get("habituation_floor") or {}).get("floor", 0.0) or 0.0)
+        cap = 1.0 - max(config.gate_habituation_floor_min, floor)
+
+        decayed = h * math.exp(-dt / config.gate_habituation_tau_s)
+        h_eff = min(decayed, cap)
+
+        r = sig.severity_score * (1.0 - h_eff)
+        if r < config.gate_habituation_r_threshold:
+            return GateDecision.suppress(
+                "habituated",
+                deciding_arm="habituation",
+                metrics={
+                    "count": hab.get("count", 0),
+                    "interval_s": dt,
+                    "h_eff": h_eff,
+                    "dt": dt,
                 },
             )
         return None

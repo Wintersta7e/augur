@@ -284,3 +284,107 @@ def test_novelty_disabled_passes(fake_pm):
     g = Gate()
     d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
     assert d.action == "fire"
+
+
+# ── Arm 4: habituation (spec §5 Arm 4) ───────────────────────────────────────
+#
+# Gates on ADVICE FREQUENCY (distinct from novelty's value surprise).  Per
+# state_key h ∈ [0,1] decays leakily toward 0:
+#   h_eff = min(h * exp(-(now - last_event_ts) / TAU_S), 1 - max(FLOOR_MIN, floor))
+#   R     = severity_score * (1 - h_eff)
+#   R < R_THRESHOLD → SUPPRESS("habituated", {count, interval_s, h_eff, dt})
+# A HIGH never reaches this arm (HIGH bypass).  Floor-guard caps h_eff so an
+# offline-lowered floor can keep a channel responsive.
+
+
+def test_habituation_suppresses_habituated_channel(fake_pm, cfg):
+    """High h with no decay → R below R_THRESHOLD → habituated."""
+    # h=0.9, last_event_ts=now → dt=0; floor unset → cap = 1 - 0.2 = 0.8.
+    #   h_eff = min(0.9*exp(0), 0.8) = 0.8; R = 1.0*(1-0.8) = 0.2 < 0.5 → suppress.
+    fake_pm.save_habituation(
+        "single:typing:user", {"h": 0.9, "last_event_ts": 1.0, "count": 7}
+    )
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "suppress"
+    assert d.reason == "habituated"
+    assert d.deciding_arm == "habituation"
+    assert d.metrics["count"] == 7
+    assert d.metrics["dt"] == 0.0
+    assert d.metrics["h_eff"] == 0.8
+    assert "interval_s" in d.metrics
+
+
+def test_habituation_decays_leakily_over_time(fake_pm, cfg):
+    """Leaky decay: a long gap since last_event_ts lifts R back above threshold."""
+    # h=0.9, dt=600 → h_eff = 0.9*exp(-1) = 0.331 (< the 0.8 cap);
+    #   R = 1.0*(1 - 0.331) = 0.669 > 0.5 → fire (habituation has worn off).
+    fake_pm.save_habituation(
+        "single:typing:user", {"h": 0.9, "last_event_ts": 1.0, "count": 7}
+    )
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=601.0)
+    assert d.action == "fire"
+
+
+def test_habituation_floor_guard_caps_h_eff(fake_pm, cfg):
+    """Floor-guard: a high offline floor caps h_eff so the channel stays responsive."""
+    # h=1.0, dt=0 would give h_eff=1.0 without the guard.  floor=0.7 caps it:
+    #   cap = 1 - max(0.2, 0.7) = 0.3; h_eff = min(1.0, 0.3) = 0.3;
+    #   R = 1.0*(1 - 0.3) = 0.7 > 0.5 → fire (floor keeps it firing).
+    fake_pm.save_habituation(
+        "single:typing:user", {"h": 1.0, "last_event_ts": 1.0, "count": 20}
+    )
+    fake_pm.save_habituation_floor("single:typing:user", {"floor": 0.7, "last_ts": 1.0})
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"
+
+
+def test_habituation_low_h_passes(fake_pm, cfg):
+    """Low h → R above R_THRESHOLD → fire (channel not yet habituated)."""
+    # h=0.2, dt=0 → h_eff = min(0.2, 0.8) = 0.2; R = 1.0*(1-0.2) = 0.8 > 0.5 → fire.
+    fake_pm.save_habituation(
+        "single:typing:user", {"h": 0.2, "last_event_ts": 1.0, "count": 2}
+    )
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"
+
+
+def test_habituation_unseen_channel_passes(fake_pm, cfg):
+    """An unseen state_key (no habituation state, h defaults to 0) → fire."""
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"
+
+
+def test_habituation_high_punches_through_at_h_near_one(fake_pm, cfg):
+    """HARD: a standalone HIGH FIRES even at h≈1 (HIGH-punch-through via bypass).
+
+    Without the HIGH bypass, severity_score=2.0 with h_eff=0.8 gives
+    R = 2.0*(1-0.8) = 0.4 < 0.5 → it WOULD suppress.  The bypass skips the
+    habituation arm for a non-exempt standalone high → it must fire.  This is
+    the spec §5 / §11 HIGH-punch-through guarantee: a strong stimulus punches
+    through routine (advice-frequency) suppression by construction.
+    """
+    fake_pm.save_habituation(
+        "single:typing:user", {"h": 1.0, "last_event_ts": 1.0, "count": 50}
+    )
+    g = Gate()
+    d = g.evaluate(build_signature(_high_typing(4.5)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"
+    assert d.reason != "habituated"
+
+
+def test_habituation_disabled_passes(fake_pm):
+    """When gate_habituation_enabled is False, the arm never suppresses."""
+    from blackboard.config import AugurConfig
+
+    cfg = AugurConfig(gate_habituation_enabled=False)
+    fake_pm.save_habituation(
+        "single:typing:user", {"h": 0.9, "last_event_ts": 1.0, "count": 7}
+    )
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"

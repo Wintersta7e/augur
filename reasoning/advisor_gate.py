@@ -185,6 +185,7 @@ class Signature:
     state_key: str
     involved_domains: tuple[str, ...]
     ungateable: bool  # single event with missing/"?"/empty entity
+    escalation_rule: str | None  # correlation rule label; None for single events
 
 
 def _norm(severity: Any) -> str:
@@ -200,6 +201,19 @@ def _arm_name(arm: Arm) -> str:
     """
     name = getattr(arm, "__name__", "")
     return name[len("_arm_") :] if name.startswith("_arm_") else name
+
+
+def _credibility_class(sig: Signature) -> str:
+    """The per-signal-class credibility key (spec §5 Arm 6).
+
+    Correlated events key off the ``escalation_rule`` (the rule that fired);
+    when a correlation has no rule label, fall back to its (severity-omitted)
+    ``state_key`` so the key is always a stable, deterministic string.  Single
+    events key off the ``(domain, severity)`` pair as ``f"{domain}:{severity}"``.
+    """
+    if sig.correlation_found:
+        return sig.escalation_rule or sig.state_key
+    return f"{sig.domain}:{sig.severity}"
 
 
 def build_signature(payload: dict[str, Any]) -> Signature:
@@ -221,6 +235,7 @@ def build_signature(payload: dict[str, Any]) -> Signature:
     domain = primary.get("domain", "")
     value = float(primary.get("value", 0.0) or 0.0)
     entity = primary.get("entity")
+    escalation_rule = payload.get("escalation_rule")
 
     if correlation_found:
         path = "correlation"
@@ -247,6 +262,7 @@ def build_signature(payload: dict[str, Any]) -> Signature:
         state_key=state_key,
         involved_domains=involved,
         ungateable=ungateable,
+        escalation_rule=escalation_rule,
     )
 
 
@@ -274,7 +290,7 @@ class Gate:
 
         Order is load-bearing: the first arm to suppress wins, so the documented
         precedence (central_tolerance → refractory → novelty → habituation →
-        reservoir → credibility) is encoded here.  Later tasks append arms 3–6.
+        reservoir → credibility) is encoded here.
         """
         return [
             Gate._arm_central_tolerance,
@@ -282,6 +298,7 @@ class Gate:
             Gate._arm_novelty_prediction_error,
             Gate._arm_habituation,
             Gate._arm_coincidence_evidence_reservoir,
+            Gate._arm_signaller_credibility,
         ]
 
     def evaluate(
@@ -356,6 +373,7 @@ class Gate:
             "advice_rate": pm.load_advice_rate(),
             "emissions": pm.load_emissions(),
             "observed": pm.load_observed(signature.state_key),
+            "credibility": pm.load_credibility(_credibility_class(signature)),
         }
 
     # ── Arms (spec §5) ── pure: read the snapshot only, no clock/Redis/rng side
@@ -649,4 +667,101 @@ class Gate:
             "single_channel_insufficient",
             deciding_arm="coincidence_evidence_reservoir",
             metrics={"count": effective, "on": on, "off": off},
+        )
+
+    def _arm_signaller_credibility(
+        self,
+        sig: Signature,
+        state: dict[str, Any],
+        config: Any,
+        now: float,
+        rng: random.Random,
+    ) -> GateDecision | None:
+        """Arm 6 — cry-wolf + Friston precision (spec §5 Arm 6 + §10).
+
+        Per signal-class (``escalation_rule`` for correlated, else
+        ``f"{domain}:{severity}"``) an offline EWMA ``credibility ∈ [0, 1]``
+        derived from reliability-weighted feedback.  An unseen class sits at the
+        prior ``CRED_MID`` (so ``P(suppress)`` is 0 — a new class never
+        suppresses).  Two read-time transforms before the suppression draw:
+
+        * **decay-toward-prior** — a class with no recent feedback is pulled back
+          toward the prior, ``cred_eff = prior + (cred - prior) *
+          exp(-DECAY_ALPHA * (now - last_fb_ts))``; this self-heals a
+          frozen-suppressed class (its credibility relaxes to neutral over time).
+        * **reliability-weighted fusion (§10)** — a stored ``behavioral_score``
+          is fused in **explicit-dominant**
+          (``(EXPLICIT_WEIGHT*cred_eff + BEHAVIORAL_WEIGHT*behavioral_score) /
+          (EXPLICIT_WEIGHT + BEHAVIORAL_WEIGHT)``) **only** when it is
+          ``behavioral_finalized``, has ``>= BEHAVIORAL_MIN_SAMPLES`` genuine
+          responses, and clears the deadband (``|behavioral_score - 0.5| >
+          BEHAVIORAL_DEADBAND``); otherwise the behavioral signal is quarantined.
+
+        ``P(suppress) = clamp((CRED_MID - credibility) / CRED_MID, 0,
+        CRED_MAX_P)``; a positive seeded-``rng`` draw (``rng.random() < p``) →
+        ``SUPPRESS("low_credibility_class", {credibility, p})``.  A suppression
+        that the behavioral fusion drove is **bet-hedge-eligible** — it carries
+        ``mrt_eligible=True`` + ``p_withhold=p`` so Arm 8 can later flip it as the
+        measured MRT intervention (spec §5 Arm 8 / §9).  (High never reaches this
+        arm — the HIGH bypass in ``evaluate`` skips it, so a standalone high with
+        low credibility still fires.)
+        """
+        if not config.gate_credibility_enabled:
+            return None
+
+        prior = config.gate_cred_mid
+        entry = state.get("credibility") or {}
+        if not entry:
+            return None  # unseen class → prior → P(suppress)=0 → never suppress
+
+        cred = float(entry.get("cred", prior) or prior)
+
+        # Decay toward the prior with elapsed time since the last feedback —
+        # a stale (no recent feedback) class relaxes to neutral and self-heals.
+        # (A stored last_fb_ts of 0.0 is a real timestamp, not "missing", so do
+        # NOT collapse it with `or now`.)
+        last_fb_ts_raw = entry.get("last_fb_ts")
+        last_fb_ts = float(last_fb_ts_raw if last_fb_ts_raw is not None else now)
+        dt = max(0.0, now - last_fb_ts)
+        cred_eff = prior + (cred - prior) * math.exp(
+            -config.gate_credibility_decay_alpha * dt
+        )
+
+        # Reliability-weighted fusion (§10): explicit dominant; behavioral only
+        # when finalized, above the deadband, and with enough genuine samples.
+        behavioral_driven = False
+        credibility = cred_eff
+        if entry.get("behavioral_finalized"):
+            # A stored behavioral_score of 0.0 is a real (maximally-negative)
+            # score, not "missing" — fall back to 0.5 only when truly absent.
+            bs_raw = entry.get("behavioral_score")
+            behavioral_score = float(bs_raw if bs_raw is not None else 0.5)
+            behavioral_samples = int(entry.get("behavioral_samples", 0) or 0)
+            if (
+                behavioral_samples >= config.gate_behavioral_min_samples
+                and abs(behavioral_score - 0.5) > config.gate_behavioral_deadband
+            ):
+                ew = config.gate_explicit_weight
+                bw = config.gate_behavioral_weight
+                credibility = (ew * cred_eff + bw * behavioral_score) / (ew + bw)
+                behavioral_driven = True
+
+        mid = config.gate_cred_mid
+        p = max(0.0, min((mid - credibility) / mid, config.gate_cred_max_p))
+        if p <= 0.0 or rng.random() >= p:
+            return None
+
+        if behavioral_driven:
+            # Behavioral-driven suppression → MRT/bet-hedge-eligible (spec §5/§9).
+            return GateDecision.suppress(
+                "low_credibility_class",
+                deciding_arm="signaller_credibility",
+                metrics={"credibility": credibility, "p": p},
+                mrt_eligible=True,
+                p_withhold=p,
+            )
+        return GateDecision.suppress(
+            "low_credibility_class",
+            deciding_arm="signaller_credibility",
+            metrics={"credibility": credibility, "p": p},
         )

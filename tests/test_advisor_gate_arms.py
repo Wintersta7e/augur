@@ -8,6 +8,8 @@ exercised together (spec §5).
 
 from __future__ import annotations
 
+import pytest
+
 from reasoning.advisor_gate import Gate, build_signature
 from tests.conftest import SINGLE_HIGH_TYPING, SINGLE_MEDIUM_TYPING
 
@@ -504,3 +506,302 @@ def test_reservoir_disabled_passes(fake_pm):
     g = Gate()
     d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
     assert d.action == "fire"
+
+
+# ── Arm 6: signaller_credibility (spec §5 Arm 6 + §10) ───────────────────────
+#
+# Cry-wolf + Friston precision.  Per signal-class (escalation_rule for
+# correlated, else domain:severity) EWMA credibility ∈ [0,1] from reliability-
+# weighted feedback.  Decays toward the prior (CRED_MID) when a class has no
+# recent feedback.  P(suppress) = clamp((CRED_MID - credibility)/CRED_MID, 0,
+# CRED_MAX_P); a positive seeded-rng draw → SUPPRESS("low_credibility_class").
+# Reliability-weighted fusion (§10): EXPLICIT dominant; behavioral applied only
+# when |behavioral_score - 0.5| > deadband AND behavioral_finalized AND
+# behavioral_samples >= min_samples.  A behavioral-driven suppression is
+# bet-hedge-eligible (mrt_eligible=True, p_withhold set).  Disabled by the
+# HIGH bypass for a standalone high.
+
+
+class _SeqRandom:
+    """A deterministic rng stub returning queued .random() values in order."""
+
+    def __init__(self, values):
+        self._values = list(values)
+
+    def random(self):
+        return self._values.pop(0)
+
+
+def _seed_credibility(fake_pm, signal_class, **entry):
+    """Persist a credibility entry for *signal_class* (cred/n/last_fb_ts/...)."""
+    fake_pm.save_credibility(signal_class, entry)
+
+
+def _cred_cfg():
+    """A config that disables the upstream reservoir arm so credibility decides.
+
+    Arms 1–4 pass naturally on an unseeded channel; the reservoir arm (Arm 5)
+    would otherwise hold a fresh single+medium before the credibility arm (Arm 6)
+    is reached.  Disabling it isolates Arm 6 under the real evaluate pipeline.
+    """
+    from blackboard.config import AugurConfig
+
+    return AugurConfig(gate_reservoir_enabled=False)
+
+
+def test_credibility_class_for_single_is_domain_severity(fake_pm):
+    """A single event's credibility class is f'{domain}:{severity}'."""
+    cfg = _cred_cfg()
+    # Low credibility on the single class → high P(suppress); rng draw below p.
+    _seed_credibility(fake_pm, "typing:medium", cred=0.1, n=20, last_fb_ts=1.0)
+    g = Gate()
+    # cred_eff=0.1 (no decay at dt=0); p = (0.5-0.1)/0.5 = 0.8 (== CRED_MAX_P).
+    rng = _SeqRandom([0.0])  # 0.0 < 0.8 → suppress
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0, rng=rng)
+    assert d.action == "suppress"
+    assert d.reason == "low_credibility_class"
+    assert d.deciding_arm == "signaller_credibility"
+    assert d.metrics["credibility"] == pytest.approx(0.1)
+    assert d.metrics["p"] == pytest.approx(0.8)
+
+
+def test_credibility_rng_above_p_passes(fake_pm):
+    """A draw at/above P(suppress) does not suppress (probabilistic)."""
+    cfg = _cred_cfg()
+    _seed_credibility(fake_pm, "typing:medium", cred=0.1, n=20, last_fb_ts=1.0)
+    g = Gate()
+    rng = _SeqRandom([0.9])  # 0.9 >= 0.8 → credibility arm passes
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0, rng=rng)
+    assert d.deciding_arm != "signaller_credibility"
+
+
+def test_credibility_unseen_class_passes(fake_pm):
+    """An unseen class sits at the prior (CRED_MID) → P=0 → never suppresses."""
+    cfg = _cred_cfg()
+    g = Gate()
+    rng = _SeqRandom([0.0])  # even a 0.0 draw cannot beat p=0
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0, rng=rng)
+    assert d.deciding_arm != "signaller_credibility"
+
+
+def test_credibility_decays_toward_prior_for_stale_class(fake_pm):
+    """A stale low-credibility class decays toward the prior → P drops → pass.
+
+    Fresh (dt=0): cred_eff=0.1 → p=0.8 → a 0.5 draw suppresses.  Stale (a long
+    gap since last_fb_ts) self-heals: cred_eff is pulled toward CRED_MID, so the
+    SAME 0.5 draw no longer beats the (now lower) p.
+    """
+    cfg = _cred_cfg()
+    _seed_credibility(fake_pm, "typing:medium", cred=0.1, n=20, last_fb_ts=0.0)
+    g = Gate()
+
+    # Fresh: dt=0 → no decay → p=0.8; a 0.5 draw suppresses.
+    fresh = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=0.0,
+        rng=_SeqRandom([0.5]),
+    )
+    assert fresh.action == "suppress"
+    assert fresh.reason == "low_credibility_class"
+
+    # Stale: a long quiet gap pulls cred_eff toward the prior so p < 0.5 and the
+    # SAME 0.5 draw no longer suppresses (the class self-heals).
+    stale = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=10_000.0,
+        rng=_SeqRandom([0.5]),
+    )
+    assert stale.deciding_arm != "signaller_credibility"
+    assert stale.metrics.get("credibility", 0.5) > 0.1  # decayed toward prior
+
+
+def test_credibility_class_for_correlation_uses_escalation_rule(fake_pm):
+    """A correlation's credibility class keys off escalation_rule."""
+    cfg = _cred_cfg()
+    corr = {
+        "combined_severity": "MEDIUM",
+        "correlation_found": True,
+        "involved_domains": ["typing", "chess"],
+        "escalation_rule": "typing+chess->med",
+        "primary_anomaly": {
+            "domain": "typing",
+            "entity": "user",
+            "value": 2.5,
+            "severity": "medium",
+        },
+    }
+    _seed_credibility(fake_pm, "typing+chess->med", cred=0.1, n=20, last_fb_ts=1.0)
+    g = Gate()
+    d = g.evaluate(build_signature(corr), fake_pm, cfg, now=1.0, rng=_SeqRandom([0.0]))
+    assert d.action == "suppress"
+    assert d.reason == "low_credibility_class"
+    assert d.deciding_arm == "signaller_credibility"
+
+
+def test_credibility_behavioral_fusion_applies_when_eligible(fake_pm):
+    """Fusion: a finalized below-deadband-clearing behavioral score lowers cred.
+
+    Explicit cred=0.5 (the prior → p would be 0 → never suppress on explicit
+    alone).  A behavioral_score of 0.0 (|0-0.5|=0.5 > deadband 0.15), finalized,
+    with >= min_samples, fuses in (explicit-dominant) to pull effective
+    credibility below the prior → P>0 → a low draw suppresses, and because the
+    suppression is behavioral-driven it is bet-hedge-eligible (mrt_eligible).
+    """
+    cfg = _cred_cfg()
+    _seed_credibility(
+        fake_pm,
+        "typing:medium",
+        cred=0.5,
+        n=20,
+        last_fb_ts=1.0,
+        behavioral_score=0.0,
+        behavioral_samples=10,
+        behavioral_finalized=True,
+    )
+    g = Gate()
+    # fused = (1.0*0.5 + 0.2*0.0)/(1.0+0.2) = 0.5/1.2 = 0.41666...
+    # p = (0.5 - 0.41666...)/0.5 = 0.16666...
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.05]),
+    )
+    assert d.action == "suppress"
+    assert d.reason == "low_credibility_class"
+    assert d.mrt_eligible is True
+    assert d.p_withhold == d.metrics["p"]
+    assert d.metrics["credibility"] < 0.5  # behavioral pulled it below the prior
+
+
+def test_credibility_behavioral_ignored_when_unfinalized(fake_pm):
+    """Fusion is gated on behavioral_finalized — an unfinalized score is ignored."""
+    cfg = _cred_cfg()
+    _seed_credibility(
+        fake_pm,
+        "typing:medium",
+        cred=0.5,
+        n=20,
+        last_fb_ts=1.0,
+        behavioral_score=0.0,
+        behavioral_samples=10,
+        behavioral_finalized=False,  # not finalized → behavioral excluded
+    )
+    g = Gate()
+    # Explicit alone sits at the prior → p=0 → no suppression even on a 0.0 draw.
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.0]),
+    )
+    assert d.deciding_arm != "signaller_credibility"
+
+
+def test_credibility_behavioral_ignored_inside_deadband(fake_pm):
+    """A behavioral score within the deadband of 0.5 is treated as no signal."""
+    cfg = _cred_cfg()
+    _seed_credibility(
+        fake_pm,
+        "typing:medium",
+        cred=0.5,
+        n=20,
+        last_fb_ts=1.0,
+        behavioral_score=0.45,  # |0.45-0.5|=0.05 <= deadband 0.15 → ignored
+        behavioral_samples=10,
+        behavioral_finalized=True,
+    )
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.0]),
+    )
+    assert d.deciding_arm != "signaller_credibility"
+
+
+def test_credibility_behavioral_ignored_below_min_samples(fake_pm):
+    """Fusion requires >= BEHAVIORAL_MIN_SAMPLES genuine responses."""
+    cfg = _cred_cfg()
+    _seed_credibility(
+        fake_pm,
+        "typing:medium",
+        cred=0.5,
+        n=20,
+        last_fb_ts=1.0,
+        behavioral_score=0.0,
+        behavioral_samples=2,  # < min_samples (5) → behavioral excluded
+        behavioral_finalized=True,
+    )
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.0]),
+    )
+    assert d.deciding_arm != "signaller_credibility"
+
+
+def test_credibility_explicit_only_suppress_not_bet_hedge_eligible(fake_pm):
+    """A purely explicit-driven low-credibility suppress is NOT bet-hedge-eligible."""
+    cfg = _cred_cfg()
+    _seed_credibility(fake_pm, "typing:medium", cred=0.1, n=20, last_fb_ts=1.0)
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.0]),
+    )
+    assert d.action == "suppress"
+    assert d.mrt_eligible is False
+    assert d.p_withhold is None
+
+
+def test_credibility_high_bypasses_low_credibility_class(fake_pm, cfg):
+    """HARD (spec §11 HIGH-punch-through): a standalone HIGH with LOW credibility FIRES.
+
+    The high's severity-omitted class (typing:high) is at rock-bottom credibility
+    so it WOULD suppress with P=CRED_MAX_P.  The HIGH bypass skips the credibility
+    arm for a non-exempt standalone high → it must fire regardless of the draw,
+    completing the HIGH-punch-through gate across h / self-tolerance / credibility.
+    """
+    _seed_credibility(fake_pm, "typing:high", cred=0.0, n=50, last_fb_ts=1.0)
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_high_typing(4.5)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.0]),  # would suppress if the arm ran
+    )
+    assert d.action == "fire"
+    assert d.reason != "low_credibility_class"
+
+
+def test_credibility_disabled_passes(fake_pm):
+    """When gate_credibility_enabled is False, the arm never suppresses."""
+    from blackboard.config import AugurConfig
+
+    cfg = AugurConfig(gate_credibility_enabled=False)
+    _seed_credibility(fake_pm, "typing:medium", cred=0.0, n=50, last_fb_ts=1.0)
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.0]),
+    )
+    assert d.deciding_arm != "signaller_credibility"

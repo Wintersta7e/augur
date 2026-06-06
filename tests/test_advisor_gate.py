@@ -12,6 +12,7 @@ import dataclasses
 import pytest
 
 from reasoning.advisor_gate import GateDecision, build_signature
+from tests.conftest import SINGLE_MEDIUM
 
 
 # ── build_signature (spec §5) ────────────────────────────────────────────────
@@ -181,6 +182,30 @@ def test_build_signature_is_deterministic() -> None:
     assert build_signature(p) == build_signature(p)
 
 
+def test_signature_carries_escalation_rule_for_correlation() -> None:
+    """The credibility class for a correlation keys off escalation_rule (spec §5)."""
+    p = {
+        "combined_severity": "MEDIUM",
+        "correlation_found": True,
+        "involved_domains": ["typing", "chess"],
+        "escalation_rule": "typing+chess->high",
+        "primary_anomaly": {
+            "domain": "typing",
+            "entity": "user",
+            "value": 2.5,
+            "severity": "medium",
+        },
+    }
+    s = build_signature(p)
+    assert s.escalation_rule == "typing+chess->high"
+
+
+def test_signature_escalation_rule_none_for_single() -> None:
+    """A single event has no escalation_rule (the class falls back to domain:severity)."""
+    s = build_signature(SINGLE_MEDIUM)
+    assert s.escalation_rule is None
+
+
 # ── GateDecision constructors (spec §4) ──────────────────────────────────────
 
 
@@ -253,7 +278,6 @@ def test_as_fire_resets_suppress_specific_fields() -> None:
 
 from tests.conftest import (  # noqa: E402
     EXEMPT_PAYLOAD,
-    SINGLE_MEDIUM,
     SINGLE_MEDIUM_NEWKEY_THAT_WOULD_SUPPRESS,
 )
 

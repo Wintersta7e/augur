@@ -306,7 +306,14 @@ def test_exempt_does_no_state_reads(fake_pm, cfg) -> None:
 def test_no_arms_passes_all(fake_pm, cfg) -> None:
     from reasoning.advisor_gate import Gate
 
-    g = Gate()  # default arm pipeline; this medium trips no suppressor
+    # A medium that trips no suppressor reaches the terminal passed_all_arms
+    # fire.  The reservoir arm (Arm 5) holds a fresh single+medium until it has
+    # accumulated evidence, so latch this channel committed (suppressing=False,
+    # leaked count above OFF) to clear it — all other arms see unseen state.
+    fake_pm.save_reservoir(
+        "single:chess:user", {"count": 2.0, "last_ts": 100.0, "suppressing": False}
+    )
+    g = Gate()  # default arm pipeline
     s = build_signature(SINGLE_MEDIUM)
     d = g.evaluate(s, fake_pm, cfg, now=100.0)
     assert d.action == "fire"

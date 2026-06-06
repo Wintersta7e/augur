@@ -281,6 +281,7 @@ class Gate:
             Gate._arm_refractory_burden,
             Gate._arm_novelty_prediction_error,
             Gate._arm_habituation,
+            Gate._arm_coincidence_evidence_reservoir,
         ]
 
     def evaluate(
@@ -577,3 +578,75 @@ class Gate:
                 },
             )
         return None
+
+    def _arm_coincidence_evidence_reservoir(
+        self,
+        sig: Signature,
+        state: dict[str, Any],
+        config: Any,
+        now: float,
+        rng: random.Random,  # noqa: ARG002 — uniform arm signature; deterministic arm
+    ) -> GateDecision | None:
+        """Arm 5 — quorum sensing + immune two-signal (spec §5).
+
+        Meters **only** ``single`` + ``medium`` events.  A second signal makes
+        the evidence sufficient on its own, so it short-circuits to PASS:
+        ``severity == "high"`` OR ``correlation_found`` (a standalone high also
+        never reaches this arm via the HIGH bypass in ``evaluate``).
+
+        Otherwise a per-``state_key`` decaying event count accumulates (+1 per
+        qualifying event, leaking by ``exp(-dt / RESERVOIR_LEAK_TAU_S)``); the
+        event being evaluated reads the current count + its own prospective +1
+        (``effective``).  A **Schmitt-trigger** with hysteresis avoids flapping:
+
+        * a suppressing channel commits (PASS) only when
+          ``effective >= RESERVOIR_ON_COUNT``;
+        * a committed channel (``suppressing == False``) re-suppresses only when
+          its leaked count falls **below** ``RESERVOIR_OFF_COUNT``.
+
+        Below ON (and not held committed by hysteresis) →
+        ``SUPPRESS("single_channel_insufficient", {count, on, off})``.  The count
+        itself advances in ``record_suppression``/``record_delivery_success``;
+        this arm only reads the snapshot.
+        """
+        if not config.gate_reservoir_enabled:
+            return None
+
+        # Two-signal short-circuit: a second independent signal (high or a
+        # correlation) is sufficient evidence on its own → never metered.
+        if sig.severity == "high" or sig.correlation_found:
+            return None
+
+        # Only single+medium is metered (high handled above; correlation keys
+        # off a different state_key and is short-circuited above).
+        if sig.path != "single":
+            return None
+
+        res = state.get("reservoir") or {}
+        count = float(res.get("count", 0.0) or 0.0)
+        last_ts = float(res.get("last_ts", now) or now)
+        # A brand-new / never-committed channel starts latched suppressing.
+        suppressing = bool(res.get("suppressing", True))
+
+        dt = max(0.0, now - last_ts)
+        leaked = count * math.exp(-dt / config.gate_reservoir_leak_tau_s)
+        effective = leaked + 1.0  # the event reads its own prospective +1
+
+        on = config.gate_reservoir_on_count
+        off = config.gate_reservoir_off_count
+
+        if suppressing:
+            # Latched suppressing: commit (PASS) only on reaching ON.
+            committed = effective >= on
+        else:
+            # Latched committed: re-suppress only once leaked count drops below OFF.
+            committed = leaked >= off
+
+        if committed:
+            return None
+
+        return GateDecision.suppress(
+            "single_channel_insufficient",
+            deciding_arm="coincidence_evidence_reservoir",
+            metrics={"count": effective, "on": on, "off": off},
+        )

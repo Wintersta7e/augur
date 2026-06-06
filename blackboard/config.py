@@ -195,6 +195,10 @@ class AugurConfig:
                 f"gate_behavioral_weight={self.gate_behavioral_weight} must be in "
                 f"[0, gate_explicit_weight={self.gate_explicit_weight}]"
             )
+        if self.gate_tier1_mode not in {"note", "silent"}:
+            raise ValueError(
+                f"gate_tier1_mode={self.gate_tier1_mode!r} must be 'note' or 'silent'"
+            )
 
     # ── Constructors ───────────────────────────────────────────────────────
 

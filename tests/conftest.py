@@ -104,6 +104,7 @@ _WRITE_CMDS = frozenset(
         "hsetnx",
         "lpush",
         "rpush",
+        "lpop",  # used by PersistenceManager (save_prompt_history trim pattern)
         "sadd",
         "srem",
         "ltrim",
@@ -112,8 +113,23 @@ _WRITE_CMDS = frozenset(
     ]
 )
 _READ_CMDS = frozenset(
-    ["get", "hget", "hgetall", "hlen", "hexists", "lrange", "smembers", "sismember"]
+    [
+        "get",
+        "hget",
+        "hgetall",
+        "hlen",
+        "hexists",
+        "lrange",
+        "smembers",
+        "sismember",
+        "exists",  # used by PersistenceManager (is_tuning_applied and similar)
+    ]
 )
+# Note: pipeline/MULTI-EXEC is not intercepted here because execute_command is
+# not called per-command inside a pipeline; the whole batch runs as a single
+# network round-trip.  Gate-test invariants relying on write_calls==0 must not
+# use pipeline writes.  Pipelined writes in record_delivery_success /
+# record_suppression are tested via direct method coverage, not the counter.
 
 
 class _CountingFakeRedis(fakeredis.FakeStrictRedis):
@@ -262,5 +278,11 @@ def fake_pm_at_cap(monkeypatch: pytest.MonkeyPatch) -> _InstrumentedPM:
     for i in range(_CAP):
         key = f"single:chess:user{i}"
         pm._r.hset("augur:gate:channel_stats", key, json.dumps({"seen": i + 1}))
+
+    # The hset calls above go through execute_command and increment write_calls.
+    # Reset to 0 so gate tests that assert "evaluate() is read-only
+    # (write_calls == 0)" start from a clean baseline.
+    pm._redis.write_calls = 0
+    pm._redis.read_calls = 0
 
     return pm

@@ -1,4 +1,7 @@
+import logging
+
 import pytest
+
 from blackboard.config import AugurConfig
 
 
@@ -17,10 +20,25 @@ def test_gate_tier1_mode_env_override(monkeypatch):
 
 
 def test_gate_tier1_mode_garbage_falls_back(monkeypatch, caplog):
+    """Invalid env value is rejected by the coercion function, triggering a
+    WARNING from augur.config and leaving the field at its default "note"."""
     monkeypatch.setenv("AUGUR_GATE_TIER1_MODE", "garbage")
-    assert (
-        AugurConfig.from_env().gate_tier1_mode == "note"
-    )  # invalid → default + warning
+    with caplog.at_level(logging.WARNING, logger="augur.config"):
+        result = AugurConfig.from_env()
+    assert result.gate_tier1_mode == "note"
+    assert any(
+        "AUGUR_GATE_TIER1_MODE" in r.message and r.levelno == logging.WARNING
+        for r in caplog.records
+    ), (
+        "Expected a WARNING from augur.config about the invalid AUGUR_GATE_TIER1_MODE value"
+    )
+
+
+def test_gate_tier1_mode_invalid_direct_construction():
+    """Direct construction with an invalid mode raises ValueError immediately,
+    consistent with all other validated fields in __post_init__."""
+    with pytest.raises(ValueError, match="gate_tier1_mode"):
+        AugurConfig(gate_tier1_mode="garbage")
 
 
 def test_behavioral_weight_bound_validated():

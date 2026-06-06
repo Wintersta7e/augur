@@ -306,7 +306,7 @@ def test_exempt_does_no_state_reads(fake_pm, cfg) -> None:
 def test_no_arms_passes_all(fake_pm, cfg) -> None:
     from reasoning.advisor_gate import Gate
 
-    g = Gate()  # default empty arm pipeline
+    g = Gate()  # default arm pipeline; this medium trips no suppressor
     s = build_signature(SINGLE_MEDIUM)
     d = g.evaluate(s, fake_pm, cfg, now=100.0)
     assert d.action == "fire"

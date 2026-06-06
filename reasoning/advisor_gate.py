@@ -30,6 +30,20 @@ _EPS = 1e-6
 # would-suppress on it fails open to FIRE (cap_fail_open, invariant D / spec §6).
 _CHANNEL_STATS_KEY = "augur:gate:channel_stats"
 
+# Arms a non-exempt HIGH skips — the learned/recurrence suppressors (spec §5
+# "Non-exempt severity==\"high\" bypass").  A standalone high punches through
+# central_tolerance/novelty/habituation/reservoir/credibility by construction;
+# it remains subject to refractory_burden, cost_tier, and anti_starvation.
+_HIGH_BYPASSED_ARMS = frozenset(
+    {
+        "central_tolerance",
+        "novelty_prediction_error",
+        "habituation",
+        "coincidence_evidence_reservoir",
+        "signaller_credibility",
+    }
+)
+
 # An arm is a pure callable over the loaded snapshot returning a SUPPRESS/
 # DOWNGRADE/FIRE GateDecision, or None to pass. Real arms (Phase 4+) are private
 # methods bound into this list; the list is injectable so the skeleton + each arm
@@ -177,6 +191,16 @@ def _norm(severity: Any) -> str:
     return str(severity or "").lower()
 
 
+def _arm_name(arm: Arm) -> str:
+    """Derive an arm's pipeline name from its ``_arm_<name>`` method name.
+
+    Used by ``evaluate`` to apply the HIGH bypass (which skips named learned/
+    recurrence arms) without coupling the loop to the concrete method objects.
+    """
+    name = getattr(arm, "__name__", "")
+    return name[len("_arm_") :] if name.startswith("_arm_") else name
+
+
 def build_signature(payload: dict[str, Any]) -> Signature:
     """Build the deterministic gate :class:`Signature` for an anomaly payload.
 
@@ -242,7 +266,16 @@ class Gate:
     """
 
     def __init__(self, arms: list[Arm] | None = None) -> None:
-        self.arms: list[Arm] = arms if arms is not None else []
+        self.arms: list[Arm] = arms if arms is not None else self._default_arms()
+
+    def _default_arms(self) -> list[Arm]:
+        """The arm pipeline in spec §5 order (suppressors, Phase 1).
+
+        Order is load-bearing: the first arm to suppress wins, so the documented
+        precedence (central_tolerance → refractory → novelty → habituation →
+        reservoir → credibility) is encoded here.  Later tasks append arms 2–6.
+        """
+        return [Gate._arm_central_tolerance]
 
     def evaluate(
         self,
@@ -278,7 +311,14 @@ class Gate:
 
         state = self._load_state(pm, signature)
 
+        # A non-exempt standalone HIGH skips the learned/recurrence suppressors
+        # (spec §5 HIGH bypass): it punches through central_tolerance/novelty/
+        # habituation/reservoir/credibility by construction.
+        bypass_learned = signature.severity == "high"
+
         for arm in self.arms:
+            if bypass_learned and _arm_name(arm) in _HIGH_BYPASSED_ARMS:
+                continue
             decision = arm(self, signature, state, config, now, rng)
             if decision is None:
                 continue
@@ -310,3 +350,30 @@ class Gate:
             "emissions": pm.load_emissions(),
             "observed": pm.load_observed(signature.state_key),
         }
+
+    # ── Arms (spec §5) ── pure: read the snapshot only, no clock/Redis/rng side
+    # effects.  ``now``/``rng`` are injected for the arms that need them.
+    def _arm_central_tolerance(
+        self,
+        sig: Signature,
+        state: dict[str, Any],
+        config: Any,  # noqa: ARG002 — uniform arm signature
+        now: float,  # noqa: ARG002 — uniform arm signature
+        rng: random.Random,  # noqa: ARG002 — uniform arm signature
+    ) -> GateDecision | None:
+        """Arm 1 — immune central tolerance (spec §5).
+
+        A non-high event whose ``state_key`` is in the offline-learned
+        ``self_tolerance`` set is a chronic, explicitly-dismissed channel →
+        ``SUPPRESS("central_tolerance_learned_self")``.  (High never reaches
+        this arm — it is skipped by the HIGH bypass in ``evaluate``.)
+        """
+        if sig.severity == "high":
+            return None
+        if not state.get("self_tolerant"):
+            return None
+        return GateDecision.suppress(
+            "central_tolerance_learned_self",
+            deciding_arm="central_tolerance",
+            metrics={"state_key": sig.state_key},
+        )

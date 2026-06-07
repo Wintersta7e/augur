@@ -53,6 +53,10 @@ SUBJECT_ADVICE = "augur.reasoning.advice"
 SUBJECT_PERCEPTION = "augur.perception.>"
 SUBJECT_SESSION_END = "augur.session.end"
 SUBJECT_FEEDBACK_COMPLETE = "augur.feedback.complete"
+# Gate suppression (the MRT withheld/control arm). Only gate-decision
+# suppressions are published here; infra non-deliveries use a separate subject
+# so PendingGateDecision never tracks an infra drop (spec §8).
+SUBJECT_SUPPRESSED = "augur.advisor.suppressed"
 
 EXPLICIT_TIMEOUT_S = 10
 POST_ADVICE_TRACK_MOVES = 3
@@ -87,59 +91,23 @@ def _resolve_primary_domain(advice_data: dict) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-class PendingAdvice:
-    """Tracks one piece of advice waiting for feedback signals."""
+class _BehavioralTracker:
+    """Shared post-decision behavioral-score tracking.
 
-    def __init__(
-        self,
-        advice_id: str,
-        domain: str,
-        entity: str,
-        severity: str,
-        baseline_mean: float,
-        timestamp: str,
-        correlation_found: bool = False,
-        correlated_domains: list[str] | None = None,
-        rule_key: str | None = None,
-        escalation_rule: str | None = None,
-        # NEW Phase 3 polish fields:
-        involved_domains: list[str] | None = None,
-        temporal_lag_seconds: float | None = None,
-        correlation_span_s: float | None = None,
-        rule_window_s: float | None = None,
-        # Advisor-gate MRT fields (spec §9): decision_id joins this fired
-        # decision to its emission/silence/feedback; probe marks a bet-hedge
-        # probe-fire; mrt_eligible/p_fire make the fired arm IPW-weightable.
-        decision_id: str | None = None,
-        probe: bool = False,
-        mrt_eligible: bool = False,
-        p_fire: float | None = None,
-    ) -> None:
-        self.advice_id = advice_id
-        self.domain = domain
-        self.entity = entity
-        self.severity = severity
-        self.baseline_mean = baseline_mean
-        self.timestamp = timestamp
+    Both the fired arm (``PendingAdvice``) and the withheld/control arm
+    (``PendingGateDecision``) track the same post-decision perception values
+    and compute the same behavioral score (spec §9), so the MRT compares the
+    same outcome across arms. Subclasses set ``baseline_mean``; this base owns
+    the move buffer + scoring.
+    """
+
+    baseline_mean: float
+
+    def __init__(self) -> None:
         self.explicit_rating: Literal["y", "n", "no_response"] = "no_response"
         self.think_times_after: list[float] = []
         self.behavioral_score: float = 0.0
         self.finalized = False
-        # Correlation metadata (added for matrix tuning)
-        self.correlation_found = correlation_found
-        self.correlated_domains = correlated_domains or []
-        self.rule_key = rule_key
-        self.escalation_rule = escalation_rule
-        # NEW Phase 3 polish fields
-        self.involved_domains = involved_domains or []
-        self.temporal_lag_seconds = temporal_lag_seconds
-        self.correlation_span_s = correlation_span_s
-        self.rule_window_s = rule_window_s
-        # Advisor-gate MRT fields (spec §9)
-        self.decision_id = decision_id
-        self.probe = probe
-        self.mrt_eligible = mrt_eligible
-        self.p_fire = p_fire
 
     def add_post_move(self, value: float) -> None:
         if len(self.think_times_after) < POST_ADVICE_TRACK_MOVES:
@@ -178,6 +146,58 @@ class PendingAdvice:
         self.behavioral_score = round(sum(scores) / len(scores), 3) if scores else 0.5
         self.finalized = True
 
+
+class PendingAdvice(_BehavioralTracker):
+    """Tracks one piece of advice waiting for feedback signals."""
+
+    def __init__(
+        self,
+        advice_id: str,
+        domain: str,
+        entity: str,
+        severity: str,
+        baseline_mean: float,
+        timestamp: str,
+        correlation_found: bool = False,
+        correlated_domains: list[str] | None = None,
+        rule_key: str | None = None,
+        escalation_rule: str | None = None,
+        # NEW Phase 3 polish fields:
+        involved_domains: list[str] | None = None,
+        temporal_lag_seconds: float | None = None,
+        correlation_span_s: float | None = None,
+        rule_window_s: float | None = None,
+        # Advisor-gate MRT fields (spec §9): decision_id joins this fired
+        # decision to its emission/silence/feedback; probe marks a bet-hedge
+        # probe-fire; mrt_eligible/p_fire make the fired arm IPW-weightable.
+        decision_id: str | None = None,
+        probe: bool = False,
+        mrt_eligible: bool = False,
+        p_fire: float | None = None,
+    ) -> None:
+        super().__init__()
+        self.advice_id = advice_id
+        self.domain = domain
+        self.entity = entity
+        self.severity = severity
+        self.baseline_mean = baseline_mean
+        self.timestamp = timestamp
+        # Correlation metadata (added for matrix tuning)
+        self.correlation_found = correlation_found
+        self.correlated_domains = correlated_domains or []
+        self.rule_key = rule_key
+        self.escalation_rule = escalation_rule
+        # NEW Phase 3 polish fields
+        self.involved_domains = involved_domains or []
+        self.temporal_lag_seconds = temporal_lag_seconds
+        self.correlation_span_s = correlation_span_s
+        self.rule_window_s = rule_window_s
+        # Advisor-gate MRT fields (spec §9)
+        self.decision_id = decision_id
+        self.probe = probe
+        self.mrt_eligible = mrt_eligible
+        self.p_fire = p_fire
+
     def to_record(self) -> dict:
         return {
             "advice_id": self.advice_id,
@@ -206,6 +226,64 @@ class PendingAdvice:
             "mrt_eligible": self.mrt_eligible,
             "p_fire": self.p_fire,
             "behavioral_finalized": self.finalized,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Pending gate-decision tracker (MRT withheld/control arm, spec §9)
+# ---------------------------------------------------------------------------
+
+
+class PendingGateDecision(_BehavioralTracker):
+    """Tracks one gate-withheld decision for the MRT control arm.
+
+    Created only from ``augur.advisor.suppressed`` (gate suppressions). Carries
+    the same post-decision behavioral tracking as ``PendingAdvice`` so the MRT
+    compares the same outcome across the fired and withheld arms, joined by
+    ``decision_id``. Probe-fired decisions get NO ``PendingGateDecision`` (a
+    probe fires real advice → ``on_advice`` already makes a ``PendingAdvice``).
+    """
+
+    def __init__(
+        self,
+        decision_id: str,
+        state_key: str,
+        domain: str,
+        entity: str,
+        severity: str,
+        baseline_mean: float,
+        timestamp: str,
+        mrt_eligible: bool,
+        p_withhold: float | None,
+        reason: str,
+    ) -> None:
+        super().__init__()
+        self.decision_id = decision_id
+        self.state_key = state_key
+        self.domain = domain
+        self.entity = entity
+        self.severity = severity
+        self.baseline_mean = baseline_mean
+        self.timestamp = timestamp
+        self.mrt_eligible = mrt_eligible
+        self.p_withhold = p_withhold
+        self.reason = reason
+
+    def to_record(self) -> dict:
+        return {
+            "decision_id": self.decision_id,
+            "state_key": self.state_key,
+            "domain": self.domain,
+            "entity": self.entity,
+            "severity": self.severity,
+            "mrt_eligible": self.mrt_eligible,
+            "p_withhold": self.p_withhold,
+            "baseline_mean": self.baseline_mean,
+            "behavioral_score": self.behavioral_score,
+            "behavioral_finalized": self.finalized,
+            "explicit_rating": self.explicit_rating,
+            "reason": self.reason,
+            "timestamp": self.timestamp,
         }
 
 
@@ -270,9 +348,13 @@ async def run() -> None:
     # State
     current_session_id: str | None = None
     advice_events: list[PendingAdvice] = []
-    active_tracking: dict[
-        TrackingKey, PendingAdvice
-    ] = {}  # (domain, entity) -> pending advice
+    gate_decision_events: list[PendingGateDecision] = []  # MRT withheld arm
+    # (domain, entity) -> active tracker. Both arms key on the primary
+    # (domain, entity); one tracker per decision_id (spec §9: never two).
+    active_tracking: dict[TrackingKey, PendingAdvice | PendingGateDecision] = {}
+    # decision_ids already tracked (either arm) — dedup so a re-published
+    # augur.advisor.suppressed never creates a second PendingGateDecision.
+    tracked_decision_ids: set[str] = set()
 
     def get_session_id() -> str:
         # Intentionally laxer than blackboard.session.get_active_session:
@@ -304,6 +386,8 @@ async def run() -> None:
             "explicit_positive": explicit_pos,
             "explicit_negative": explicit_neg,
             "avg_behavioral_score": avg_behavioral,
+            # MRT withheld/control arm (spec §9): the summary counts both arms.
+            "total_gate_decisions": len(gate_decision_events),
         }
 
     def save_current_feedback() -> None:
@@ -311,6 +395,8 @@ async def run() -> None:
         record = {
             "session_id": sid,
             "advice_events": [a.to_record() for a in advice_events],
+            # Parallel withheld-arm list so a withheld-only session is not lost.
+            "gate_decision_events": [d.to_record() for d in gate_decision_events],
             "session_summary": build_session_summary(),
         }
         try:
@@ -386,6 +472,11 @@ async def run() -> None:
             p_fire=p_fire,
         )
         advice_events.append(pending)
+        # Mark the decision_id tracked so a re-published augur.advisor.suppressed
+        # for the same decision never also creates a PendingGateDecision (spec
+        # §9: one tracker per decision_id — a probe-fire is tracked here only).
+        if decision_id:
+            tracked_decision_ids.add(decision_id)
 
         # BUG-04: if there is already a pending advice tracked for this
         # entity, finalize its behavioural score before replacing it.
@@ -397,8 +488,7 @@ async def run() -> None:
         if displaced is not None and not displaced.finalized:
             displaced._compute_behavioral_score()
             log.debug(
-                "Finalized displaced pending advice %s before overwriting %s",
-                displaced.advice_id,
+                "Finalized displaced tracker before overwriting %s",
                 tracking_key,
             )
         active_tracking[tracking_key] = pending
@@ -435,6 +525,62 @@ async def run() -> None:
             print(f"\n{GRAY}No response — logged as neutral{RESET}", flush=True)
 
         # Save intermediate feedback
+        save_current_feedback()
+
+    # -- Suppressed handler (MRT withheld/control arm, spec §9) --------------
+    async def on_suppressed(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = json.loads(msg.data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        decision_id = data.get("decision_id")
+        if not decision_id:
+            log.error("on_suppressed: missing decision_id; skipping")
+            return
+        # One tracker per decision_id (spec §9): a re-published suppressed event
+        # (or a probe already tracked by on_advice) must not create a second.
+        if decision_id in tracked_decision_ids:
+            log.debug(
+                "on_suppressed: decision %s already tracked; skipping", decision_id
+            )
+            return
+
+        domain = data.get("domain")
+        entity = data.get("entity")
+        if domain is None or entity is None:
+            log.error("on_suppressed: missing primary domain/entity; skipping")
+            return
+
+        pending = PendingGateDecision(
+            decision_id=decision_id,
+            state_key=data.get("state_key", ""),
+            domain=domain,
+            entity=entity,
+            severity=data.get("severity", "?"),
+            baseline_mean=data.get("baseline_mean", 0.0),
+            timestamp=data.get("timestamp", ""),
+            mrt_eligible=bool(data.get("mrt_eligible", False)),
+            p_withhold=data.get("p_withhold"),
+            reason=data.get("reason", ""),
+        )
+        gate_decision_events.append(pending)
+        tracked_decision_ids.add(decision_id)
+
+        # Same post-decision tracking as the fired arm: register on the primary
+        # (domain, entity), finalizing any displaced tracker first (BUG-04).
+        tracking_key = TrackingKey(domain, entity)
+        displaced = active_tracking.get(tracking_key)
+        if displaced is not None and not displaced.finalized:
+            displaced._compute_behavioral_score()
+        active_tracking[tracking_key] = pending
+
+        log.info(
+            "Gate suppressed %s (%s/%s) — tracking withheld arm",
+            decision_id,
+            domain,
+            entity,
+        )
         save_current_feedback()
 
     # -- Perception handler (post-advice move tracking) ----------------------
@@ -474,8 +620,12 @@ async def run() -> None:
 
     # -- Session end handler -------------------------------------------------
     async def on_session_end(msg: nats.aio.client.Msg) -> None:
-        if not advice_events:
-            log.info("Session ended with no advice events — nothing to finalize")
+        # A withheld-only session (gate decisions but no advice) must NOT be
+        # dropped — its gate_decision_events carry the MRT control arm (spec §9).
+        if not advice_events and not gate_decision_events:
+            log.info(
+                "Session ended with no advice or gate decisions — nothing to finalize"
+            )
             return
 
         # Force-finalize any pending tracking
@@ -488,9 +638,10 @@ async def run() -> None:
         summary = build_session_summary()
 
         log.info(
-            "Session finalized: %d advice, %d positive, %d negative, "
+            "Session finalized: %d advice, %d withheld, %d positive, %d negative, "
             "avg behavioral=%.3f",
             summary["total_advice"],
+            summary["total_gate_decisions"],
             summary["explicit_positive"],
             summary["explicit_negative"],
             summary["avg_behavioral_score"],
@@ -521,12 +672,14 @@ async def run() -> None:
     sub_advice = await nc.subscribe(SUBJECT_ADVICE, cb=on_advice)
     sub_perception = await nc.subscribe(SUBJECT_PERCEPTION, cb=on_perception)
     sub_session_end = await nc.subscribe(SUBJECT_SESSION_END, cb=on_session_end)
+    sub_suppressed = await nc.subscribe(SUBJECT_SUPPRESSED, cb=on_suppressed)
 
     log.info(
-        "Subscribed to: %s, %s, %s",
+        "Subscribed to: %s, %s, %s, %s",
         SUBJECT_ADVICE,
         SUBJECT_PERCEPTION,
         SUBJECT_SESSION_END,
+        SUBJECT_SUPPRESSED,
     )
     log.info("Waiting for advice events...")
 
@@ -540,6 +693,7 @@ async def run() -> None:
             await sub_advice.unsubscribe()
             await sub_perception.unsubscribe()
             await sub_session_end.unsubscribe()
+            await sub_suppressed.unsubscribe()
         except Exception as exc:
             log.debug("Unsubscribe failed during shutdown: %s", exc)
         await nc.close()

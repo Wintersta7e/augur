@@ -59,6 +59,22 @@ SUBJECT_REFLECT_COMPLETE = "augur.reflect.complete"
 # typing-only sessions.
 DEFAULT_DOMAIN = "chess"
 
+# ---------------------------------------------------------------------------
+# Gate offline-pass tuning constants (spec §9)
+# ---------------------------------------------------------------------------
+# Self-tolerance membership requires BOTH chronic presence (the channel has
+# been advised on repeatedly across the de-duped feedback) AND explicit
+# dismissal corroboration — never behavioral evidence alone.  Exempt-shaped
+# channels (correlated HIGH) are excluded outright.
+GATE_CHRONIC_MIN_PRESENCE = 5  # min advice events on a channel to be "chronic"
+GATE_DISMISSAL_MIN = 3  # min explicit "n" dismissals to corroborate
+# How far each session may move the per-channel habituation floor / the global
+# advice-rate operating point — small, conservative steps so a single noisy
+# session never swings the gate (mirrors the EWMA alphas in config).
+GATE_FLOOR_STEP = 0.05
+GATE_FLOOR_MAX = 0.6
+GATE_ADVICE_RATE_ALPHA = 0.1
+
 
 def _attribution_weights(event: dict) -> dict[str, float]:
     """Return {domain: weight} per advice event.
@@ -754,6 +770,346 @@ Return ONLY the new prompt text, nothing else."""
 
 
 # ---------------------------------------------------------------------------
+# Gate offline pass (spec §9 — the SIXTH reflection analysis)
+# ---------------------------------------------------------------------------
+
+
+def reconstruct_state_key(row: dict) -> str:
+    """Deterministically rebuild a gate ``state_key`` from a feedback row.
+
+    A ``gate_decision_event`` already carries an authoritative ``state_key``
+    (use it verbatim).  Otherwise (an ``advice_event``) rebuild it the same way
+    the gate's ``build_signature`` does: a correlated event keys on its
+    sorted ``involved_domains`` (``correlation:{a,b,...}``); a single event keys
+    on ``single:{domain}:{entity}``.  Severity is intentionally omitted — it is
+    omitted from the gate ``state_key`` too (advisor_gate.py).
+    """
+    sk = row.get("state_key")
+    if sk:
+        return sk
+    if row.get("correlation_found") and row.get("involved_domains"):
+        joined = ",".join(sorted(row["involved_domains"]))
+        return f"correlation:{joined}"
+    return f"single:{row.get('domain', 'unknown')}:{row.get('entity', 'unknown')}"
+
+
+def _is_exempt_shaped(row: dict) -> bool:
+    """True if the row's channel is exempt-shaped (correlated HIGH).
+
+    Exempt signatures always FIRE (audit-only), so they must never be added to
+    the self-tolerance set (spec §5 Arm 1, §9).
+    """
+    return bool(row.get("correlation_found")) and row.get("severity") == "high"
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    """Pearson correlation of two equal-length lists, or None if undefined.
+
+    Undefined (returns None) when there are fewer than 2 points or either
+    series has zero variance.
+    """
+    n = len(xs)
+    if n < 2:
+        return None
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    if sxx <= 0.0 or syy <= 0.0:
+        return None
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    return round(sxy / math.sqrt(sxx * syy), 4)
+
+
+def _dedupe_feedback_by_session(rows: list[dict]) -> list[dict]:
+    """De-dupe ``get_all_feedback`` rows by ``session_id`` (spec §9).
+
+    The feedback index LPUSHes the same ``session_id`` on every intermediate
+    save (persistence.py), so the cross-session list can contain duplicates.
+    The index is newest-first, so the FIRST occurrence of each id is the most
+    recent (final) saved state — keep it, drop the rest.
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for row in rows:
+        sid = row.get("session_id")
+        if sid in seen:
+            continue
+        seen.add(sid)
+        out.append(row)
+    return out
+
+
+def _behavioral_audit(advice_rows: list[dict], config: AugurConfig) -> dict[str, Any]:
+    """Reliability audit of ``behavioral_score`` vs explicit rating (spec §10).
+
+    Computed ONLY over rows with a genuine explicit ``y``/``n`` AND
+    ``behavioral_finalized`` (a no_response or an unfinalized 0.0 would
+    attenuate the correlation).  Requires ``gate_behavioral_min_samples``
+    genuine responses before the weight may be adjusted, and reports the
+    genuine-response rate so a low rate flags weak evidence.
+    """
+    total = len(advice_rows)
+    genuine = [
+        r
+        for r in advice_rows
+        if r.get("explicit_rating") in ("y", "n") and r.get("behavioral_finalized")
+    ]
+    explicit_vals = [1.0 if r["explicit_rating"] == "y" else 0.0 for r in genuine]
+    behavioral_vals = [float(r.get("behavioral_score", 0.0) or 0.0) for r in genuine]
+    n = len(genuine)
+    sufficient = n >= config.gate_behavioral_min_samples
+    correlation = _pearson(behavioral_vals, explicit_vals) if sufficient else None
+    return {
+        "genuine_samples": n,
+        "genuine_response_rate": round(total and n / total or 0.0, 4),
+        "sufficient": sufficient,
+        "correlation": correlation,
+    }
+
+
+def _mrt_ipw_readout(
+    emissions: list[dict],
+    silences: list[dict],
+    fired_records: list[dict],
+    withheld_records: list[dict],
+) -> dict[str, Any]:
+    """MRT/IPW excursion readout from persisted records ALONE (spec §9).
+
+    Treatment (fired) arm = probe emissions that are ``mrt_eligible``, joined by
+    ``decision_id`` to a fired ``advice_event`` carrying the behavioral outcome,
+    inverse-probability-weighted by ``p_fire``.  Control (withheld) arm =
+    ``mrt_eligible`` silences joined by ``decision_id`` to a
+    ``gate_decision_event`` carrying the behavioral outcome, weighted by
+    ``p_withhold``.  An ``mrt_eligible`` silence with no matching
+    ``gate_decision_event`` is MRT-unobservable: excluded from the estimand and
+    counted in ``unobservable_rate``.  Deterministic (non-``mrt_eligible``)
+    silences are excluded entirely (not unobservable).  Honest framing: a
+    low-power, directional readout — never a significance claim.
+    """
+    fired_by_id = {
+        r["decision_id"]: r for r in fired_records if r.get("decision_id") is not None
+    }
+    withheld_by_id = {
+        r["decision_id"]: r
+        for r in withheld_records
+        if r.get("decision_id") is not None
+    }
+
+    # Treatment arm: mrt_eligible probe emissions joined to fired feedback.
+    fired_num = 0.0
+    fired_den = 0.0
+    fired_n = 0
+    for em in emissions:
+        if not em.get("mrt_eligible"):
+            continue
+        did = em.get("decision_id")
+        fb = fired_by_id.get(did)
+        if fb is None or not fb.get("behavioral_finalized"):
+            continue
+        p = em.get("p_fire") or fb.get("p_fire")
+        if not p or p <= 0.0:
+            continue
+        w = 1.0 / p
+        fired_num += w * float(fb.get("behavioral_score", 0.0) or 0.0)
+        fired_den += w
+        fired_n += 1
+
+    # Control arm: mrt_eligible silences joined to withheld feedback.
+    withheld_num = 0.0
+    withheld_den = 0.0
+    withheld_n = 0
+    eligible_silences = 0
+    unobservable = 0
+    for si in silences:
+        if not si.get("mrt_eligible"):
+            continue  # deterministic silence — outside the estimand entirely
+        eligible_silences += 1
+        did = si.get("decision_id")
+        fb = withheld_by_id.get(did)
+        if fb is None:
+            # mrt_eligible withheld with no matching gate_decision_event tracker.
+            unobservable += 1
+            continue
+        if not fb.get("behavioral_finalized"):
+            continue
+        p = si.get("p_withhold") or fb.get("p_withhold")
+        if not p or p <= 0.0:
+            continue
+        w = 1.0 / p
+        withheld_num += w * float(fb.get("behavioral_score", 0.0) or 0.0)
+        withheld_den += w
+        withheld_n += 1
+
+    fired_mean = round(fired_num / fired_den, 4) if fired_den > 0 else None
+    withheld_mean = round(withheld_num / withheld_den, 4) if withheld_den > 0 else None
+    excursion = (
+        round(fired_mean - withheld_mean, 4)
+        if fired_mean is not None and withheld_mean is not None
+        else None
+    )
+    return {
+        "fired_n": fired_n,
+        "withheld_n": withheld_n,
+        "fired_mean_ipw": fired_mean,
+        "withheld_mean_ipw": withheld_mean,
+        "excursion_estimate": excursion,
+        "unobservable_rate": (
+            round(unobservable / eligible_silences, 4) if eligible_silences else 0.0
+        ),
+        "directional": True,  # honest: low-power, never a significance claim
+    }
+
+
+def analyze_gate(
+    session_id: str,
+    pm: PersistenceManager,
+    config: AugurConfig,
+) -> dict[str, Any]:
+    """The SIXTH reflection analysis — offline gate tuning + MRT readout (§9).
+
+    Reads a DE-DUPED ``get_all_feedback`` cross-session plus the persisted gate
+    ``emissions``/``silences``, then:
+
+    1. tunes ``self_tolerance`` membership (chronic presence AND explicit
+       dismissal; exempt-shaped excluded), the per-channel habituation floor,
+       per-class credibility, and the global advice-rate operating point —
+       persisted atomically via ``save_gate_tuning_state``;
+    2. runs the ``behavioral_score`` reliability audit (genuine y/n only);
+    3. reports the MRT/IPW excursion estimate from persisted records alone.
+
+    Idempotent via the ``gate`` ``pass_name`` marker (independent of the
+    ``correlation`` marker).
+    """
+    if pm.is_tuning_applied(session_id, pass_name="gate"):
+        log.info("Skipping gate offline pass — already applied for %s", session_id)
+        return {"analysis": "gate", "skipped": True, "reason": "already_applied"}
+
+    all_feedback = _dedupe_feedback_by_session(pm.get_all_feedback(limit=50))
+
+    # Flatten advice + gate-decision rows across all de-duped sessions.
+    advice_rows: list[dict] = []
+    gate_rows: list[dict] = []
+    for fb in all_feedback:
+        advice_rows.extend(fb.get("advice_events", []))
+        gate_rows.extend(fb.get("gate_decision_events", []))
+
+    # ── Self-tolerance: chronic presence AND explicit dismissal ──────────────
+    presence: Counter[str] = Counter()
+    dismissals: Counter[str] = Counter()
+    exempt_keys: set[str] = set()
+    for row in advice_rows:
+        sk = reconstruct_state_key(row)
+        if _is_exempt_shaped(row):
+            exempt_keys.add(sk)
+            continue
+        presence[sk] += 1
+        if row.get("explicit_rating") == "n":
+            dismissals[sk] += 1
+
+    existing_tolerance = pm.load_self_tolerance()
+    tolerance_add = [
+        sk
+        for sk in presence
+        if sk not in exempt_keys
+        and sk not in existing_tolerance
+        and presence[sk] >= GATE_CHRONIC_MIN_PRESENCE
+        and dismissals[sk] >= GATE_DISMISSAL_MIN
+    ]
+
+    # ── Habituation floor: lower the floor for chronically-dismissed channels ─
+    # A dismissed channel should habituate faster, so raise its floor (which
+    # caps responsiveness) one conservative step toward GATE_FLOOR_MAX.
+    floors: dict[str, dict] = {}
+    for sk in tolerance_add:
+        prev = float((pm.load_habituation_floor(sk) or {}).get("floor", 0.0) or 0.0)
+        new_floor = round(min(prev + GATE_FLOOR_STEP, GATE_FLOOR_MAX), 4)
+        floors[sk] = {"floor": new_floor, "last_ts": session_id}
+
+    # ── Class credibility: EWMA from genuine explicit ratings per class ──────
+    class_ratings: dict[str, list[float]] = {}
+    for row in advice_rows:
+        if row.get("explicit_rating") not in ("y", "n"):
+            continue
+        if row.get("correlation_found"):
+            cls = row.get("escalation_rule") or reconstruct_state_key(row)
+        else:
+            cls = f"{row.get('domain', 'unknown')}:{row.get('severity', 'unknown')}"
+        class_ratings.setdefault(cls, []).append(
+            1.0 if row["explicit_rating"] == "y" else 0.0
+        )
+    credibility: dict[str, dict] = {}
+    alpha = config.gate_credibility_alpha
+    for cls, vals in class_ratings.items():
+        observed = sum(vals) / len(vals)
+        entry = pm.load_credibility(cls) or {}
+        prev = float(entry.get("cred", config.gate_cred_mid))
+        n = int(entry.get("n", 0)) + len(vals)
+        new_cred = round(prev + alpha * (observed - prev), 4)
+        credibility[cls] = {"cred": new_cred, "n": n, "last_fb_ts": session_id}
+
+    # ── Advice-rate operating point: EWMA of the delivered-advice burden ─────
+    # Derive the dismissal rate over delivered advice; nudge the stored
+    # operating point toward it so a high dismissal burden tightens the gate.
+    advice_rate_update: dict | None = None
+    genuine_delivered = [
+        r for r in advice_rows if r.get("explicit_rating") in ("y", "n")
+    ]
+    if genuine_delivered:
+        dismissed = sum(1 for r in genuine_delivered if r["explicit_rating"] == "n")
+        observed_rate = dismissed / len(genuine_delivered)
+        prev_state = pm.load_advice_rate() or {}
+        prev_rate = float(prev_state.get("operating_point", observed_rate))
+        new_rate = round(
+            prev_rate + GATE_ADVICE_RATE_ALPHA * (observed_rate - prev_rate), 4
+        )
+        advice_rate_update = {
+            **prev_state,
+            "operating_point": new_rate,
+            "last_ts": session_id,
+        }
+
+    # ── Behavioral audit + MRT/IPW readout ───────────────────────────────────
+    audit = _behavioral_audit(advice_rows, config)
+    mrt = _mrt_ipw_readout(
+        pm.load_emissions(limit=100),
+        pm.load_silence_records(limit=100),
+        advice_rows,
+        gate_rows,
+    )
+
+    # ── Persist atomically + mark idempotent ─────────────────────────────────
+    if floors or credibility or tolerance_add or advice_rate_update is not None:
+        try:
+            pm.save_gate_tuning_state(
+                floors=floors or None,
+                credibility=credibility or None,
+                tolerance_add=tolerance_add or None,
+                advice_rate=advice_rate_update,
+            )
+        except redis.RedisError as exc:
+            log.error("Gate tuning-state save failed: %s", exc)
+            return {
+                "analysis": "gate",
+                "error": "save_failed",
+                "reason": str(exc),
+            }
+
+    pm.mark_tuning_applied(session_id, pass_name="gate")
+
+    return {
+        "analysis": "gate",
+        "sessions_analyzed": len(all_feedback),
+        "tolerance_added": tolerance_add,
+        "floors_tuned": sorted(floors.keys()),
+        "credibility_classes_tuned": sorted(credibility.keys()),
+        "advice_rate": advice_rate_update,
+        "behavioral_audit": audit,
+        "mrt": mrt,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Core reflection
 # ---------------------------------------------------------------------------
 
@@ -944,6 +1300,21 @@ async def run_reflection(
                 "next reflection trigger will retry."
             )
 
+    # 6. Gate offline pass (spec §9) — own idempotency marker (pass_name="gate"),
+    # independent of the correlation/window marker above.
+    try:
+        gate = analyze_gate(session_id, pm, config)
+        log.info(
+            "Gate offline pass: %s",
+            gate.get("reason")
+            or f"{len(gate.get('tolerance_added', []))} tolerance add(s), "
+            f"mrt fired={gate.get('mrt', {}).get('fired_n')} "
+            f"withheld={gate.get('mrt', {}).get('withheld_n')}",
+        )
+    except redis.RedisError as exc:
+        gate = {"analysis": "gate", "error": "exception", "reason": str(exc)}
+        log.error("Gate offline pass failed: %s", exc)
+
     # Build report
     report = {
         "session_id": session_id,
@@ -954,6 +1325,7 @@ async def run_reflection(
             "counterfactual": counterfactual,
             "correlation_tuning": matrix_tuning,
             "correlation_window_tuning": window_tuning,
+            "gate": gate,
         },
         "adjustments": {
             "sigma_adjusted": any_sigma_adjusted,

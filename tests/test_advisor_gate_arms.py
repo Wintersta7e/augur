@@ -1321,3 +1321,194 @@ def test_bet_hedge_does_not_touch_a_fire_survivor(fake_pm):
     assert d.action == "fire"
     assert d.probe is False
     assert d.deciding_arm != "bet_hedge_override"
+
+
+# ── Arm 9: anti_starvation_release (spec §5 Arm 9, invariant D) ───────────────
+#
+# A Phase-2 MODIFIER evaluated BEFORE bet_hedge (Arm 8): if the provisional
+# decision is still a SUPPRESS and the channel is starved — channel_stats shows
+# consecutive_suppressions >= MAX_CONSECUTIVE_SUPPRESSIONS, OR (now -
+# suppression_streak_started_ts) > MAX_CHANNEL_SILENCE_S — the suppression is
+# un-suppressed deterministically to FIRE("anti_starvation_release") and Arm 8
+# is short-circuited.  Deterministic: never a probe, consumes no rng draw.
+
+
+def _seed_channel_stats(fake_pm, state_key, **entry):
+    """Persist a channel_stats entry for *state_key* (anti-starvation substrate)."""
+    fake_pm.save_channel_stats(state_key, entry)
+
+
+def _starve_cfg(**extra):
+    """Config isolating Arm 9: reservoir off so the credibility arm produces the
+    behavioral-driven SUPPRESS that Arm 9 then releases (mirrors _bet_hedge_cfg)."""
+    from blackboard.config import AugurConfig
+
+    return AugurConfig(gate_reservoir_enabled=False, **extra)
+
+
+def test_anti_starvation_releases_channel_at_consecutive_cap(fake_pm):
+    """consecutive_suppressions >= MAX → FIRE('anti_starvation_release')."""
+    cfg = _starve_cfg()
+    _seed_channel_stats(
+        fake_pm,
+        "single:typing:user",
+        consecutive_suppressions=cfg.gate_max_consecutive_suppressions,
+        suppression_streak_started_ts=1.0,
+    )
+    _seed_credibility(fake_pm, "typing:medium", cred=0.0, n=20, last_fb_ts=1.0)
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=2.0,
+        rng=_SeqRandom([0.0]),  # cred draw suppresses; Arm 9 consumes no draw
+    )
+    assert d.action == "fire"
+    assert d.reason == "anti_starvation_release"
+    assert d.deciding_arm == "anti_starvation_release"
+    assert d.probe is False
+    assert d.metrics["consecutive"] == cfg.gate_max_consecutive_suppressions
+
+
+def test_anti_starvation_releases_channel_past_silence_window(fake_pm):
+    """now - suppression_streak_started_ts > MAX_CHANNEL_SILENCE_S → release.
+
+    A sparse stream that never reaches the count bound is still released by the
+    time bound (invariant D).
+    """
+    cfg = _starve_cfg()
+    _seed_channel_stats(
+        fake_pm,
+        "single:typing:user",
+        consecutive_suppressions=1,  # below the count bound
+        suppression_streak_started_ts=10.0,
+    )
+    _seed_credibility(fake_pm, "typing:medium", cred=0.0, n=20, last_fb_ts=1.0)
+    g = Gate()
+    now = 10.0 + cfg.gate_max_channel_silence_s + 1.0  # past the time bound
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=now,
+        rng=_SeqRandom([0.0]),
+    )
+    assert d.action == "fire"
+    assert d.reason == "anti_starvation_release"
+    assert d.deciding_arm == "anti_starvation_release"
+
+
+def test_anti_starvation_short_circuits_bet_hedge(fake_pm):
+    """A starved behavioral-driven SUPPRESS becomes an anti-starvation FIRE,
+    NOT a bet-hedge probe (Arm 9 runs before Arm 8 and short-circuits it)."""
+    cfg = _starve_cfg()
+    _seed_behavioral_eligible(fake_pm)  # credibility arm yields mrt_eligible suppress
+    _seed_channel_stats(
+        fake_pm,
+        "single:typing:user",
+        consecutive_suppressions=cfg.gate_max_consecutive_suppressions,
+        suppression_streak_started_ts=1.0,
+    )
+    g = Gate()
+    # Only ONE rng draw (the credibility suppress draw) should be consumed — Arm 9
+    # is deterministic and short-circuits the bet-hedge draw entirely.
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=2.0,
+        rng=_SeqRandom([0.05]),
+    )
+    assert d.action == "fire"
+    assert d.reason == "anti_starvation_release"
+    assert d.deciding_arm == "anti_starvation_release"
+    assert d.probe is False  # deterministic — not the bet_hedge probe
+
+
+def test_anti_starvation_leaves_unstarved_suppress(fake_pm):
+    """A SUPPRESS on a channel below both bounds is left standing (no release)."""
+    cfg = _starve_cfg()
+    _seed_channel_stats(
+        fake_pm,
+        "single:typing:user",
+        consecutive_suppressions=1,
+        suppression_streak_started_ts=1.0,
+    )
+    _seed_credibility(fake_pm, "typing:medium", cred=0.0, n=20, last_fb_ts=1.0)
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=2.0,  # well within the silence window
+        rng=_SeqRandom([0.0]),
+    )
+    assert d.action == "suppress"
+    assert d.reason == "low_credibility_class"
+
+
+def test_anti_starvation_ignores_a_fire_survivor(fake_pm):
+    """Arm 9 only releases a SUPPRESS — a plain fire-survivor is untouched even on
+    a starved channel."""
+    cfg = _all_phase1_disabled(gate_cost_tier_enabled=False)
+    _seed_channel_stats(
+        fake_pm,
+        "single:typing:user",
+        consecutive_suppressions=cfg.gate_max_consecutive_suppressions,
+        suppression_streak_started_ts=1.0,
+    )
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=2.0,
+    )
+    assert d.action == "fire"
+    assert d.reason != "anti_starvation_release"
+    assert d.deciding_arm != "anti_starvation_release"
+
+
+def test_anti_starvation_disabled_keeps_suppress(fake_pm):
+    """When gate_anti_starvation_enabled is False, a starved suppress stands."""
+    cfg = _starve_cfg(gate_anti_starvation_enabled=False)
+    _seed_channel_stats(
+        fake_pm,
+        "single:typing:user",
+        consecutive_suppressions=cfg.gate_max_consecutive_suppressions,
+        suppression_streak_started_ts=1.0,
+    )
+    _seed_credibility(fake_pm, "typing:medium", cred=0.0, n=20, last_fb_ts=1.0)
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=2.0,
+        rng=_SeqRandom([0.0]),
+    )
+    assert d.action == "suppress"
+    assert d.reason == "low_credibility_class"
+
+
+def test_anti_starvation_preserves_decision_id(fake_pm):
+    """The released FIRE keeps the original suppress decision id (linkage key)."""
+    cfg = _starve_cfg()
+    _seed_channel_stats(
+        fake_pm,
+        "single:typing:user",
+        consecutive_suppressions=cfg.gate_max_consecutive_suppressions,
+        suppression_streak_started_ts=1.0,
+    )
+    _seed_credibility(fake_pm, "typing:medium", cred=0.0, n=20, last_fb_ts=1.0)
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=2.0,
+        rng=_SeqRandom([0.0]),
+    )
+    assert d.action == "fire"
+    assert isinstance(d.id, str) and len(d.id) == 32  # uuid4().hex preserved

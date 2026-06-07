@@ -405,9 +405,11 @@ class Gate:
             decision = self._arm_cost_tier_router(
                 decision, signature, state, config, now, rng
             )
-        # Arm 9 (anti-starvation) lands here in Task 5.3 — before Arm 8 so a
-        # starved channel is released deterministically and short-circuits the
-        # stochastic bet-hedge.
+        # Arm 9 (anti-starvation) runs BEFORE Arm 8 so a starved channel is
+        # released deterministically and short-circuits the stochastic bet-hedge.
+        decision = self._arm_anti_starvation_release(
+            decision, signature, state, config, now, rng
+        )
         decision = self._arm_bet_hedge_override(
             decision, signature, state, config, now, rng
         )
@@ -893,6 +895,63 @@ class Gate:
             deciding_arm="cost_tier_router",
             metrics=metrics,
             tier=1,
+            id=decision.id,
+        )
+
+    def _arm_anti_starvation_release(
+        self,
+        decision: GateDecision,
+        sig: Signature,  # noqa: ARG002 — uniform Phase-2 modifier signature
+        state: dict[str, Any],
+        config: Any,
+        now: float,
+        rng: random.Random,  # noqa: ARG002 — uniform Phase-2 modifier signature; deterministic
+    ) -> GateDecision:
+        """Arm 9 — anti-starvation safety override (spec §5 Arm 9, invariant D).
+
+        A **Phase-2 modifier** evaluated **before** bet-hedge (Arm 8): it acts
+        **only** on a still-``suppress`` decision whose channel is *starved*.  A
+        channel is starved when its ``channel_stats`` shows either bound passed:
+
+        * ``consecutive_suppressions >= MAX_CONSECUTIVE_SUPPRESSIONS`` (a hot
+          channel saturated with suppressions), or
+        * ``now - suppression_streak_started_ts > MAX_CHANNEL_SILENCE_S`` (a
+          sparse stream that never reaches the count bound is still released by
+          the time bound).
+
+        In either case the suppression is **deterministically** un-suppressed to
+        ``FIRE("anti_starvation_release")`` — never a probe, consuming no ``rng``
+        draw — **short-circuiting Arm 8** (so a starved behavioral-driven
+        suppress is released, not bet-hedged).  The decision ``id`` (linkage key)
+        is preserved across the conversion (spec §3/§6/§9).
+
+        No *trackable* channel can be silenced indefinitely (invariant D); a
+        channel with no ``channel_stats`` (untrackable / brand-new at cap) is
+        outside D's scope and handled by the cap-fail-open path in ``evaluate``.
+        """
+        if not config.gate_anti_starvation_enabled:
+            return decision
+        # Only a still-standing suppress is releasable; a fire-survivor or a
+        # downgrade is untouched.
+        if decision.action != "suppress":
+            return decision
+
+        stats = state.get("channel_stats") or {}
+        consecutive = int(stats.get("consecutive_suppressions", 0) or 0)
+        streak_started = stats.get("suppression_streak_started_ts")
+
+        by_count = consecutive >= config.gate_max_consecutive_suppressions
+        silence_s = now - float(streak_started) if streak_started is not None else 0.0
+        by_time = (
+            streak_started is not None and silence_s > config.gate_max_channel_silence_s
+        )
+        if not (by_count or by_time):
+            return decision
+
+        return GateDecision.fire(
+            "anti_starvation_release",
+            deciding_arm="anti_starvation_release",
+            metrics={"consecutive": consecutive, "silence_s": silence_s},
             id=decision.id,
         )
 

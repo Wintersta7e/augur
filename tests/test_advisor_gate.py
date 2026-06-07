@@ -883,6 +883,36 @@ def test_ungateable_suppression_writes_only_silence(fake_pm, cfg, entity) -> Non
     assert fake_pm._redis.exists("augur:gate:observed") == 0
 
 
+@_UNGATEABLE_ENTITIES
+def test_ungateable_busy_skip_writes_only_delivery_failure(
+    fake_pm, cfg, entity
+) -> None:
+    """record_busy_skip writes ONLY the global delivery_failure for ungateable.
+
+    An ordinary FIRE on an ungateable signature that hits a held advisor lock
+    routes through record_busy_skip; like evaluate/record_suppression it must
+    NOT create a bogus single:{domain}:? channel — no channel_stats (or any
+    other per-channel hash), only a best-effort delivery_failure.
+    """
+    g = _gate()
+    s = build_signature(_ungateable_payload(entity))
+    assert s.ungateable is True
+    tracked = g.record_busy_skip(s, fake_pm, 100.0)
+    # Returns True (handled) so the caller does not double-log a second
+    # delivery_failure; an ungateable channel is simply never tracked for
+    # anti-starvation (no per-channel state was written).
+    assert tracked is True
+
+    # Exactly one best-effort delivery_failure IS written (diagnostics).
+    failures = fake_pm.load_delivery_failures(limit=10)
+    assert len(failures) == 1
+    assert failures[0]["reason"] == "advisor_busy_skipped"
+    # No per-channel hash key created — specifically no bogus single:{domain}:?
+    # channel_stats (the exact state this fix eliminates).
+    for hash_key in _PER_CHANNEL_HASHES:
+        assert fake_pm._redis.exists(hash_key) == 0, hash_key
+
+
 # ── Task 8.1: _build_advice_event MRT fields + new subjects (spec §8/§9) ──────
 
 

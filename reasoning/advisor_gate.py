@@ -1219,7 +1219,18 @@ class Gate:
         channel is **untrackable** — a new ``state_key`` already at
         ``MAX_GATE_STATE_KEYS`` so no ``channel_stats`` can be created (outside
         D's trackable scope); the caller then logs a separate delivery_failure.
+
+        An **ungateable** signature (missing/``"?"``/empty entity, spec §5) has
+        no stable per-channel ``state_key`` to track, so it writes ONLY the
+        best-effort global ``delivery_failure`` — never ``channel_stats`` (no
+        ``can_track_gate_state`` probe, no ``_bump_suppression_stats``) — so the
+        busy-skip path can never create the bogus ``single:{domain}:?`` channel
+        the missing-entity rule eliminates everywhere else.  Returns ``True``
+        (handled) so the caller does not double-log a second delivery_failure.
         """
+        if signature.ungateable:
+            pm.save_delivery_failure(signature, "advisor_busy_skipped", now, "")
+            return True
         if not pm.can_track_gate_state(_CHANNEL_STATS_KEY, signature.state_key):
             return False
         self._bump_suppression_stats(signature, pm, now)

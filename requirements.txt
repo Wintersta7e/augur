@@ -7,5 +7,6 @@ httpx
 keyboard
 pytest
 pytest-asyncio
+fakeredis>=2.0
 fastmcp
 networkx

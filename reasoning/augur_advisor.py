@@ -517,9 +517,10 @@ def _build_advice_event(
     in the async context) before publishing.
 
     When a ``GateDecision`` is supplied, threads ``decision_id``/``mrt_eligible``
-    /``p_fire`` into the payload so feedback can join the fired arm by exact key
-    and inverse-probability-weight it (spec §9). When omitted, these fields carry
-    safe defaults so legacy callers keep working.
+    /``p_fire``/``probe`` into the payload so feedback can join the fired arm by
+    exact key, inverse-probability-weight it, and distinguish a bet-hedge
+    probe-fire (spec §9). When omitted, these fields carry safe defaults so
+    legacy callers keep working.
     """
     primary = payload.get("primary_anomaly", {})
     primary_domain = primary.get("domain", "unknown")
@@ -566,10 +567,14 @@ def _build_advice_event(
         "rule_window_s": payload.get("rule_window_s"),
         "temporal_lag_seconds": payload.get("temporal_lag_seconds"),
         # Gate MRT linkage (spec §9): decision_id joins emission/silence/feedback;
-        # mrt_eligible/p_fire make the fired arm inverse-probability-weightable.
+        # mrt_eligible/p_fire make the fired arm inverse-probability-weightable;
+        # probe flags a bet-hedge probe-fire so analyze_gate (§9/§11.1) can tell
+        # the probe-fired arm from a withheld mrt_eligible silence (joined by
+        # decision_id) — without it PendingAdvice.probe is silently always False.
         "decision_id": decision.id if decision is not None else None,
         "mrt_eligible": decision.mrt_eligible if decision is not None else False,
         "p_fire": decision.p_fire if decision is not None else None,
+        "probe": decision.probe if decision is not None else False,
     }
 
 

@@ -766,6 +766,10 @@ def test_advice_event_includes_decision_id_mrt_eligible_p_fire() -> None:
     assert advice["decision_id"] == "abc123"
     assert advice["mrt_eligible"] is True
     assert advice["p_fire"] == 0.1
+    # probe must be emitted by the producer so a bet-hedge probe-fire is
+    # joinable to the withheld arm by decision_id (spec §9); otherwise
+    # PendingAdvice.probe is silently always False (producer/consumer gap).
+    assert advice["probe"] is True
 
 
 def test_advice_event_decision_defaults_when_none() -> None:
@@ -780,6 +784,7 @@ def test_advice_event_decision_defaults_when_none() -> None:
     assert advice["decision_id"] is None
     assert advice["mrt_eligible"] is False
     assert advice["p_fire"] is None
+    assert advice["probe"] is False
 
 
 def test_advice_event_preserves_existing_fields_with_decision() -> None:

@@ -328,12 +328,17 @@ def test_exempt_does_no_state_reads(fake_pm, cfg) -> None:
 
 
 def test_no_arms_passes_all(fake_pm, cfg) -> None:
+    from dataclasses import replace
+
     from reasoning.advisor_gate import Gate
 
     # A medium that trips no suppressor reaches the terminal passed_all_arms
     # fire.  The reservoir arm (Arm 5) holds a fresh single+medium until it has
     # accumulated evidence, so latch this channel committed (suppressing=False,
     # leaked count above OFF) to clear it — all other arms see unseen state.
+    # Disable the Phase-2 cost_tier modifier so this stays focused on Phase-1
+    # pass-through (else a one-off single+medium would be Tier-1-downgraded).
+    cfg = replace(cfg, gate_cost_tier_enabled=False)
     fake_pm.save_reservoir(
         "single:chess:user", {"count": 2.0, "last_ts": 100.0, "suppressing": False}
     )

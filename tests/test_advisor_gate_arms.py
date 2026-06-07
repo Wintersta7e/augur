@@ -425,6 +425,11 @@ def test_reservoir_suppresses_new_single_medium_channel(fake_pm, cfg):
 def test_reservoir_commits_when_effective_reaches_on(fake_pm, cfg):
     """A suppressing channel passes once leaked count + prospective +1 ≥ ON."""
     # count=2, dt=0 → leaked=2, effective=2+1=3 == ON=3 → commit → fire.
+    # Disable the Phase-2 cost_tier modifier so the reservoir pass-through stays
+    # a plain fire (a one-off single+medium would otherwise be Tier-1-downgraded).
+    from dataclasses import replace
+
+    cfg = replace(cfg, gate_cost_tier_enabled=False)
     fake_pm.save_reservoir(
         "single:typing:user", {"count": 2.0, "last_ts": 1.0, "suppressing": True}
     )
@@ -459,6 +464,10 @@ def test_reservoir_hysteresis_committed_channel_stays_passing_in_band(fake_pm, c
     """Hysteresis: a committed channel keeps passing while in the OFF..ON band."""
     # count=1.5, dt=0 → leaked=1.5 (≥ OFF=1), effective=2.5 (< ON=3): in band.
     # Latched committed (suppressing=False) → re-suppress only below OFF → PASS.
+    # Disable the Phase-2 cost_tier modifier to keep this on Phase-1 pass-through.
+    from dataclasses import replace
+
+    cfg = replace(cfg, gate_cost_tier_enabled=False)
     fake_pm.save_reservoir(
         "single:typing:user", {"count": 1.5, "last_ts": 1.0, "suppressing": False}
     )
@@ -502,7 +511,8 @@ def test_reservoir_disabled_passes(fake_pm):
     """When gate_reservoir_enabled is False, the arm never suppresses."""
     from blackboard.config import AugurConfig
 
-    cfg = AugurConfig(gate_reservoir_enabled=False)
+    # cost_tier off too so the reservoir pass-through stays a plain fire.
+    cfg = AugurConfig(gate_reservoir_enabled=False, gate_cost_tier_enabled=False)
     g = Gate()
     d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
     assert d.action == "fire"
@@ -943,6 +953,9 @@ def test_arm_precedence_all_disabled_fires(fake_pm):
         gate_habituation_enabled=False,
         gate_reservoir_enabled=False,
         gate_credibility_enabled=False,
+        # cost_tier (Phase 2) off too — this test pins the Phase-1 pass-through
+        # outcome, not the cost-tier modifier applied to a fire-survivor.
+        gate_cost_tier_enabled=False,
     )
     g = Gate()
     d = g.evaluate(
@@ -954,3 +967,156 @@ def test_arm_precedence_all_disabled_fires(fake_pm):
     )
     assert d.action == "fire"
     assert d.reason == "passed_all_arms"
+
+
+# ── Arm 7: cost_tier_router (spec §5 Arm 7) ──────────────────────────────────
+#
+# A Phase-2 MODIFIER on a fire-survivor (it never enters the Phase-1
+# "first-suppressor-wins" loop).  A fire-survivor routes to Tier-2 (full 32B)
+# when it is high, correlated, a persistent single (count >=
+# COST_TIER_PERSISTENCE_COUNT via cost_tier_memory), or has previously earned
+# Tier-2; otherwise it is a Tier-1 candidate and, depending on TIER1_MODE:
+#   * "note"   → DOWNGRADE(tier=1, "cost_tier_downgrade") — a templated note
+#                published on the advice subject so feedback/reflection see it;
+#   * "silent" → SUPPRESS("cost_tier_downgrade_silent") — a gate non-delivery.
+
+
+def _correlation_medium() -> dict:
+    """A correlation+medium payload (state_key off involved_domains)."""
+    return {
+        "combined_severity": "MEDIUM",
+        "correlation_found": True,
+        "involved_domains": ["typing", "chess"],
+        "correlated_events": [{"domain": "chess"}],
+        "primary_anomaly": {
+            "domain": "typing",
+            "entity": "user",
+            "value": 2.5,
+            "severity": "medium",
+        },
+    }
+
+
+def _all_phase1_disabled(**extra) -> "object":
+    """An AugurConfig with every Phase-1 suppressor off (isolates Arm 7).
+
+    A clean single+medium channel passes Phase 1 anyway, but disabling the
+    suppressors keeps these tests pinned to the cost-tier modifier alone even if
+    state leaks in.
+    """
+    from blackboard.config import AugurConfig
+
+    return AugurConfig(
+        gate_central_tolerance_enabled=False,
+        gate_refractory_enabled=False,
+        gate_novelty_enabled=False,
+        gate_habituation_enabled=False,
+        gate_reservoir_enabled=False,
+        gate_credibility_enabled=False,
+        **extra,
+    )
+
+
+def test_cost_tier_high_stays_tier2(fake_pm):
+    """A standalone HIGH fire-survivor routes to Tier-2 (stays a full fire)."""
+    cfg = _all_phase1_disabled()
+    g = Gate()
+    d = g.evaluate(build_signature(_high_typing(4.5)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"
+    assert d.tier == 2
+    assert d.reason != "cost_tier_downgrade"
+
+
+def test_cost_tier_correlation_stays_tier2(fake_pm):
+    """A correlated fire-survivor routes to Tier-2 (full 32B)."""
+    cfg = _all_phase1_disabled()
+    g = Gate()
+    d = g.evaluate(build_signature(_correlation_medium()), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"
+    assert d.tier == 2
+
+
+def test_cost_tier_persistent_single_stays_tier2(fake_pm):
+    """A single+medium whose count >= COST_TIER_PERSISTENCE_COUNT → Tier-2."""
+    cfg = _all_phase1_disabled()
+    fake_pm.save_cost_tier_memory(
+        "single:typing:user",
+        {"earned_tier2": False, "helped": 0, "count": 3, "last_ts": 1.0},
+    )
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"
+    assert d.tier == 2
+
+
+def test_cost_tier_earned_tier2_stays_tier2(fake_pm):
+    """A single+medium below the persistence count but Tier-2-earned → Tier-2."""
+    cfg = _all_phase1_disabled()
+    fake_pm.save_cost_tier_memory(
+        "single:typing:user",
+        {"earned_tier2": True, "helped": 1, "count": 1, "last_ts": 1.0},
+    )
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"
+    assert d.tier == 2
+
+
+def test_cost_tier_tier1_note_mode_downgrades(fake_pm):
+    """A non-persistent single+medium in 'note' mode → DOWNGRADE(tier=1)."""
+    cfg = _all_phase1_disabled(gate_tier1_mode="note")
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "downgrade"
+    assert d.tier == 1
+    assert d.reason == "cost_tier_downgrade"
+    assert d.deciding_arm == "cost_tier_router"
+
+
+def test_cost_tier_tier1_silent_mode_suppresses(fake_pm):
+    """A non-persistent single+medium in 'silent' mode → SUPPRESS."""
+    cfg = _all_phase1_disabled(gate_tier1_mode="silent")
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "suppress"
+    assert d.reason == "cost_tier_downgrade_silent"
+    assert d.deciding_arm == "cost_tier_router"
+
+
+def test_cost_tier_below_persistence_count_downgrades(fake_pm):
+    """A single+medium with count < COST_TIER_PERSISTENCE_COUNT → Tier-1 note."""
+    cfg = _all_phase1_disabled(gate_tier1_mode="note")
+    fake_pm.save_cost_tier_memory(
+        "single:typing:user",
+        {"earned_tier2": False, "helped": 0, "count": 2, "last_ts": 1.0},
+    )
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "downgrade"
+    assert d.tier == 1
+
+
+def test_cost_tier_disabled_passes_through_as_fire(fake_pm):
+    """When gate_cost_tier_enabled is False, a fire-survivor stays a plain fire."""
+    cfg = _all_phase1_disabled(gate_cost_tier_enabled=False, gate_tier1_mode="note")
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "fire"
+    assert d.reason == "passed_all_arms"
+
+
+def test_cost_tier_does_not_modify_a_phase1_suppress(fake_pm, cfg):
+    """Arm 7 only modifies fire-survivors — a Phase-1 SUPPRESS is untouched."""
+    fake_pm.add_self_tolerance("single:typing:user")
+    g = Gate()
+    d = g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert d.action == "suppress"
+    assert d.reason == "central_tolerance_learned_self"
+
+
+def test_cost_tier_silent_downgrade_is_readonly(fake_pm):
+    """A cost_tier silent SUPPRESS still writes nothing in evaluate (read-only)."""
+    cfg = _all_phase1_disabled(gate_tier1_mode="silent")
+    g = Gate()
+    g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
+    assert fake_pm.write_calls == 0

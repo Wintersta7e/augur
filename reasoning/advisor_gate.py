@@ -318,11 +318,19 @@ class Gate:
         * danger exemption (``signature.exempt``) →
           ``FIRE("exempt_high_correlated")`` performing **no** state read (§2 B).
 
-        Otherwise gate state is loaded up front (read-only) and the arm pipeline
-        runs.  A suppressing arm whose ``state_key`` is **new and untrackable**
-        (``not pm.can_track_gate_state(...)``) fails open to
-        ``FIRE("cap_fail_open")`` preserving the decision id (invariant D / §6).
-        With no arms, the event passes → ``FIRE("passed_all_arms")``.
+        Otherwise gate state is loaded up front (read-only) and the **two-phase**
+        pipeline runs (spec §5):
+
+        * **Phase 1** — suppressors (Arms 1–6); the first to suppress wins.  With
+          no suppressor (or none configured) the event passes → a fire-survivor.
+        * **Phase 2** — modifiers on the Phase-1 outcome: Arm 7 ``cost_tier_router``
+          may downgrade/silence a *fire*-survivor.  (Arms 9/8 join here in later
+          tasks.)
+
+        Any SUPPRESS (Phase-1 or a Phase-2 silent downgrade) whose ``state_key``
+        is **new and untrackable** (``not pm.can_track_gate_state(...)``) fails
+        open to ``FIRE("cap_fail_open")`` preserving the decision id (invariant
+        D / §6).
         """
         if not config.gate_enabled:
             return GateDecision.fire("gate_disabled", deciding_arm="master_disable")
@@ -335,26 +343,68 @@ class Gate:
 
         state = self._load_state(pm, signature)
 
-        # A non-exempt standalone HIGH skips the learned/recurrence suppressors
-        # (spec §5 HIGH bypass): it punches through central_tolerance/novelty/
-        # habituation/reservoir/credibility by construction.
-        bypass_learned = signature.severity == "high"
+        # ── Phase 1: suppressors (first to suppress wins) ──
+        decision = self._run_suppressors(signature, state, config, now, rng)
+        if decision is None:
+            decision = GateDecision.fire("passed_all_arms", deciding_arm="none")
 
+        # ── Phase 2: modifiers on the Phase-1 outcome (spec §5) ──
+        decision = self._finalize(decision, signature, state, config, now, rng)
+
+        # Cap fail-open: a SUPPRESS for a new, untrackable state_key cannot be
+        # anti-starved → fail open to FIRE rather than silence it indefinitely
+        # (invariant D, spec §6).  Applies to a Phase-1 suppress AND a Phase-2
+        # silent downgrade.
+        if decision.action == "suppress" and not pm.can_track_gate_state(
+            _CHANNEL_STATS_KEY, signature.state_key
+        ):
+            return decision.as_fire("cap_fail_open")
+
+        return decision
+
+    def _run_suppressors(
+        self,
+        signature: Signature,
+        state: dict[str, Any],
+        config: Any,
+        now: float,
+        rng: random.Random,
+    ) -> GateDecision | None:
+        """Run the Phase-1 suppressor pipeline; return the first SUPPRESS or None.
+
+        A non-exempt standalone HIGH skips the learned/recurrence suppressors
+        (spec §5 HIGH bypass): it punches through central_tolerance/novelty/
+        habituation/reservoir/credibility by construction.
+        """
+        bypass_learned = signature.severity == "high"
         for arm in self.arms:
             if bypass_learned and _arm_name(arm) in _HIGH_BYPASSED_ARMS:
                 continue
             decision = arm(self, signature, state, config, now, rng)
-            if decision is None:
-                continue
-            if decision.action == "suppress" and not pm.can_track_gate_state(
-                _CHANNEL_STATS_KEY, signature.state_key
-            ):
-                # Untrackable new channel → cannot anti-starve it → fail open to
-                # FIRE rather than suppress indefinitely (invariant D, spec §6).
-                return decision.as_fire("cap_fail_open")
-            return decision
+            if decision is not None:
+                return decision
+        return None
 
-        return GateDecision.fire("passed_all_arms", deciding_arm="none")
+    def _finalize(
+        self,
+        decision: GateDecision,
+        signature: Signature,
+        state: dict[str, Any],
+        config: Any,
+        now: float,
+        rng: random.Random,
+    ) -> GateDecision:
+        """Apply the Phase-2 modifiers to the Phase-1 outcome (spec §5).
+
+        Phase 2 modifies only a fire-survivor; a Phase-1 SUPPRESS passes through
+        unchanged here (anti-starvation/bet-hedge, added in later tasks, may
+        un-suppress it).  Order: Arm 7 (cost_tier) → Arm 9 → Arm 8.
+        """
+        if decision.action == "fire":
+            decision = self._arm_cost_tier_router(
+                decision, signature, state, config, now, rng
+            )
+        return decision
 
     def _load_state(self, pm: Any, signature: Signature) -> dict[str, Any]:
         """Load the gate-state snapshot for ``signature`` (read-only, guarded).
@@ -770,4 +820,71 @@ class Gate:
             "low_credibility_class",
             deciding_arm="signaller_credibility",
             metrics={"credibility": credibility, "p": p},
+        )
+
+    # ── Phase-2 modifiers (spec §5) ── operate on a fire-survivor, not the
+    # first-suppressor loop.  Each preserves the decision's id (the linkage key).
+    def _arm_cost_tier_router(
+        self,
+        decision: GateDecision,
+        sig: Signature,
+        state: dict[str, Any],
+        config: Any,
+        now: float,  # noqa: ARG002 — uniform Phase-2 modifier signature
+        rng: random.Random,  # noqa: ARG002 — uniform Phase-2 modifier signature; deterministic
+    ) -> GateDecision:
+        """Arm 7 — innate vs adaptive cost-tier routing (spec §5 Arm 7).
+
+        A **Phase-2 modifier** on a fire-survivor: it never suppresses by itself
+        except in ``silent`` mode.  A fire-survivor routes to **Tier-2** (the
+        full 32B) when it is
+
+        * ``high`` (a strong stimulus always earns the full model), or
+        * ``correlation_found`` (cross-domain evidence), or
+        * a **persistent single** — its per-``state_key`` ``cost_tier_memory``
+          ``count >= COST_TIER_PERSISTENCE_COUNT`` (a recurring single channel
+          has earned escalation), or
+        * **Tier-2-earned** (``earned_tier2`` learned offline from feedback).
+
+        Otherwise it is a **Tier-1** candidate (a one-off single+medium):
+
+        * ``TIER1_MODE == "note"`` → ``DOWNGRADE(tier=1, "cost_tier_downgrade")``
+          — a templated note still published on ``augur.reasoning.advice`` with
+          ``tier=1`` so feedback/reflection observe it;
+        * ``TIER1_MODE == "silent"`` → ``SUPPRESS("cost_tier_downgrade_silent")``
+          — a gate non-delivery (logged per invariant A).
+
+        The decision ``id`` is preserved across the conversion (spec §3/§6/§9).
+        """
+        if not config.gate_cost_tier_enabled:
+            return decision
+
+        mem = state.get("cost_tier_memory") or {}
+        count = int(mem.get("count", 0) or 0)
+        earned_tier2 = bool(mem.get("earned_tier2", False))
+
+        tier2 = (
+            sig.severity == "high"
+            or sig.correlation_found
+            or count >= config.gate_cost_tier_persistence_count
+            or earned_tier2
+        )
+        if tier2:
+            return replace(decision, tier=2)
+
+        # Tier-1 candidate: route per TIER1_MODE, preserving the decision id.
+        metrics = {"count": count, "earned_tier2": earned_tier2}
+        if config.gate_tier1_mode == "silent":
+            return GateDecision.suppress(
+                "cost_tier_downgrade_silent",
+                deciding_arm="cost_tier_router",
+                metrics=metrics,
+                id=decision.id,
+            )
+        return GateDecision.downgrade(
+            "cost_tier_downgrade",
+            deciding_arm="cost_tier_router",
+            metrics=metrics,
+            tier=1,
+            id=decision.id,
         )

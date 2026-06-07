@@ -1017,7 +1017,7 @@ def analyze_gate(
         and dismissals[sk] >= GATE_DISMISSAL_MIN
     ]
 
-    # ── Habituation floor: lower the floor for chronically-dismissed channels ─
+    # ── Habituation floor: raise the floor for chronically-dismissed channels ─
     # A dismissed channel should habituate faster, so raise its floor (which
     # caps responsiveness) one conservative step toward GATE_FLOOR_MAX.
     floors: dict[str, dict] = {}
@@ -1050,7 +1050,12 @@ def analyze_gate(
 
     # ── Advice-rate operating point: EWMA of the delivered-advice burden ─────
     # Derive the dismissal rate over delivered advice; nudge the stored
-    # operating point toward it so a high dismissal burden tightens the gate.
+    # `rate_ewma` toward it so a high dismissal burden tightens the gate.  This
+    # MUST tune `rate_ewma` — the exact field the online refractory-pressure arm
+    # consumes (advisor_gate.py) and the documented schema for this key (§6) —
+    # so the offline tuning reconciles with the online EWMA instead of injecting
+    # a field nothing reads.  `last_ts` is owned by the online writer (a float
+    # timestamp); the offline pass leaves it untouched rather than clobbering it.
     advice_rate_update: dict | None = None
     genuine_delivered = [
         r for r in advice_rows if r.get("explicit_rating") in ("y", "n")
@@ -1059,15 +1064,11 @@ def analyze_gate(
         dismissed = sum(1 for r in genuine_delivered if r["explicit_rating"] == "n")
         observed_rate = dismissed / len(genuine_delivered)
         prev_state = pm.load_advice_rate() or {}
-        prev_rate = float(prev_state.get("operating_point", observed_rate))
+        prev_rate = float(prev_state.get("rate_ewma", observed_rate))
         new_rate = round(
             prev_rate + GATE_ADVICE_RATE_ALPHA * (observed_rate - prev_rate), 4
         )
-        advice_rate_update = {
-            **prev_state,
-            "operating_point": new_rate,
-            "last_ts": session_id,
-        }
+        advice_rate_update = {**prev_state, "rate_ewma": new_rate}
 
     # ── Behavioral audit + MRT/IPW readout ───────────────────────────────────
     audit = _behavioral_audit(advice_rows, config)

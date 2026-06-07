@@ -731,3 +731,79 @@ def test_still_starved_safe_default_true_on_read_error(fake_pm, cfg) -> None:
     fake_pm.load_channel_stats = _boom  # type: ignore[assignment]
     # safe default: assume starved → fire, never drop a release (spec §3/§4).
     assert g.still_starved(s, fake_pm, 100.0) is True
+
+
+# ── Task 8.1: _build_advice_event MRT fields + new subjects (spec §8/§9) ──────
+
+
+def _single_medium_payload() -> dict:
+    return {
+        "primary_anomaly": {
+            "domain": "typing",
+            "entity": "user",
+            "severity": "medium",
+            "value": 2.0,
+            "timestamp": "2026-06-06T12:00:00+00:00",
+        },
+        "correlated_events": [],
+        "correlation_found": False,
+        "combined_severity": "MEDIUM",
+    }
+
+
+def test_advice_event_includes_decision_id_mrt_eligible_p_fire() -> None:
+    from reasoning.augur_advisor import _build_advice_event
+
+    decision = GateDecision.fire(
+        "no_arm", id="abc123", mrt_eligible=True, p_fire=0.1, probe=True
+    )
+    advice = _build_advice_event(
+        _single_medium_payload(),
+        advice_text="...",
+        model_used="qwen2.5:32b",
+        decision=decision,
+    )
+    assert advice["decision_id"] == "abc123"
+    assert advice["mrt_eligible"] is True
+    assert advice["p_fire"] == 0.1
+
+
+def test_advice_event_decision_defaults_when_none() -> None:
+    # Existing 3-arg callers (no decision) must keep working with safe defaults.
+    from reasoning.augur_advisor import _build_advice_event
+
+    advice = _build_advice_event(
+        _single_medium_payload(),
+        advice_text="...",
+        model_used="qwen2.5:32b",
+    )
+    assert advice["decision_id"] is None
+    assert advice["mrt_eligible"] is False
+    assert advice["p_fire"] is None
+
+
+def test_advice_event_preserves_existing_fields_with_decision() -> None:
+    from reasoning.augur_advisor import _build_advice_event
+
+    decision = GateDecision.fire("no_arm", id="d1")
+    advice = _build_advice_event(
+        _single_medium_payload(),
+        advice_text="hello",
+        model_used="qwen2.5:32b",
+        decision=decision,
+    )
+    assert advice["domain"] == "typing"
+    assert advice["entity"] == "user"
+    assert advice["advice"] == "hello"
+    assert advice["severity"] == "medium"
+    assert advice["correlation_found"] is False
+
+
+def test_advisor_suppression_subjects_exist() -> None:
+    from reasoning.augur_advisor import (
+        SUBJECT_DELIVERY_FAILURE,
+        SUBJECT_SUPPRESSED,
+    )
+
+    assert SUBJECT_SUPPRESSED == "augur.advisor.suppressed"
+    assert SUBJECT_DELIVERY_FAILURE == "augur.advisor.delivery_failure"

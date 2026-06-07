@@ -29,6 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from blackboard.config import AugurConfig
 from blackboard.connections import connect_redis
 from blackboard.persistence import PersistenceManager
+from reasoning.advisor_gate import (  # noqa: F401 — PEP-563 deferred annotation
+    GateDecision,
+)
 from reasoning.app_descriptor import (
     ACTIVITY_DOMAINS,
     ClassifierLane,
@@ -51,6 +54,12 @@ log = logging.getLogger("augur_advisor")
 # ---------------------------------------------------------------------------
 SUBSCRIBE_SUBJECT = "augur.correlation.detected"
 PUBLISH_SUBJECT = "augur.reasoning.advice"
+
+# Gate visibility subjects (spec §8). Distinct subjects so the MRT control arm
+# (PendingGateDecision, subscribed only to SUBJECT_SUPPRESSED) never tracks an
+# infrastructure non-delivery.
+SUBJECT_SUPPRESSED = "augur.advisor.suppressed"
+SUBJECT_DELIVERY_FAILURE = "augur.advisor.delivery_failure"
 
 REDIS_KEY_LAST_MOVE = "augur:chess:last_move"
 REDIS_KEY_HISTORY = "augur:chess:move_history"
@@ -493,12 +502,18 @@ def _build_advice_event(
     payload: dict,
     advice_text: str,
     model_used: str,
+    decision: GateDecision | None = None,
 ) -> dict:
     """Build the advice event dict published on augur.reasoning.advice.
 
     Derives domain/entity/value/severity from the payload so the result is
     fully self-contained. The caller merges in ``latency_ms`` (only available
     in the async context) before publishing.
+
+    When a ``GateDecision`` is supplied, threads ``decision_id``/``mrt_eligible``
+    /``p_fire`` into the payload so feedback can join the fired arm by exact key
+    and inverse-probability-weight it (spec §9). When omitted, these fields carry
+    safe defaults so legacy callers keep working.
     """
     primary = payload.get("primary_anomaly", {})
     primary_domain = primary.get("domain", "unknown")
@@ -544,6 +559,11 @@ def _build_advice_event(
         "correlation_span_s": payload.get("correlation_span_s"),
         "rule_window_s": payload.get("rule_window_s"),
         "temporal_lag_seconds": payload.get("temporal_lag_seconds"),
+        # Gate MRT linkage (spec §9): decision_id joins emission/silence/feedback;
+        # mrt_eligible/p_fire make the fired arm inverse-probability-weightable.
+        "decision_id": decision.id if decision is not None else None,
+        "mrt_eligible": decision.mrt_eligible if decision is not None else False,
+        "p_fire": decision.p_fire if decision is not None else None,
     }
 
 

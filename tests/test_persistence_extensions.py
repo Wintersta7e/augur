@@ -101,11 +101,11 @@ class TestTuningAppliedMarker:
         mock_redis = MagicMock()
         pm = PersistenceManager(mock_redis)
 
-        pm.mark_tuning_applied("sess-abc")
+        pm.mark_tuning_applied("sess-abc", pass_name="correlation")
 
         mock_redis.set.assert_called_once()
         args, kwargs = mock_redis.set.call_args
-        assert args[0] == "augur:correlation:tuning_applied:sess-abc"
+        assert args[0] == "augur:tuning_applied:correlation:sess-abc"
         assert args[1] == "1"
         assert kwargs.get("ex") == TUNING_APPLIED_TTL_S
 

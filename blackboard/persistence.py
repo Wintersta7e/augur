@@ -21,6 +21,20 @@ PROMPT_HISTORY_MAX = 100
 # dropped; existing entries can still be updated.
 MAX_APP_DESCRIPTORS = 2000
 
+# ── Advisor gate list-log caps ───────────────────────────────────────────────
+# Each is stored as a Redis list (lpush + ltrim).  The numbers balance
+# diagnostic visibility against memory: silences/emissions/observed are
+# high-frequency, delivery_failures are rare.
+MAX_GATE_SILENCES: int = 2000
+MAX_GATE_EMISSIONS: int = 2000
+MAX_GATE_OBSERVED: int = 2000
+MAX_GATE_DELIVERY_FAILURES: int = 500
+# Cap on distinct per-channel state-key entries in the gate hash stores
+# (habituation, channel_stats, reservoir, credibility, cost_tier_memory).
+# Matches MAX_APP_DESCRIPTORS discipline: new keys beyond this are refused
+# (fail-open / fire-leaning); existing keys keep updating.
+MAX_GATE_STATE_KEYS: int = 2000
+
 # Default TTL for per-session Redis keys (feedback, correlation graph,
 # reflection report). Prevents indefinite growth beyond the 1000-entry
 # index trim boundary. Override in tests by passing ``ttl_s=None`` to the
@@ -396,16 +410,337 @@ class PersistenceManager:
 
     # -- Correlation tuning idempotency marker ------------------------------
 
-    def mark_tuning_applied(self, session_id: str) -> None:
-        """Mark a session as having had its correlation tuning pass applied.
+    def mark_tuning_applied(
+        self, session_id: str, *, pass_name: str = "correlation"
+    ) -> None:
+        """Mark a session as having had a named tuning pass applied.
 
-        Sets a short-lived (7-day) marker so manual reflect-trigger replays
-        of a recent session do not double-apply the EWMA update.
+        Key: ``augur:tuning_applied:{pass_name}:{session_id}``
+
+        Different passes (e.g. "correlation", "gate") use independent markers
+        so they can be idempotent independently.  Sets a 7-day TTL so manual
+        reflect-trigger replays of a recent session do not double-apply.
         """
-        key = f"augur:correlation:tuning_applied:{session_id}"
+        key = f"augur:tuning_applied:{pass_name}:{session_id}"
         self._r.set(key, "1", ex=TUNING_APPLIED_TTL_S)
 
-    def is_tuning_applied(self, session_id: str) -> bool:
-        """Return True if mark_tuning_applied was called for this session."""
-        key = f"augur:correlation:tuning_applied:{session_id}"
+    def is_tuning_applied(
+        self, session_id: str, *, pass_name: str = "correlation"
+    ) -> bool:
+        """Return True if mark_tuning_applied was called for this session+pass."""
+        key = f"augur:tuning_applied:{pass_name}:{session_id}"
         return bool(self._r.exists(key))
+
+    # ── Advisor gate append-logs (spec §6) ───────────────────────────────────
+    # All four follow the same pattern: lpush + ltrim (mirror save_feedback
+    # index at persistence.py:78-79).  Loaders decode each entry individually
+    # inside a guarded comprehension so a single corrupt entry returns []
+    # rather than raising (mirror load_rule_window_state corrupt-read guard,
+    # persistence.py:297).
+
+    def save_silence_record(self, record: dict) -> None:
+        """Append a gate suppression record to augur:gate:silences (capped).
+
+        Schema: {ts, decision_id, state_key, domain, entity, severity, arm,
+                 reason, metrics, mrt_eligible, p_withhold}
+        """
+        key = "augur:gate:silences"
+        self._r.lpush(key, json.dumps(record))
+        self._r.ltrim(key, 0, MAX_GATE_SILENCES - 1)
+
+    def load_silence_records(self, *, limit: int = 100) -> list[dict]:
+        """Return up to *limit* recent silence records, newest first.
+
+        Returns [] if the list is absent or any entry is corrupt.
+        """
+        key = "augur:gate:silences"
+        raw_list = self._r.lrange(key, 0, limit - 1)
+        try:
+            return [json.loads(entry) for entry in raw_list]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning("augur:gate:silences contained a corrupt entry; returning []")
+            return []
+
+    def save_emission(self, record: dict) -> None:
+        """Append a gate emission record to augur:gate:emissions (capped).
+
+        Schema: {ts, decision_id, state_key, severity, tier, probe,
+                 audit_only, withheld_reason, mrt_eligible, p_fire}
+        """
+        key = "augur:gate:emissions"
+        self._r.lpush(key, json.dumps(record))
+        self._r.ltrim(key, 0, MAX_GATE_EMISSIONS - 1)
+
+    def load_emissions(self, *, limit: int = 100) -> list[dict]:
+        """Return up to *limit* recent emission records, newest first.
+
+        Returns [] if the list is absent or any entry is corrupt.
+        """
+        key = "augur:gate:emissions"
+        raw_list = self._r.lrange(key, 0, limit - 1)
+        try:
+            return [json.loads(entry) for entry in raw_list]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning("augur:gate:emissions contained a corrupt entry; returning []")
+            return []
+
+    def save_observed(self, record: dict) -> None:
+        """Append a gate observed-value record to augur:gate:observed (capped).
+
+        Schema: {ts, state_key, value, severity}
+        Written by both record_suppression and non-probe record_delivery_success.
+        """
+        key = "augur:gate:observed"
+        self._r.lpush(key, json.dumps(record))
+        self._r.ltrim(key, 0, MAX_GATE_OBSERVED - 1)
+
+    def load_observed(self, state_key: str, *, limit: int = 100) -> list[dict]:
+        """Return up to *limit* observed records for *state_key*, newest first.
+
+        Returns [] if absent or any entry is corrupt.  Filters by state_key
+        after reading so the caller gets only the records relevant to one channel.
+        """
+        key = "augur:gate:observed"
+        raw_list = self._r.lrange(key, 0, limit - 1)
+        try:
+            all_records = [json.loads(entry) for entry in raw_list]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning("augur:gate:observed contained a corrupt entry; returning []")
+            return []
+        return [r for r in all_records if r.get("state_key") == state_key]
+
+    def save_delivery_failure(
+        self,
+        signature: object,
+        reason: str,
+        now: str,
+        decision_id: str,
+    ) -> None:
+        """Append a delivery-failure record to augur:gate:delivery_failures (capped).
+
+        Schema: {ts, decision_id, state_key, domain, entity, reason}
+        Used for infrastructure non-deliveries (busy-skip, Ollama failure, etc.).
+        *signature* must expose .state_key, .domain, and .entity attributes.
+        """
+        record = {
+            "ts": now,
+            "decision_id": decision_id,
+            "state_key": getattr(signature, "state_key", None),
+            "domain": getattr(signature, "domain", None),
+            "entity": getattr(signature, "entity", None),
+            "reason": reason,
+        }
+        key = "augur:gate:delivery_failures"
+        self._r.lpush(key, json.dumps(record))
+        self._r.ltrim(key, 0, MAX_GATE_DELIVERY_FAILURES - 1)
+
+    def load_delivery_failures(self, *, limit: int = 100) -> list[dict]:
+        """Return up to *limit* recent delivery-failure records, newest first.
+
+        Returns [] if the list is absent or any entry is corrupt.
+        """
+        key = "augur:gate:delivery_failures"
+        raw_list = self._r.lrange(key, 0, limit - 1)
+        try:
+            return [json.loads(entry) for entry in raw_list]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning(
+                "augur:gate:delivery_failures contained a corrupt entry; returning []"
+            )
+            return []
+
+    # ── Task 1.2: per-field hash stores (spec §6) ────────────────────────────
+    # Each save_* returns bool: True if the write succeeded (existing key or
+    # room below the cap), False if refused at cap (new key would exceed
+    # MAX_GATE_STATE_KEYS).  Mirrors the save_app_descriptor refuse-at-cap
+    # pattern (persistence.py:203-216).
+    #
+    # Each load_* guards json.loads / UnicodeDecodeError → {} (safe "unseen"
+    # default), mirroring load_rule_window_state (persistence.py:312-319).
+    #
+    # habituation and habituation_floor are SEPARATE Redis keys (spec §6).
+
+    def _hash_save(self, redis_key: str, field: str, entry: dict) -> bool:
+        """Per-field HSET with refuse-at-cap. Returns True if written."""
+        if (
+            not self._r.hexists(redis_key, field)
+            and self._r.hlen(redis_key) >= MAX_GATE_STATE_KEYS
+        ):
+            log.warning(
+                "gate hash %s full (%d); dropping new field %s",
+                redis_key,
+                MAX_GATE_STATE_KEYS,
+                field,
+            )
+            return False
+        self._r.hset(redis_key, field, json.dumps(entry))
+        return True
+
+    def _hash_load(self, redis_key: str, field: str) -> dict:
+        """Per-field HGET with corrupt-read guard. Returns {} on missing/corrupt."""
+        raw = self._r.hget(redis_key, field)
+        if raw is None:
+            return {}
+        try:
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning("gate hash %s field %s corrupt; returning {}", redis_key, field)
+            return {}
+
+    # -- habituation (online: h, last_event_ts, count) -----------------------
+
+    def save_habituation(self, state_key: str, entry: dict) -> bool:
+        """Store per-channel habituation state. Returns False if refused at cap."""
+        return self._hash_save("augur:gate:habituation", state_key, entry)
+
+    def load_habituation(self, state_key: str) -> dict:
+        """Return habituation entry for state_key, or {} if missing/corrupt."""
+        return self._hash_load("augur:gate:habituation", state_key)
+
+    # -- habituation_floor (offline: floor, last_ts) — separate Redis key ----
+
+    def save_habituation_floor(self, state_key: str, entry: dict) -> bool:
+        """Store per-channel habituation floor. Returns False if refused at cap."""
+        return self._hash_save("augur:gate:habituation_floor", state_key, entry)
+
+    def load_habituation_floor(self, state_key: str) -> dict:
+        """Return habituation floor for state_key, or {} if missing/corrupt."""
+        return self._hash_load("augur:gate:habituation_floor", state_key)
+
+    # -- credibility (offline + conservative online: cred, n, last_fb_ts) ----
+
+    def save_credibility(self, signal_class: str, entry: dict) -> bool:
+        """Store per-class credibility state. Returns False if refused at cap."""
+        return self._hash_save("augur:gate:credibility", signal_class, entry)
+
+    def load_credibility(self, signal_class: str) -> dict:
+        """Return credibility entry for signal_class, or {} if missing/corrupt."""
+        return self._hash_load("augur:gate:credibility", signal_class)
+
+    # -- reservoir (online: count, last_ts) -----------------------------------
+
+    def save_reservoir(self, state_key: str, entry: dict) -> bool:
+        """Store per-channel reservoir state. Returns False if refused at cap."""
+        return self._hash_save("augur:gate:reservoir", state_key, entry)
+
+    def load_reservoir(self, state_key: str) -> dict:
+        """Return reservoir entry for state_key, or {} if missing/corrupt."""
+        return self._hash_load("augur:gate:reservoir", state_key)
+
+    # -- cost_tier_memory (online + offline: earned_tier2, helped, count, last_ts)
+
+    def save_cost_tier_memory(self, state_key: str, entry: dict) -> bool:
+        """Store per-channel cost-tier memory. Returns False if refused at cap."""
+        return self._hash_save("augur:gate:cost_tier_memory", state_key, entry)
+
+    def load_cost_tier_memory(self, state_key: str) -> dict:
+        """Return cost-tier memory for state_key, or {} if missing/corrupt."""
+        return self._hash_load("augur:gate:cost_tier_memory", state_key)
+
+    # -- channel_stats (online: seen, consecutive_suppressions, ...) ----------
+
+    def save_channel_stats(self, state_key: str, entry: dict) -> bool:
+        """Store per-channel tracking stats. Returns False if refused at cap."""
+        return self._hash_save("augur:gate:channel_stats", state_key, entry)
+
+    def load_channel_stats(self, state_key: str) -> dict:
+        """Return channel stats for state_key, or {} if missing/corrupt."""
+        return self._hash_load("augur:gate:channel_stats", state_key)
+
+    # -- advice_rate (string key: rate_ewma, last_ts) -------------------------
+
+    def save_advice_rate(self, entry: dict) -> None:
+        """Persist the global advice-rate EWMA state."""
+        self._r.set("augur:gate:advice_rate", json.dumps(entry))
+
+    def load_advice_rate(self) -> dict:
+        """Return advice-rate state, or {} if missing/corrupt."""
+        raw = self._r.get("augur:gate:advice_rate")
+        if not raw:
+            return {}
+        try:
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+            data = json.loads(raw)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning("augur:gate:advice_rate corrupt; returning {}")
+            return {}
+
+    # -- self_tolerance set (offline: SADD/SREM/SISMEMBER/SMEMBERS) -----------
+
+    def add_self_tolerance(self, state_key: str) -> None:
+        """Add state_key to the self-tolerance set."""
+        self._r.sadd("augur:gate:self_tolerance", state_key)
+
+    def remove_self_tolerance(self, state_key: str) -> None:
+        """Remove state_key from the self-tolerance set."""
+        self._r.srem("augur:gate:self_tolerance", state_key)
+
+    def is_self_tolerant(self, state_key: str) -> bool:
+        """Return True if state_key is in the self-tolerance set."""
+        return bool(self._r.sismember("augur:gate:self_tolerance", state_key))
+
+    def load_self_tolerance(self) -> set[str]:
+        """Return the full self-tolerance set (decoded to str)."""
+        raw = self._r.smembers("augur:gate:self_tolerance")
+        return {m.decode() if isinstance(m, bytes) else m for m in raw}
+
+    # -- can_track_gate_state (read-only cap probe) ---------------------------
+
+    def can_track_gate_state(self, hash_name: str, state_key: str) -> bool:
+        """Return True if state_key can be stored in hash_name without exceeding cap.
+
+        True when the field already exists (existing key keeps updating even at
+        cap) or when hlen < MAX_GATE_STATE_KEYS (room available).  This is the
+        read-only probe used by Gate.evaluate() to detect the cap-fail-open
+        condition without writing.
+        """
+        return bool(
+            self._r.hexists(hash_name, state_key)
+            or self._r.hlen(hash_name) < MAX_GATE_STATE_KEYS
+        )
+
+    # ── Task 1.3: atomic gate tuning save (spec §6) ──────────────────────────
+
+    def save_gate_tuning_state(
+        self,
+        *,
+        floors: dict | None = None,
+        credibility: dict | None = None,
+        cost_tier: dict | None = None,
+        tolerance_add: list[str] | None = None,
+        tolerance_remove: list[str] | None = None,
+        advice_rate: dict | None = None,
+    ) -> None:
+        """Atomically persist all gate offline keys in one pipeline (transaction).
+
+        Uses per-field HSET for the dual-written hashes (floors, credibility,
+        cost_tier) so online writers on other fields are never clobbered.
+        Uses SADD/SREM for the self-tolerance set and SET for advice_rate.
+
+        Mirrors save_tuning_state (persistence.py:326-348) but covers the gate
+        offline keys.  pipeline(transaction=True) is redis-py's default.
+        """
+        pipe = self._r.pipeline()  # transaction=True by default
+        if floors:
+            for field, entry in floors.items():
+                pipe.hset("augur:gate:habituation_floor", field, json.dumps(entry))
+        if credibility:
+            for field, entry in credibility.items():
+                pipe.hset("augur:gate:credibility", field, json.dumps(entry))
+        if cost_tier:
+            for field, entry in cost_tier.items():
+                pipe.hset("augur:gate:cost_tier_memory", field, json.dumps(entry))
+        if tolerance_add:
+            for state_key in tolerance_add:
+                pipe.sadd("augur:gate:self_tolerance", state_key)
+        if tolerance_remove:
+            for state_key in tolerance_remove:
+                pipe.srem("augur:gate:self_tolerance", state_key)
+        if advice_rate is not None:
+            pipe.set("augur:gate:advice_rate", json.dumps(advice_rate))
+        pipe.execute()

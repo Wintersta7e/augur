@@ -52,6 +52,7 @@ SUBJECT_ANOMALY = "augur.detection.anomaly"
 SUBJECT_ADVICE = "augur.reasoning.advice"
 SUBJECT_CORRELATION = "augur.correlation.detected"
 SUBJECT_REFLECT = "augur.reflect.complete"
+SUBJECT_SUPPRESSED = "augur.advisor.suppressed"
 WRAP_WIDTH = 80
 
 # ---------------------------------------------------------------------------
@@ -294,6 +295,25 @@ def render_advice(data: dict) -> str:
     return "\n".join(lines)
 
 
+def render_suppression(data: dict) -> str:
+    """One-line dimmed notice for a gate-suppressed (silent) advice decision.
+
+    Renders ``(silent: <reason>)`` scoped to the primary anomaly's
+    domain/entity, mirroring the low-severity one-liner style. Read-only
+    operator surface — purely cosmetic, no state mutation here.
+    """
+    domain = data.get("domain", "?")
+    entity = data.get("entity", "?")
+    severity = data.get("severity", "?")
+    reason = data.get("reason", "?")
+    ts = _short_ts(data.get("timestamp", ""))
+    return (
+        f"{DIM}{ts}{RESET}  "
+        f"{FG_GRAY}{domain}/{entity} {severity}  "
+        f"(silent: {reason}){RESET}"
+    )
+
+
 def render_reflection(data: dict) -> str:
     """End-of-session reflection summary block.
 
@@ -434,6 +454,7 @@ BANNER = f"""{FG_CYAN}{BOLD}
   ├─ {FG_GREEN}anomalies{FG_GRAY}    →  {SUBJECT_ANOMALY}
   ├─ {FG_YELLOW}correlations{FG_GRAY} →  {SUBJECT_CORRELATION}
   ├─ {FG_CYAN}advice{FG_GRAY}       →  {SUBJECT_ADVICE}
+  ├─ {FG_GRAY}suppressed{FG_GRAY}   →  {SUBJECT_SUPPRESSED}
   └─ {FG_YELLOW}reflection{FG_GRAY}   →  {SUBJECT_REFLECT}
 {RESET}"""
 
@@ -487,6 +508,18 @@ async def run() -> None:
 
         print(render_advice(data), flush=True)
 
+    async def on_suppressed(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = json.loads(msg.data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        print(render_suppression(data), flush=True)
+        # The suppressed payload carries the PRIMARY anomaly's domain/entity
+        # and the ORIGINATING anomaly's timestamp, so update_last_rendered
+        # keyed on those makes dedup_should_suppress fire for the same anomaly.
+        update_last_rendered(last_rendered, data)
+
     async def on_reflection(msg: nats.aio.client.Msg) -> None:
         try:
             data = json.loads(msg.data.decode())
@@ -501,6 +534,7 @@ async def run() -> None:
     sub_anomaly = await nc.subscribe(SUBJECT_ANOMALY, cb=on_anomaly)
     sub_correlation = await nc.subscribe(SUBJECT_CORRELATION, cb=on_correlation)
     sub_advice = await nc.subscribe(SUBJECT_ADVICE, cb=on_advice)
+    sub_suppressed = await nc.subscribe(SUBJECT_SUPPRESSED, cb=on_suppressed)
     sub_reflect = await nc.subscribe(SUBJECT_REFLECT, cb=on_reflection)
 
     try:
@@ -513,6 +547,7 @@ async def run() -> None:
             await sub_anomaly.unsubscribe()
             await sub_correlation.unsubscribe()
             await sub_advice.unsubscribe()
+            await sub_suppressed.unsubscribe()
             await sub_reflect.unsubscribe()
         except Exception as exc:
             log.debug("Unsubscribe failed during shutdown: %s", exc)

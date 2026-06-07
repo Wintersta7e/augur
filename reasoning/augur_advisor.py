@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable  # noqa: F401 — PEP-563 deferred annotations
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import httpx
 import nats
@@ -29,6 +30,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from blackboard.config import AugurConfig
 from blackboard.connections import connect_redis
 from blackboard.persistence import PersistenceManager
+from blackboard.session import get_active_session
+from reasoning.advisor_gate import (
+    Gate,
+    GateDecision,
+    Signature,  # noqa: F401 — PEP-563 deferred annotation (annotations only)
+    build_signature,
+)
+from reasoning.advisor_gate_scheduler import MustFireScheduler
 from reasoning.app_descriptor import (
     ACTIVITY_DOMAINS,
     ClassifierLane,
@@ -51,6 +60,12 @@ log = logging.getLogger("augur_advisor")
 # ---------------------------------------------------------------------------
 SUBSCRIBE_SUBJECT = "augur.correlation.detected"
 PUBLISH_SUBJECT = "augur.reasoning.advice"
+
+# Gate visibility subjects (spec §8). Distinct subjects so the MRT control arm
+# (PendingGateDecision, subscribed only to SUBJECT_SUPPRESSED) never tracks an
+# infrastructure non-delivery.
+SUBJECT_SUPPRESSED = "augur.advisor.suppressed"
+SUBJECT_DELIVERY_FAILURE = "augur.advisor.delivery_failure"
 
 REDIS_KEY_LAST_MOVE = "augur:chess:last_move"
 REDIS_KEY_HISTORY = "augur:chess:move_history"
@@ -493,12 +508,19 @@ def _build_advice_event(
     payload: dict,
     advice_text: str,
     model_used: str,
+    decision: GateDecision | None = None,
 ) -> dict:
     """Build the advice event dict published on augur.reasoning.advice.
 
     Derives domain/entity/value/severity from the payload so the result is
     fully self-contained. The caller merges in ``latency_ms`` (only available
     in the async context) before publishing.
+
+    When a ``GateDecision`` is supplied, threads ``decision_id``/``mrt_eligible``
+    /``p_fire``/``probe`` into the payload so feedback can join the fired arm by
+    exact key, inverse-probability-weight it, and distinguish a bet-hedge
+    probe-fire (spec §9). When omitted, these fields carry safe defaults so
+    legacy callers keep working.
     """
     primary = payload.get("primary_anomaly", {})
     primary_domain = primary.get("domain", "unknown")
@@ -544,6 +566,15 @@ def _build_advice_event(
         "correlation_span_s": payload.get("correlation_span_s"),
         "rule_window_s": payload.get("rule_window_s"),
         "temporal_lag_seconds": payload.get("temporal_lag_seconds"),
+        # Gate MRT linkage (spec §9): decision_id joins emission/silence/feedback;
+        # mrt_eligible/p_fire make the fired arm inverse-probability-weightable;
+        # probe flags a bet-hedge probe-fire so analyze_gate (§9/§11.1) can tell
+        # the probe-fired arm from a withheld mrt_eligible silence (joined by
+        # decision_id) — without it PendingAdvice.probe is silently always False.
+        "decision_id": decision.id if decision is not None else None,
+        "mrt_eligible": decision.mrt_eligible if decision is not None else False,
+        "p_fire": decision.p_fire if decision is not None else None,
+        "probe": decision.probe if decision is not None else False,
     }
 
 
@@ -602,6 +633,427 @@ async def query_ollama(
 
 
 # ---------------------------------------------------------------------------
+# Gate visibility publishers (spec §8)
+# ---------------------------------------------------------------------------
+
+
+def _primary_field(payload: dict, key: str, default: Any = None) -> Any:
+    """Read a field off the primary anomaly (spec §8 suppressed/failure payloads)."""
+    return (payload.get("primary_anomaly") or {}).get(key, default)
+
+
+def _resolve_session_id(redis_client: redis.Redis | None) -> str | None:
+    """Best-effort current session_id for the §8 suppressed payload.
+
+    Never raises: a Redis read failure / no active session degrades to ``None``
+    (the suppressed event is still published; only the session linkage is lost).
+    """
+    if redis_client is None:
+        return None
+    try:
+        return get_active_session(redis_client)
+    except Exception:  # pragma: no cover - defensive (publish must not crash)
+        return None
+
+
+async def publish_suppressed_event(
+    nc: nats.aio.client.Client,
+    signature: Signature,
+    decision: GateDecision,
+    payload: dict,
+    redis_client: redis.Redis | None,
+) -> None:
+    """Publish the full §8 suppressed payload on ``augur.advisor.suppressed``.
+
+    Carries everything ``PendingGateDecision`` + the console need so feedback
+    never reconstructs from Redis: decision/state/primary domain+entity/value/
+    baseline/severity/session/arm/reason/mrt_eligible/p_withhold and the
+    ORIGINATING anomaly's timestamp (so console dedup matches).
+    """
+    event = {
+        "decision_id": decision.id,
+        "state_key": signature.state_key,
+        "domain": signature.domain,
+        "entity": signature.entity,
+        "value": signature.value,
+        "baseline_mean": _primary_field(payload, "baseline_mean"),
+        "severity": signature.severity,
+        "session_id": _resolve_session_id(redis_client),
+        "arm": decision.deciding_arm,
+        "reason": decision.reason,
+        "mrt_eligible": decision.mrt_eligible,
+        "p_withhold": decision.p_withhold,
+        "timestamp": _primary_field(payload, "timestamp"),
+    }
+    await nc.publish(SUBJECT_SUPPRESSED, json.dumps(event).encode())
+
+
+async def publish_delivery_failure_event(
+    nc: nats.aio.client.Client,
+    signature: Signature,
+    decision: GateDecision,
+    payload: dict,
+) -> None:
+    """Publish an infra non-delivery on ``augur.advisor.delivery_failure`` (§8).
+
+    A distinct subject from ``.suppressed`` so ``PendingGateDecision`` (which
+    subscribes only to ``.suppressed``) never tracks an infra drop.
+    """
+    event = {
+        "decision_id": decision.id,
+        "state_key": signature.state_key,
+        "domain": signature.domain,
+        "entity": signature.entity,
+        "reason": decision.reason,
+        "timestamp": _primary_field(payload, "timestamp"),
+    }
+    await nc.publish(SUBJECT_DELIVERY_FAILURE, json.dumps(event).encode())
+
+
+# ---------------------------------------------------------------------------
+# Per-message control flow (spec §3) — extracted from run() so it is directly
+# unit-testable with the LLM (query_ollama) + NATS (nc.publish) mocked.
+# ---------------------------------------------------------------------------
+
+
+def _safe(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Call ``fn`` swallowing any Exception at ERROR (spec §3 ``_safe``).
+
+    A state-write bug must never terminate the NATS callback or drop a must-fire.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except Exception:
+        log.error("gate state write failed: %s", getattr(fn, "__name__", fn))
+        return None
+
+
+async def _build_prompt_and_deliver(
+    *,
+    payload: dict,
+    signature: Signature,
+    decision: GateDecision,
+    pm: PersistenceManager,
+    nc: nats.aio.client.Client,
+    http_client: httpx.AsyncClient,
+    redis_client: redis.Redis | None,
+    config: AugurConfig,
+    now: float,
+    query_ollama_fn: Callable,
+    gate: Gate,
+    tier: int,
+    audit_only: bool,
+) -> None:
+    """Build prompt → query LLM → publish advice → record_delivery_success.
+
+    A prompt-build / Ollama / publish failure writes ONLY a ``delivery_failure``
+    (no phantom delivery; ``record_delivery_success`` runs solely after a
+    successful publish).  ``record_delivery_success`` is wrapped in ``_safe`` so
+    a state-write bug degrades safe (consecutive_suppressions simply isn't reset).
+    """
+    path = resolve_advisor_path(payload)
+    domain = signature.domain
+    # ── prompt build ──
+    try:
+        if path == "correlation":
+            prompt = build_correlation_prompt(payload)
+        else:
+            primary = payload["primary_anomaly"]
+            stored_prompt = pm.load_prompt(domain)
+            system_prompt = stored_prompt or DEFAULT_PROMPTS.get(
+                domain,
+                f"You are an analyst monitoring '{domain}' data. An anomaly was detected.",
+            )
+            builder = DOMAIN_HANDLERS.get(domain, build_generic_prompt)
+            prompt = builder(primary, redis_client, system_prompt)
+    except Exception as exc:
+        log.error("Prompt build failed for '%s': %s", domain, exc)
+        _safe(
+            pm.save_delivery_failure, signature, "prompt_build_failed", now, decision.id
+        )
+        await publish_delivery_failure_event(
+            nc, signature, decision.as_fire("prompt_build_failed"), payload
+        )
+        return
+
+    # ── LLM ──
+    try:
+        advice, latency_ms = await query_ollama_fn(prompt, http_client, config)
+    except httpx.ConnectError:
+        log.error("Ollama unreachable at %s", config.ollama_url)
+        _safe(
+            pm.save_delivery_failure, signature, "ollama_unreachable", now, decision.id
+        )
+        await publish_delivery_failure_event(
+            nc, signature, decision.as_fire("ollama_unreachable"), payload
+        )
+        return
+    except httpx.TimeoutException:
+        log.error("Ollama timed out after %ds", config.ollama_timeout)
+        _safe(pm.save_delivery_failure, signature, "ollama_timeout", now, decision.id)
+        await publish_delivery_failure_event(
+            nc, signature, decision.as_fire("ollama_timeout"), payload
+        )
+        return
+    except Exception as exc:
+        log.error("Ollama returned unusable response: %s", exc)
+        _safe(pm.save_delivery_failure, signature, "ollama_error", now, decision.id)
+        await publish_delivery_failure_event(
+            nc, signature, decision.as_fire("ollama_error"), payload
+        )
+        return
+
+    # ── publish advice ──
+    advice_payload = _build_advice_event(
+        payload, advice_text=advice, model_used=config.ollama_model, decision=decision
+    )
+    advice_payload["latency_ms"] = round(latency_ms, 1)
+    advice_payload["tier"] = tier
+    try:
+        await nc.publish(PUBLISH_SUBJECT, json.dumps(advice_payload).encode())
+        log.info("Published advice to %s", PUBLISH_SUBJECT)
+    except Exception as exc:
+        log.error("NATS publish failed: %s", exc)
+        _safe(pm.save_delivery_failure, signature, "publish_failed", now, decision.id)
+        return
+
+    # ── record AFTER a successful publish (no phantom) ──
+    _safe(pm.save_last_advice, advice_payload)
+    _safe(
+        gate.record_delivery_success,
+        signature,
+        pm,
+        now,
+        decision=decision,
+        tier=tier,
+        audit_only=audit_only,
+    )
+
+
+async def _publish_tier1_note(
+    *,
+    payload: dict,
+    signature: Signature,
+    decision: GateDecision,
+    nc: nats.aio.client.Client,
+    config: AugurConfig,
+) -> None:
+    """Publish a templated Tier-1 note on ``augur.reasoning.advice`` (tier=1)."""
+    note = _build_advice_event(
+        payload,
+        advice_text=(
+            f"(Tier-1 note) A {signature.severity} {signature.domain} signal was "
+            f"observed on {signature.entity}; no full analysis was warranted."
+        ),
+        model_used="tier1-template",
+        decision=decision,
+    )
+    note["tier"] = 1
+    await nc.publish(PUBLISH_SUBJECT, json.dumps(note).encode())
+
+
+async def process_message(
+    *,
+    payload: dict,
+    gate: Gate,
+    scheduler: MustFireScheduler,
+    pm: PersistenceManager,
+    nc: nats.aio.client.Client,
+    http_client: httpx.AsyncClient,
+    redis_client: redis.Redis | None,
+    classifier_lane: ClassifierLane,
+    config: AugurConfig,
+    now: float,
+    query_ollama: Callable = query_ollama,
+) -> None:
+    """Gate-driven per-message control flow (spec §3).
+
+    Severity-gate → enrich descriptors → gate.evaluate (fail-open on any
+    Exception) → suppress / downgrade / fire, with the must-fire scheduler
+    serializing exempt / fail_open / anti_starvation_release ahead of ordinary
+    fires (which never await).  The §3 pseudocode is implemented verbatim.
+    """
+    # Gate on combined_severity (uppercase from correlator) — compare lowercase.
+    severity = str(payload.get("combined_severity", "low")).lower()
+    if severity not in SEVERITY_GATE:
+        primary = payload.get("primary_anomaly", {})
+        log.info(
+            "Ignoring %s severity event for %s/%s",
+            severity,
+            primary.get("domain", "?"),
+            primary.get("entity", "?"),
+        )
+        return
+
+    path = resolve_advisor_path(payload)
+
+    # Populate the app-descriptor map BEFORE the gate so it fills even when advice
+    # is suppressed/skipped (resolve_app_descriptor guards RedisError; enqueue is
+    # sync-guarded, so this cannot raise out of the handler).
+    enrich_payload_descriptors(pm, classifier_lane, path, payload)
+
+    signature = build_signature(payload)
+
+    # ── gate.evaluate (READ-ONLY) — any Exception ⇒ fail open to FIRE (inv. C) ──
+    try:
+        decision = gate.evaluate(signature, pm, config, now=now)
+    except Exception as exc:
+        log.error("Advisor gate failed open: %s", exc)
+        decision = GateDecision.fire("gate_error_fail_open")
+
+    # ── suppress (authoritative record_suppression or FIRE) ──
+    if decision.action == "suppress":
+        try:
+            ok = gate.record_suppression(decision, signature, pm, now)
+        except Exception as exc:
+            log.error("record_suppression failed open: %s", exc)
+            ok = False
+        if not ok:
+            decision = decision.as_fire("gate_error_fail_open")
+            # falls through to the must_fire block below
+        else:
+            try:
+                await publish_suppressed_event(
+                    nc, signature, decision, payload, redis_client
+                )
+            except Exception as exc:
+                log.error("suppressed publish failed: %s", exc)
+                _safe(
+                    pm.save_delivery_failure,
+                    signature,
+                    "suppressed_publish_failed",
+                    now,
+                    decision.id,
+                )
+            return
+
+    # ── downgrade → Tier-1 note ──
+    if decision.action == "downgrade":
+        try:
+            await _publish_tier1_note(
+                payload=payload,
+                signature=signature,
+                decision=decision,
+                nc=nc,
+                config=config,
+            )
+        except Exception as exc:
+            log.error("tier-1 note publish failed: %s", exc)
+            _safe(
+                pm.save_delivery_failure,
+                signature,
+                "tier1_publish_failed",
+                now,
+                decision.id,
+            )
+            return
+        _safe(
+            gate.record_delivery_success,
+            signature,
+            pm,
+            now,
+            decision=decision,
+            tier=1,
+        )
+        return
+
+    # ── fire (normal, exempt, probe, anti_starvation_release, cap_fail_open) ──
+    must_fire = signature.exempt or decision.reason in (
+        "anti_starvation_release",
+        "gate_error_fail_open",
+    )
+
+    async def _deliver() -> None:
+        await _build_prompt_and_deliver(
+            payload=payload,
+            signature=signature,
+            decision=decision,
+            pm=pm,
+            nc=nc,
+            http_client=http_client,
+            redis_client=redis_client,
+            config=config,
+            now=now,
+            query_ollama_fn=query_ollama,
+            gate=gate,
+            tier=decision.tier or 2,
+            audit_only=signature.exempt,
+        )
+
+    if must_fire:
+        if decision.reason == "anti_starvation_release" and scheduler.release_in_flight(
+            signature.state_key
+        ):
+            return  # coalesce: one in-flight anti-starvation release per channel
+        priority = (
+            "exempt"
+            if signature.exempt
+            else (
+                "fail_open"
+                if decision.reason == "gate_error_fail_open"
+                else "anti_starvation"
+            )
+        )
+        try:
+            with scheduler.track_release(signature.state_key):
+                async with scheduler.acquire(priority):
+                    if (
+                        decision.reason == "anti_starvation_release"
+                        and not gate.still_starved(signature, pm, now)
+                    ):
+                        return  # concurrent delivery already served this channel
+                    await _deliver()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # inv. C: a scheduler bug must never drop a must-fire
+            log.error("must-fire scheduler failed: %s", exc)
+            await scheduler.emergency_deliver(_deliver)
+        return
+
+    # ── ordinary fire — nonblocking; fails if lock held OR a must-fire queued ──
+    if not scheduler.try_acquire_ordinary():
+        if decision.reason == "cap_fail_open":
+            _safe(
+                pm.save_delivery_failure,
+                signature,
+                "cap_fail_open_busy",
+                now,
+                decision.id,
+            )
+            await publish_delivery_failure_event(nc, signature, decision, payload)
+            return
+        try:
+            tracked = gate.record_busy_skip(signature, pm, now)
+        except Exception as exc:  # inv. C: a record_busy_skip bug must not silence
+            log.error("record_busy_skip failed open: %s", exc)
+            decision = decision.as_fire("gate_error_fail_open")
+            try:
+                async with scheduler.acquire("fail_open"):
+                    await _deliver()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc2:
+                log.error("must-fire scheduler failed: %s", exc2)
+                await scheduler.emergency_deliver(_deliver)
+            return
+        if not tracked:
+            _safe(
+                pm.save_delivery_failure,
+                signature,
+                "advisor_busy_untrackable",
+                now,
+                decision.id,
+            )
+        await publish_delivery_failure_event(nc, signature, decision, payload)
+        return
+
+    try:
+        await _deliver()
+    finally:
+        scheduler.release_ordinary()
+
+
+# ---------------------------------------------------------------------------
 # Core loop
 # ---------------------------------------------------------------------------
 
@@ -654,8 +1106,18 @@ async def run() -> None:
             exc,
         )
 
-    # Track in-flight requests to avoid piling up during slow LLM responses
+    # Serialize LLM deliveries via the must-fire scheduler over reasoning_lock
+    # (spec §4): exempt / fail_open / anti_starvation_release acquire through it;
+    # ordinary fires use the nonblocking try_acquire_ordinary path.
     reasoning_lock = asyncio.Lock()
+    scheduler = MustFireScheduler(
+        reasoning_lock,
+        max_release_wait_s=config.gate_max_release_wait_s,
+        max_release_overtake=config.gate_max_release_overtake,
+    )
+    # still_starved (called under the lock) needs the starvation bounds → inject
+    # the live config so the gate uses the operator's tuning.
+    gate = Gate(config=config)
 
     async def on_message(msg: nats.aio.client.Msg) -> None:
         try:
@@ -664,121 +1126,18 @@ async def run() -> None:
             log.warning("Bad correlation payload: %s", exc)
             return
 
-        # Gate on combined_severity (uppercase from correlator) — compare lowercase
-        severity = str(payload.get("combined_severity", "low")).lower()
-        if severity not in SEVERITY_GATE:
-            primary = payload.get("primary_anomaly", {})
-            log.info(
-                "Ignoring %s severity event for %s/%s",
-                severity,
-                primary.get("domain", "?"),
-                primary.get("entity", "?"),
-            )
-            return
-
-        path = resolve_advisor_path(payload)
-
-        if path == "correlation":
-            domain = "multi"
-            entity = (
-                "+".join(
-                    e.get("domain", "?") for e in payload.get("correlated_events", [])
-                )
-                or "?"
-            )
-        else:
-            primary = payload["primary_anomaly"]
-            domain = primary.get("domain", "unknown")
-            entity = primary.get("entity", primary.get("player", "?"))
-
-        log.info(
-            "Event received [%s] path=%s domain=%s entity=%s — querying LLM",
-            severity.upper(),
-            path,
-            domain,
-            entity,
+        await process_message(
+            payload=payload,
+            gate=gate,
+            scheduler=scheduler,
+            pm=pm,
+            nc=nc,
+            http_client=http_client,
+            redis_client=redis_client,
+            classifier_lane=classifier_lane,
+            config=config,
+            now=datetime.now(timezone.utc).timestamp(),
         )
-
-        # Populate the app-descriptor map BEFORE the lock-skip so it fills even
-        # when advice is skipped. resolve_app_descriptor guards RedisError and
-        # enqueue() is sync-guarded, so this cannot raise out of the handler.
-        enrich_payload_descriptors(pm, classifier_lane, path, payload)
-
-        if reasoning_lock.locked():
-            log.warning("LLM reasoning already in progress, skipping")
-            return
-
-        async with reasoning_lock:
-            if path == "correlation":
-                # Correlation prompt is self-contained — no system_prompt needed.
-                prompt = build_correlation_prompt(payload)
-            else:
-                primary = payload["primary_anomaly"]
-                stored_prompt = pm.load_prompt(domain)
-                if stored_prompt:
-                    system_prompt = stored_prompt
-                    log.info("Using stored prompt for domain '%s'", domain)
-                else:
-                    system_prompt = DEFAULT_PROMPTS.get(
-                        domain,
-                        f"You are an analyst monitoring '{domain}' data. An anomaly was detected.",
-                    )
-                builder = DOMAIN_HANDLERS.get(domain, build_generic_prompt)
-                try:
-                    prompt = builder(primary, redis_client, system_prompt)
-                except Exception as exc:
-                    log.error("Prompt build failed for '%s': %s", domain, exc)
-                    return
-
-            log.debug("Prompt:\n%s", prompt)
-
-            try:
-                advice, latency_ms = await query_ollama(prompt, http_client, config)
-            except httpx.ConnectError:
-                log.error("Ollama unreachable at %s", config.ollama_url)
-                return
-            except httpx.TimeoutException:
-                log.error("Ollama timed out after %ds", config.ollama_timeout)
-                return
-            except httpx.HTTPStatusError as exc:
-                log.error("Ollama HTTP error: %s", exc.response.status_code)
-                return
-            except ValueError as exc:
-                log.error("Ollama returned unusable response: %s", exc)
-                return
-
-            log.info(
-                "LLM responded in %.0fms (%d chars)",
-                latency_ms,
-                len(advice),
-            )
-            log.info("Advice for %s/%s:\n%s", domain, entity, advice)
-
-            # Build advice payload — include correlation fields for downstream
-            advice_payload = _build_advice_event(
-                payload,
-                advice_text=advice,
-                model_used=config.ollama_model,
-            )
-            advice_payload["latency_ms"] = round(latency_ms, 1)
-
-            try:
-                await nc.publish(
-                    PUBLISH_SUBJECT,
-                    json.dumps(advice_payload).encode(),
-                )
-                log.info("Published advice to %s", PUBLISH_SUBJECT)
-            except Exception as exc:
-                log.error("NATS publish failed: %s", exc)
-
-            try:
-                # R2-ARCH-02: routed through PersistenceManager rather than
-                # a bare redis_client.set so the write path matches the
-                # read path (pm.load_last_advice).
-                pm.save_last_advice(advice_payload)
-                log.info("Wrote advice to Redis via PersistenceManager")
-            except redis.RedisError as exc:
-                log.error("Redis write failed: %s", exc)
 
     sub = await nc.subscribe(SUBSCRIBE_SUBJECT, cb=on_message)
     log.info("Subscribed to %s", SUBSCRIBE_SUBJECT)

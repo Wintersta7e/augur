@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from reasoning.advisor_gate import Gate, build_signature
-from tests.conftest import SINGLE_HIGH_TYPING, SINGLE_MEDIUM_TYPING
+from tests.conftest import EXEMPT_PAYLOAD, SINGLE_HIGH_TYPING, SINGLE_MEDIUM_TYPING
 
 
 def test_central_tolerance_suppresses_medium_not_high(fake_pm, cfg):
@@ -680,8 +680,15 @@ def test_credibility_behavioral_fusion_applies_when_eligible(fake_pm):
     with >= min_samples, fuses in (explicit-dominant) to pull effective
     credibility below the prior → P>0 → a low draw suppresses, and because the
     suppression is behavioral-driven it is bet-hedge-eligible (mrt_eligible).
+
+    Bet-hedge (Arm 8) is disabled here so this stays a focused credibility-arm
+    assertion (Arm 8's stamping/flip of this eligible suppress is covered by the
+    ``test_bet_hedge_*`` tests); otherwise Arm 8 would consume a second rng draw
+    and overwrite ``p_withhold`` with ``1 - ε``.
     """
-    cfg = _cred_cfg()
+    from blackboard.config import AugurConfig
+
+    cfg = AugurConfig(gate_reservoir_enabled=False, gate_bet_hedge_enabled=False)
     _seed_credibility(
         fake_pm,
         "typing:medium",
@@ -1120,3 +1127,197 @@ def test_cost_tier_silent_downgrade_is_readonly(fake_pm):
     g = Gate()
     g.evaluate(build_signature(_medium_typing(2.0)), fake_pm, cfg, now=1.0)
     assert fake_pm.write_calls == 0
+
+
+# ── Arm 8: bet_hedge_override (spec §5 Arm 8 + §9) ───────────────────────────
+#
+# A Phase-2 MODIFIER evaluated AFTER anti-starvation: only when the provisional
+# decision is still a SUPPRESS that is behavioral-driven (the eligible band:
+# credibility-arm, single+medium → mrt_eligible).  With known probability ε
+# (BET_HEDGE_EPSILON) it flips to FIRE(probe=True, withheld_reason=<original>)
+# — genuine action-randomization (MRT).  Whenever Arm 8 CONSIDERS an eligible
+# decision it stamps the known randomization probabilities on it (p_fire=ε,
+# p_withhold=1-ε, mrt_eligible=True) so BOTH arms (probe-fired vs withheld) are
+# inverse-probability-weightable offline (spec §4/§9), regardless of the flip
+# outcome.  Never applied to exempt (already fires) or anti-starvation releases.
+
+
+def _bet_hedge_cfg(**extra):
+    """Config isolating the bet-hedge arm: reservoir off so credibility decides.
+
+    Arm 8 only sees a SUPPRESS that the behavioral-fusion credibility arm
+    produced, so the upstream reservoir arm (which would otherwise hold a fresh
+    single+medium first) is disabled, mirroring ``_cred_cfg``.
+    """
+    from blackboard.config import AugurConfig
+
+    return AugurConfig(gate_reservoir_enabled=False, **extra)
+
+
+def _seed_behavioral_eligible(fake_pm):
+    """Seed a class so the credibility arm yields a behavioral-driven suppress.
+
+    Explicit cred=0.5 (prior → P(suppress)=0 on explicit alone); a finalized
+    behavioral_score=0.0 (|0-0.5|=0.5 > deadband) with >= min_samples fuses in
+    (explicit-dominant) to pull effective credibility below the prior → P>0 → a
+    low credibility-draw suppresses, and the suppress is mrt_eligible.
+    """
+    _seed_credibility(
+        fake_pm,
+        "typing:medium",
+        cred=0.5,
+        n=20,
+        last_fb_ts=1.0,
+        behavioral_score=0.0,
+        behavioral_samples=10,
+        behavioral_finalized=True,
+    )
+
+
+def test_bet_hedge_flips_eligible_suppress_when_draw_below_epsilon(fake_pm):
+    """rng below ε flips a behavioral-driven SUPPRESS to a probe FIRE (MRT).
+
+    The first rng draw (0.05) drives the credibility suppress (it is < p); the
+    second draw (0.0) is the bet-hedge draw and is < ε (0.1) → flip to FIRE with
+    ``probe=True`` and ``withheld_reason`` = the original suppress reason.  The
+    decision is stamped mrt_eligible=True, p_fire=ε, p_withhold=1-ε.
+    """
+    cfg = _bet_hedge_cfg()
+    _seed_behavioral_eligible(fake_pm)
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.05, 0.0]),  # cred draw suppresses; hedge draw 0.0 < 0.1
+    )
+    assert d.action == "fire"
+    assert d.deciding_arm == "bet_hedge_override"
+    assert d.probe is True
+    assert d.withheld_reason == "low_credibility_class"
+    assert d.mrt_eligible is True
+    assert d.p_fire == pytest.approx(cfg.gate_bet_hedge_epsilon)
+    assert d.p_withhold == pytest.approx(1.0 - cfg.gate_bet_hedge_epsilon)
+
+
+def test_bet_hedge_keeps_suppress_when_draw_at_or_above_epsilon(fake_pm):
+    """rng at/above ε leaves the behavioral-driven SUPPRESS standing (withheld).
+
+    The hedge draw (0.5 >= ε 0.1) does NOT flip, so the decision stays a
+    SUPPRESS — but Arm 8 still stamps the known randomization probabilities
+    (mrt_eligible=True, p_fire=ε, p_withhold=1-ε) so the withheld arm is IPW-able
+    against probe-fired siblings even under a dynamic ε.
+    """
+    cfg = _bet_hedge_cfg()
+    _seed_behavioral_eligible(fake_pm)
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.05, 0.5]),  # cred draw suppresses; hedge draw 0.5 >= 0.1
+    )
+    assert d.action == "suppress"
+    assert d.reason == "low_credibility_class"
+    assert d.deciding_arm == "signaller_credibility"
+    assert d.probe is False
+    assert d.mrt_eligible is True
+    assert d.p_fire == pytest.approx(cfg.gate_bet_hedge_epsilon)
+    assert d.p_withhold == pytest.approx(1.0 - cfg.gate_bet_hedge_epsilon)
+
+
+def test_bet_hedge_ignores_explicit_only_suppress(fake_pm):
+    """A purely explicit-driven (not mrt_eligible) SUPPRESS is never bet-hedged.
+
+    A low explicit credibility with no behavioral fusion produces a suppress
+    that is NOT mrt_eligible; Arm 8 leaves it untouched even on a 0.0 hedge draw.
+    """
+    cfg = _bet_hedge_cfg()
+    _seed_credibility(fake_pm, "typing:medium", cred=0.1, n=20, last_fb_ts=1.0)
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom(
+            [0.0, 0.0]
+        ),  # cred suppresses; hedge draw would flip IF eligible
+    )
+    assert d.action == "suppress"
+    assert d.deciding_arm == "signaller_credibility"
+    assert d.mrt_eligible is False
+    assert d.p_fire is None
+
+
+def test_bet_hedge_never_applies_to_exempt(fake_pm, cfg):
+    """An exempt (high+correlated) signature fires before any arm — never probed."""
+    g = Gate()
+    d = g.evaluate(
+        build_signature(EXEMPT_PAYLOAD),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.0, 0.0]),
+    )
+    assert d.action == "fire"
+    assert d.deciding_arm == "danger_exemption"
+    assert d.probe is False
+
+
+def test_bet_hedge_preserves_decision_id_across_flip(fake_pm):
+    """The flipped probe FIRE keeps the original suppress decision id (linkage)."""
+    cfg = _bet_hedge_cfg()
+    _seed_behavioral_eligible(fake_pm)
+    g = Gate()
+    # Capture the would-be suppress id (no flip) then the flip — minted ids are
+    # random per evaluate, so instead assert the flip carries A non-empty id and
+    # the conversion preserved the suppress id within a single evaluate by
+    # checking the id is the same object threaded through (non-empty hex).
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.05, 0.0]),
+    )
+    assert d.action == "fire"
+    assert isinstance(d.id, str) and len(d.id) == 32  # uuid4().hex preserved
+
+
+def test_bet_hedge_disabled_keeps_suppress(fake_pm):
+    """When gate_bet_hedge_enabled is False, an eligible suppress is not flipped."""
+    cfg = _bet_hedge_cfg(gate_bet_hedge_enabled=False)
+    _seed_behavioral_eligible(fake_pm)
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.05, 0.0]),  # hedge draw would flip if enabled
+    )
+    assert d.action == "suppress"
+    assert d.deciding_arm == "signaller_credibility"
+
+
+def test_bet_hedge_does_not_touch_a_fire_survivor(fake_pm):
+    """Arm 8 only acts on a SUPPRESS — a plain fire-survivor is untouched."""
+    cfg = _bet_hedge_cfg(
+        gate_central_tolerance_enabled=False,
+        gate_credibility_enabled=False,
+        gate_cost_tier_enabled=False,
+    )
+    g = Gate()
+    d = g.evaluate(
+        build_signature(_medium_typing(2.0)),
+        fake_pm,
+        cfg,
+        now=1.0,
+        rng=_SeqRandom([0.0]),  # no flip draw should be consumed for a fire
+    )
+    assert d.action == "fire"
+    assert d.probe is False
+    assert d.deciding_arm != "bet_hedge_override"

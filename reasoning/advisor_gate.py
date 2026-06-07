@@ -396,14 +396,21 @@ class Gate:
     ) -> GateDecision:
         """Apply the Phase-2 modifiers to the Phase-1 outcome (spec §5).
 
-        Phase 2 modifies only a fire-survivor; a Phase-1 SUPPRESS passes through
-        unchanged here (anti-starvation/bet-hedge, added in later tasks, may
-        un-suppress it).  Order: Arm 7 (cost_tier) → Arm 9 → Arm 8.
+        Order: Arm 7 (cost_tier — downgrades a *fire*-survivor) → Arm 9
+        (anti-starvation, added in Task 5.3 — deterministically un-suppresses a
+        starved channel) → Arm 8 (bet-hedge — stochastically un-suppresses a
+        behavioral-driven suppress, only if Arm 9 did not fire).
         """
         if decision.action == "fire":
             decision = self._arm_cost_tier_router(
                 decision, signature, state, config, now, rng
             )
+        # Arm 9 (anti-starvation) lands here in Task 5.3 — before Arm 8 so a
+        # starved channel is released deterministically and short-circuits the
+        # stochastic bet-hedge.
+        decision = self._arm_bet_hedge_override(
+            decision, signature, state, config, now, rng
+        )
         return decision
 
     def _load_state(self, pm: Any, signature: Signature) -> dict[str, Any]:
@@ -887,4 +894,70 @@ class Gate:
             metrics=metrics,
             tier=1,
             id=decision.id,
+        )
+
+    def _arm_bet_hedge_override(
+        self,
+        decision: GateDecision,
+        sig: Signature,
+        state: dict[str, Any],  # noqa: ARG002 — uniform Phase-2 modifier signature
+        config: Any,
+        now: float,  # noqa: ARG002 — uniform Phase-2 modifier signature
+        rng: random.Random,
+    ) -> GateDecision:
+        """Arm 8 — bet-hedging = MRT randomization (spec §5 Arm 8 + §9).
+
+        A **Phase-2 modifier** evaluated **after** anti-starvation (Arm 9): it
+        acts **only** on a still-``suppress`` decision that is behavioral-driven
+        — the eligible band (the credibility arm's behavioral fusion, single +
+        medium → ``mrt_eligible``).  With known probability ``ε``
+        (``BET_HEDGE_EPSILON``) it flips the withheld suppression to a
+        ``FIRE(probe=True, withheld_reason=<original reason>)`` at Tier-2 — the
+        genuine action-randomization that makes the MRT identifiable.
+
+        Whenever Arm 8 **considers** an eligible decision it stamps the **known**
+        randomization probabilities (``p_fire = ε``, ``p_withhold = 1 - ε``,
+        ``mrt_eligible = True``) on the resulting decision — **regardless of the
+        flip outcome** — so both the probe-fired and the withheld arm are
+        inverse-probability-weightable offline even under a dynamic ``ε`` (§4).
+        The decision ``id`` (linkage key) is preserved across the flip.
+
+        Never touches an exempt fire (it never reaches a suppress) or an
+        ``anti_starvation_release`` (which is a deterministic FIRE produced by
+        Arm 9 before this arm — caught by the ``action != "suppress"`` guard).
+        """
+        if not config.gate_bet_hedge_enabled:
+            return decision
+        # Only a still-standing, behavioral-driven (mrt_eligible) suppress in the
+        # eligible band is randomized.  A fire-survivor, an anti-starvation FIRE,
+        # or a non-behavioral (explicit-only) suppress are all left untouched.
+        if decision.action != "suppress" or not decision.mrt_eligible:
+            return decision
+        if sig.path != "single" or sig.severity != "medium":
+            return decision
+
+        epsilon = config.gate_bet_hedge_epsilon
+        p_fire = epsilon
+        p_withhold = 1.0 - epsilon
+
+        if rng.random() < epsilon:
+            # Flip: deliver the measured Tier-2 intervention as a probe, carrying
+            # the original suppress reason as withheld_reason for the MRT join.
+            return GateDecision.fire(
+                "bet_hedge_probe",
+                deciding_arm="bet_hedge_override",
+                metrics={**decision.metrics, "epsilon": epsilon},
+                tier=2,
+                id=decision.id,
+                probe=True,
+                withheld_reason=decision.reason,
+                mrt_eligible=True,
+                p_fire=p_fire,
+                p_withhold=p_withhold,
+            )
+
+        # No flip: the suppression stands, but stamp the known probabilities so
+        # the withheld arm is IPW-able against probe-fired siblings (§4/§9).
+        return replace(
+            decision, mrt_eligible=True, p_fire=p_fire, p_withhold=p_withhold
         )

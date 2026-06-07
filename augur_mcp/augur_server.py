@@ -721,6 +721,38 @@ def get_app_descriptors() -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+@mcp.tool()
+def get_gate_silences(limit: int = 100) -> dict[str, Any]:
+    """Return recent gate suppression records and per-arm counts.
+
+    Read-only.  Reads up to *limit* silence records from
+    ``augur:gate:silences`` (newest first) and derives a per-arm frequency
+    tally from the returned records.
+
+    Args:
+        limit: Maximum number of records to return (default 100).
+
+    Returns:
+        Dict with 'silences' (list of records), 'arm_counts' (dict mapping
+        arm name to suppression count), and 'total' (int).
+    """
+    try:
+        with _persistence_ctx() as pm:
+            silences = pm.load_silence_records(limit=limit)
+        arm_counts: dict[str, int] = {}
+        for rec in silences:
+            arm = rec.get("arm")
+            if arm:
+                arm_counts[arm] = arm_counts.get(arm, 0) + 1
+        return {
+            "silences": silences,
+            "arm_counts": arm_counts,
+            "total": len(silences),
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 _VALID_SEVERITIES = {"LOW", "MEDIUM", "HIGH"}
 
 # SEC-04: caps on matrix size. Without these, a caller could pass

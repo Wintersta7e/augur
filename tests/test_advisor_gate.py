@@ -393,3 +393,341 @@ def test_suppress_passes_through_when_trackable(fake_pm, cfg) -> None:
     d = g.evaluate(s, fake_pm, cfg, now=100.0)
     assert d.action == "suppress"
     assert d.reason == "would_suppress"
+
+
+# ── record_* + still_starved (Task 6.1, spec §4/§5/§6) ───────────────────────
+
+from tests.conftest import (  # noqa: E402
+    SINGLE_HIGH_TYPING,
+)
+
+
+def _gate() -> "object":
+    from reasoning.advisor_gate import Gate
+
+    return Gate()
+
+
+# -- record_delivery_success: non-probe normal delivery ----------------------
+
+
+def test_delivery_success_appends_gating_visible_emission(fake_pm, cfg) -> None:
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+    d = GateDecision.fire("normal", tier=2, mrt_eligible=True, p_fire=0.1)
+    g.record_delivery_success(s, fake_pm, 100.0, decision=d, tier=2)
+
+    emissions = fake_pm.load_emissions(limit=10)
+    assert len(emissions) == 1
+    e = emissions[0]
+    assert e["state_key"] == "single:chess:user"
+    assert e["decision_id"] == d.id
+    assert e["probe"] is False
+    assert e["audit_only"] is False
+    # IPW fields persisted on the emission (spec §6 emissions schema).
+    assert e["mrt_eligible"] is True
+    assert e["p_fire"] == 0.1
+
+
+def test_delivery_success_advances_habituation(fake_pm, cfg) -> None:
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+    d = GateDecision.fire("normal")
+    g.record_delivery_success(s, fake_pm, 100.0, decision=d, tier=2)
+
+    hab = fake_pm.load_habituation("single:chess:user")
+    assert hab["h"] > 0.0  # h advanced from unseen (0) toward 1
+    assert hab["last_event_ts"] == 100.0
+    assert hab["count"] == 1
+
+    # A second delivery advances h further (EWMA toward 1).
+    g.record_delivery_success(
+        s, fake_pm, 200.0, decision=GateDecision.fire("n"), tier=2
+    )
+    hab2 = fake_pm.load_habituation("single:chess:user")
+    assert hab2["h"] > hab["h"]
+    assert hab2["count"] == 2
+
+
+def test_delivery_success_advances_advice_rate(fake_pm, cfg) -> None:
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+    g.record_delivery_success(
+        s, fake_pm, 100.0, decision=GateDecision.fire("n"), tier=2
+    )
+    rate = fake_pm.load_advice_rate()
+    assert rate != {}
+    assert rate["rate_ewma"] > 0.0
+    assert rate["last_ts"] == 100.0
+
+
+def test_delivery_success_resets_channel_stats(fake_pm, cfg) -> None:
+    # Pre-seed a starved channel; a delivery must reset the suppression streak.
+    fake_pm.save_channel_stats(
+        "single:chess:user",
+        {"consecutive_suppressions": 5, "suppression_streak_started_ts": 50.0},
+    )
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+    g.record_delivery_success(
+        s, fake_pm, 100.0, decision=GateDecision.fire("n"), tier=2
+    )
+    stats = fake_pm.load_channel_stats("single:chess:user")
+    assert stats["consecutive_suppressions"] == 0
+    assert stats["suppression_streak_started_ts"] is None
+    assert stats["last_delivery_ts"] == 100.0
+
+
+def test_delivery_success_appends_observed(fake_pm, cfg) -> None:
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)  # value 2.0, severity medium
+    g.record_delivery_success(
+        s, fake_pm, 100.0, decision=GateDecision.fire("n"), tier=2
+    )
+    obs = fake_pm.load_observed("single:chess:user", limit=10)
+    assert len(obs) == 1
+    assert obs[0]["value"] == 2.0
+    assert obs[0]["severity"] == "medium"
+
+
+def test_delivery_success_updates_cost_tier_memory(fake_pm, cfg) -> None:
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+    g.record_delivery_success(
+        s, fake_pm, 100.0, decision=GateDecision.fire("n"), tier=2
+    )
+    mem = fake_pm.load_cost_tier_memory("single:chess:user")
+    assert mem["count"] == 1
+    assert "earned_tier2" in mem
+
+    # A tier-2 delivery marks earned_tier2 True (online cost_tier signal).
+    g.record_delivery_success(
+        s, fake_pm, 200.0, decision=GateDecision.fire("n"), tier=2
+    )
+    mem2 = fake_pm.load_cost_tier_memory("single:chess:user")
+    assert mem2["count"] == 2
+    assert mem2["earned_tier2"] is True
+
+
+# -- record_delivery_success: probe (gating-invisible) -----------------------
+
+
+def test_delivery_success_probe_appends_probe_emission_only(fake_pm, cfg) -> None:
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+    d = GateDecision.fire(
+        "bet_hedge_probe",
+        tier=2,
+        probe=True,
+        withheld_reason="habituated",
+        mrt_eligible=True,
+        p_fire=0.1,
+        p_withhold=0.9,
+    )
+    g.record_delivery_success(s, fake_pm, 100.0, decision=d, tier=2)
+
+    emissions = fake_pm.load_emissions(limit=10)
+    assert len(emissions) == 1
+    e = emissions[0]
+    assert e["probe"] is True
+    assert e["withheld_reason"] == "habituated"
+    # IPW fields on the probe row so it joins its withheld sibling (spec §6/§9).
+    assert e["mrt_eligible"] is True
+    assert e["p_fire"] == 0.1
+
+    # Probe must NOT advance h / rate / starvation / observed.
+    assert fake_pm.load_habituation("single:chess:user") == {}
+    assert fake_pm.load_advice_rate() == {}
+    assert fake_pm.load_observed("single:chess:user", limit=10) == []
+    assert fake_pm.load_channel_stats("single:chess:user") == {}
+
+
+# -- record_delivery_success: HIGH dishabituation ----------------------------
+
+
+def test_delivery_success_high_dishabituates(fake_pm, cfg) -> None:
+    # Pre-seed an almost-fully-habituated channel.
+    fake_pm.save_habituation(
+        "single:typing:user", {"h": 0.95, "last_event_ts": 50.0, "count": 9}
+    )
+    g = _gate()
+    s = build_signature(SINGLE_HIGH_TYPING)  # high severity
+    g.record_delivery_success(
+        s, fake_pm, 100.0, decision=GateDecision.fire("n"), tier=2
+    )
+    hab = fake_pm.load_habituation("single:typing:user")
+    # A high delivery DISHABITUATES — h reset toward 0 (spec §5 HIGH bypass).
+    assert hab["h"] < 0.95
+    assert hab["h"] <= 0.1
+
+
+# -- record_delivery_success: audit_only (exempt) ----------------------------
+
+
+def test_delivery_success_audit_only_minimal_write(fake_pm, cfg) -> None:
+    g = _gate()
+    s = build_signature(EXEMPT_PAYLOAD)
+    d = GateDecision.fire("exempt_high_correlated", deciding_arm="danger_exemption")
+    g.record_delivery_success(s, fake_pm, 100.0, decision=d, tier=2, audit_only=True)
+
+    # ONLY an audit emission entry — no h / channel_stats / observed.
+    emissions = fake_pm.load_emissions(limit=10)
+    assert len(emissions) == 1
+    assert emissions[0]["audit_only"] is True
+
+    assert fake_pm.load_habituation(s.state_key) == {}
+    assert fake_pm.load_channel_stats(s.state_key) == {}
+    assert fake_pm.load_observed(s.state_key, limit=10) == []
+    assert fake_pm.load_advice_rate() == {}
+
+
+def test_delivery_success_audit_only_emission_is_gating_invisible(fake_pm, cfg) -> None:
+    # An audit-only emission must be ignored by the refractory arm (it is not a
+    # real channel delivery) — read back as audit_only=True.
+    g = _gate()
+    s = build_signature(EXEMPT_PAYLOAD)
+    d = GateDecision.fire("exempt_high_correlated")
+    g.record_delivery_success(s, fake_pm, 100.0, decision=d, tier=2, audit_only=True)
+    e = fake_pm.load_emissions(limit=10)[0]
+    assert e["audit_only"] is True
+    assert e.get("probe") is False
+
+
+# -- record_suppression ------------------------------------------------------
+
+
+def test_record_suppression_writes_authoritative_silence(fake_pm, cfg) -> None:
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+    d = GateDecision.suppress(
+        "habituated",
+        deciding_arm="habituation",
+        metrics={"h_eff": 0.9},
+        mrt_eligible=True,
+        p_withhold=0.9,
+    )
+    ok = g.record_suppression(d, s, fake_pm, 100.0)
+    assert ok is True
+
+    silences = fake_pm.load_silence_records(limit=10)
+    assert len(silences) == 1
+    rec = silences[0]
+    assert rec["decision_id"] == d.id
+    assert rec["state_key"] == "single:chess:user"
+    assert rec["arm"] == "habituation"
+    assert rec["reason"] == "habituated"
+    # IPW fields persisted on the silence (spec §6/§8 — offline IPW from records).
+    assert rec["mrt_eligible"] is True
+    assert rec["p_withhold"] == 0.9
+
+
+def test_record_suppression_advances_reservoir_observed_channel_stats(
+    fake_pm, cfg
+) -> None:
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+    d = GateDecision.suppress("single_channel_insufficient", deciding_arm="reservoir")
+    g.record_suppression(d, s, fake_pm, 100.0)
+
+    # reservoir count advances (the evidence a suppressed event legitimately feeds)
+    res = fake_pm.load_reservoir("single:chess:user")
+    assert res["count"] >= 1.0
+    assert res["last_ts"] == 100.0
+
+    # observed-value window appended (novelty depends on it)
+    obs = fake_pm.load_observed("single:chess:user", limit=10)
+    assert len(obs) == 1
+    assert obs[0]["value"] == 2.0
+
+    # channel_stats: first suppression of a streak sets the streak timestamp.
+    stats = fake_pm.load_channel_stats("single:chess:user")
+    assert stats["consecutive_suppressions"] == 1
+    assert stats["suppression_streak_started_ts"] == 100.0
+
+
+def test_record_suppression_streak_started_only_on_first(fake_pm, cfg) -> None:
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+    d = GateDecision.suppress("habituated", deciding_arm="habituation")
+    g.record_suppression(d, s, fake_pm, 100.0)
+    g.record_suppression(d, s, fake_pm, 150.0)
+
+    stats = fake_pm.load_channel_stats("single:chess:user")
+    assert stats["consecutive_suppressions"] == 2
+    # streak start stays at the FIRST suppression, not the latest.
+    assert stats["suppression_streak_started_ts"] == 100.0
+
+
+def test_record_suppression_returns_false_when_silence_write_fails(
+    fake_pm, cfg, monkeypatch
+) -> None:
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+    d = GateDecision.suppress("habituated", deciding_arm="habituation")
+
+    def _boom(_record):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(fake_pm, "save_silence_record", _boom)
+    assert g.record_suppression(d, s, fake_pm, 100.0) is False
+
+
+# -- record_busy_skip --------------------------------------------------------
+
+
+def test_record_busy_skip_bumps_channel_stats(fake_pm, cfg) -> None:
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+    tracked = g.record_busy_skip(s, fake_pm, 100.0)
+    assert tracked is True
+
+    stats = fake_pm.load_channel_stats("single:chess:user")
+    assert stats["consecutive_suppressions"] == 1
+    assert stats["suppression_streak_started_ts"] == 100.0
+
+    # A best-effort delivery_failure is also written.
+    failures = fake_pm.load_delivery_failures(limit=10)
+    assert len(failures) == 1
+    assert failures[0]["reason"] == "advisor_busy_skipped"
+
+
+def test_record_busy_skip_untrackable_returns_false(fake_pm_at_cap, cfg) -> None:
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM_NEWKEY_THAT_WOULD_SUPPRESS)
+    # channel_stats hash is at cap; a brand-new key cannot be tracked.
+    assert g.record_busy_skip(s, fake_pm_at_cap, 100.0) is False
+
+
+# -- still_starved -----------------------------------------------------------
+
+
+def test_still_starved_true_when_count_bound_passed(fake_pm, cfg) -> None:
+    fake_pm.save_channel_stats(
+        "single:chess:user",
+        {"consecutive_suppressions": 8, "suppression_streak_started_ts": 10.0},
+    )
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+    assert g.still_starved(s, fake_pm, 100.0) is True
+
+
+def test_still_starved_false_when_not_starved(fake_pm, cfg) -> None:
+    fake_pm.save_channel_stats(
+        "single:chess:user",
+        {"consecutive_suppressions": 1, "suppression_streak_started_ts": 99.0},
+    )
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+    assert g.still_starved(s, fake_pm, 100.0) is False
+
+
+def test_still_starved_safe_default_true_on_read_error(fake_pm, cfg) -> None:
+    g = _gate()
+    s = build_signature(SINGLE_MEDIUM)
+
+    def _boom(_state_key):
+        raise RuntimeError("redis read failed")
+
+    fake_pm.load_channel_stats = _boom  # type: ignore[assignment]
+    # safe default: assume starved → fire, never drop a release (spec §3/§4).
+    assert g.still_starved(s, fake_pm, 100.0) is True

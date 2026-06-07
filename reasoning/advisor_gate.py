@@ -16,12 +16,15 @@ objects only.  All gate decision logic is intentionally side-effect-free here
 
 from __future__ import annotations
 
+import logging
 import math
 import random
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
+
+log = logging.getLogger(__name__)
 
 # Internal module constant guarding divide-by-zero in the novelty arm (spec §5).
 _EPS = 1e-6
@@ -282,8 +285,17 @@ class Gate:
     (``None`` = pass); the first non-``None`` SUPPRESS/DOWNGRADE/FIRE wins.
     """
 
-    def __init__(self, arms: list[Arm] | None = None) -> None:
+    def __init__(self, arms: list[Arm] | None = None, config: Any = None) -> None:
         self.arms: list[Arm] = arms if arms is not None else self._default_arms()
+        # ``still_starved`` (called under the lock with the spec-fixed signature
+        # ``(signature, pm, now)`` — no config arg) needs the starvation bounds,
+        # so the Gate holds a config.  Defaults to AugurConfig() for the unit
+        # tests / standalone construction; the advisor injects its live config.
+        if config is None:
+            from blackboard.config import AugurConfig
+
+            config = AugurConfig()
+        self._config = config
 
     def _default_arms(self) -> list[Arm]:
         """The arm pipeline in spec §5 order (suppressors, Phase 1).
@@ -1020,3 +1032,301 @@ class Gate:
         return replace(
             decision, mrt_eligible=True, p_fire=p_fire, p_withhold=p_withhold
         )
+
+    # ── Writers (spec §4/§5/§6) ── run AFTER a decision; evaluate stays
+    # read-only.  All Redis I/O goes through the injected PersistenceManager.
+    def record_delivery_success(
+        self,
+        signature: Signature,
+        pm: Any,
+        now: float,
+        *,
+        decision: GateDecision,
+        tier: int | None,
+        audit_only: bool = False,
+    ) -> None:
+        """Advance gate state after a SUCCESSFUL publish (spec §4).
+
+        Called only once the advice (or Tier-1 note) has actually been published,
+        so it can never record a delivery that did not happen.  Three modes:
+
+        * ``audit_only=True`` (exempt) — writes **solely** an audit emission
+          entry: no ``h``, no ``channel_stats``, no ``observed``, no advice-rate,
+          no gating-visible emission (invariant B — exempt path touches no gate
+          state).
+        * ``decision.probe=True`` (bet-hedge) — appends an emission flagged
+          ``probe=True`` (which gating-visible readers ignore) and **nothing
+          else**: it does not advance ``h``/advice-rate, reset starvation, or
+          append ``observed`` — so a probe neither perturbs the state the MRT
+          compares nor counts as a normal delivery.
+        * otherwise (normal delivery) — advances habituation ``h`` (EWMA toward
+          1, or dishabituation toward 0 for a HIGH), the advice-rate EWMA, the
+          per-channel ``cost_tier_memory``; resets ``channel_stats`` (clears the
+          suppression streak, stamps ``last_delivery_ts``); and appends both a
+          gating-visible emission (carrying ``mrt_eligible``/``p_fire`` for IPW)
+          and an ``observed`` value record (novelty depends on it).
+        """
+        if audit_only:
+            pm.save_emission(
+                self._emission_record(signature, decision, now, tier, audit_only=True)
+            )
+            return
+
+        if decision.probe:
+            pm.save_emission(
+                self._emission_record(signature, decision, now, tier, audit_only=False)
+            )
+            return
+
+        # ── Normal delivery: advance all online state ──
+        pm.save_emission(
+            self._emission_record(signature, decision, now, tier, audit_only=False)
+        )
+        pm.save_observed(
+            {
+                "ts": now,
+                "state_key": signature.state_key,
+                "value": signature.value,
+                "severity": signature.severity,
+            }
+        )
+        self._advance_habituation(signature, pm, now)
+        self._advance_advice_rate(pm, now)
+        self._reset_channel_stats(signature, pm, now)
+        self._advance_cost_tier_memory(signature, pm, now, tier)
+
+    def record_suppression(
+        self,
+        decision: GateDecision,
+        signature: Signature,
+        pm: Any,
+        now: float,
+    ) -> bool:
+        """Write the authoritative silence record + advance accumulators (spec §4).
+
+        The silence write is **authoritative** (invariant A): it must persist or
+        the caller fails open and FIRES.  Returns ``True`` once the silence
+        record is committed, ``False`` if that write fails (raises) — in which
+        case no accumulators are advanced.  On success it also advances the
+        evidence a suppressed event legitimately feeds: the reservoir count, the
+        observed-value window, and ``channel_stats`` (so a starved channel is
+        eventually released by anti-starvation, invariant D).
+        """
+        record = {
+            "ts": now,
+            "decision_id": decision.id,
+            "state_key": signature.state_key,
+            "domain": signature.domain,
+            "entity": signature.entity,
+            "severity": signature.severity,
+            "arm": decision.deciding_arm,
+            "reason": decision.reason,
+            "metrics": decision.metrics,
+            "mrt_eligible": decision.mrt_eligible,
+            "p_withhold": decision.p_withhold,
+        }
+        try:
+            pm.save_silence_record(record)
+        except Exception:
+            log.error("gate silence write failed for %s", signature.state_key)
+            return False
+
+        self._advance_reservoir(signature, pm, now)
+        pm.save_observed(
+            {
+                "ts": now,
+                "state_key": signature.state_key,
+                "value": signature.value,
+                "severity": signature.severity,
+            }
+        )
+        self._bump_suppression_stats(signature, pm, now)
+        return True
+
+    def record_busy_skip(self, signature: Signature, pm: Any, now: float) -> bool:
+        """Record an ordinary fire dropped because the lock was held (spec §4).
+
+        Bumps ``channel_stats`` (so a hot trackable channel repeatedly
+        busy-skipped is eventually released by anti-starvation, invariant D) and
+        writes a best-effort ``delivery_failure``.  Returns ``False`` if the
+        channel is **untrackable** — a new ``state_key`` already at
+        ``MAX_GATE_STATE_KEYS`` so no ``channel_stats`` can be created (outside
+        D's trackable scope); the caller then logs a separate delivery_failure.
+        """
+        if not pm.can_track_gate_state(_CHANNEL_STATS_KEY, signature.state_key):
+            return False
+        self._bump_suppression_stats(signature, pm, now)
+        pm.save_delivery_failure(signature, "advisor_busy_skipped", now, "")
+        return True
+
+    def still_starved(self, signature: Signature, pm: Any, now: float) -> bool:
+        """Re-check (read-only) whether ``signature``'s channel is still starved.
+
+        Used under the lock before an ``anti_starvation_release`` fires, to skip
+        a release a concurrent delivery already served.  **Fail-open guarded**:
+        returns the safe default ``True`` ("assume starved → fire") on **any**
+        read error, so a corrupt/unavailable read can never drop a release
+        (invariant C/D, spec §3/§4).
+        """
+        try:
+            stats = pm.load_channel_stats(signature.state_key) or {}
+            consecutive = int(stats.get("consecutive_suppressions", 0) or 0)
+            streak_started = stats.get("suppression_streak_started_ts")
+            by_count = consecutive >= self._config.gate_max_consecutive_suppressions
+            silence_s = (
+                now - float(streak_started) if streak_started is not None else 0.0
+            )
+            by_time = (
+                streak_started is not None
+                and silence_s > self._config.gate_max_channel_silence_s
+            )
+            return bool(by_count or by_time)
+        except Exception:
+            log.error("still_starved read failed for %s; assuming starved", signature)
+            return True
+
+    # ── Writer helpers (private) ──
+    def _emission_record(
+        self,
+        signature: Signature,
+        decision: GateDecision,
+        now: float,
+        tier: int | None,
+        *,
+        audit_only: bool,
+    ) -> dict[str, Any]:
+        """Build a gate emission record (spec §6 emissions schema).
+
+        ``audit_only`` is True only for an exempt audit emission; a probe or a
+        normal delivery carries ``audit_only=False``.  Gating-visible readers
+        (refractory/pressure/duplicate/habituation) ignore any row whose
+        ``probe`` or ``audit_only`` is True.
+        """
+        return {
+            "ts": now,
+            "decision_id": decision.id,
+            "state_key": signature.state_key,
+            "severity": signature.severity,
+            "tier": tier,
+            "probe": bool(decision.probe),
+            "audit_only": bool(audit_only),
+            "withheld_reason": decision.withheld_reason,
+            "mrt_eligible": decision.mrt_eligible,
+            "p_fire": decision.p_fire,
+        }
+
+    def _advance_habituation(self, signature: Signature, pm: Any, now: float) -> None:
+        """Advance per-channel habituation ``h`` after a non-probe delivery.
+
+        A normal delivery decays the stored ``h`` to ``now`` then EWMAs it toward
+        1 (``alpha`` = ``gate_habituation_alpha``): repeated advice on a channel
+        raises ``h`` so the habituation arm eventually holds it.  A **HIGH**
+        delivery instead **dishabituates** — it resets ``h`` toward 0 (spec §5
+        HIGH bypass: a strong stimulus restores responsiveness on its channel).
+        """
+        hab = pm.load_habituation(signature.state_key) or {}
+        h = float(hab.get("h", 0.0) or 0.0)
+        count = int(hab.get("count", 0) or 0)
+
+        if signature.severity == "high":
+            # Dishabituation: a strong stimulus restores the channel.
+            new_h = 0.0
+        else:
+            last_ts = float(hab.get("last_event_ts", now) or now)
+            dt = max(0.0, now - last_ts)
+            decayed = h * math.exp(-dt / self._config.gate_habituation_tau_s)
+            alpha = self._config.gate_habituation_alpha
+            new_h = alpha * 1.0 + (1.0 - alpha) * decayed
+
+        pm.save_habituation(
+            signature.state_key,
+            {"h": new_h, "last_event_ts": now, "count": count + 1},
+        )
+
+    def _advance_advice_rate(self, pm: Any, now: float) -> None:
+        """Advance the global advice-rate EWMA after a non-probe delivery.
+
+        Each delivery is a unit impulse EWMA'd with ``gate_pressure_alpha`` — the
+        refractory arm's pressure sub-reason reads ``rate_ewma`` as recent
+        advice volume.
+        """
+        rate = pm.load_advice_rate() or {}
+        prev = float(rate.get("rate_ewma", 0.0) or 0.0)
+        alpha = self._config.gate_pressure_alpha
+        new_rate = alpha * 1.0 + (1.0 - alpha) * prev
+        pm.save_advice_rate({"rate_ewma": new_rate, "last_ts": now})
+
+    def _reset_channel_stats(self, signature: Signature, pm: Any, now: float) -> None:
+        """Clear the suppression streak on a delivery (spec §6, invariant D).
+
+        A delivery resets ``consecutive_suppressions`` to 0, clears
+        ``suppression_streak_started_ts``, and stamps ``last_delivery_ts`` — so
+        anti-starvation's streak measurement restarts from this delivery.
+        """
+        stats = pm.load_channel_stats(signature.state_key) or {}
+        stats["seen"] = int(stats.get("seen", 0) or 0) + 1
+        stats["consecutive_suppressions"] = 0
+        stats["suppression_streak_started_ts"] = None
+        stats["last_delivery_ts"] = now
+        stats["last_ts"] = now
+        pm.save_channel_stats(signature.state_key, stats)
+
+    def _advance_cost_tier_memory(
+        self, signature: Signature, pm: Any, now: float, tier: int | None
+    ) -> None:
+        """Advance per-channel ``cost_tier_memory`` online (spec §5 Arm 7).
+
+        ``count`` tracks recurrence (a persistent single earns Tier-2);
+        ``earned_tier2`` latches True once the channel was served at Tier-2 —
+        both consumed by Arm 7's routing.
+        """
+        mem = pm.load_cost_tier_memory(signature.state_key) or {}
+        mem["count"] = int(mem.get("count", 0) or 0) + 1
+        if tier == 2:
+            mem["earned_tier2"] = True
+        else:
+            mem.setdefault("earned_tier2", False)
+        mem["last_ts"] = now
+        pm.save_cost_tier_memory(signature.state_key, mem)
+
+    def _advance_reservoir(self, signature: Signature, pm: Any, now: float) -> None:
+        """Advance the per-channel evidence reservoir on a suppression (spec §5).
+
+        A suppressed single+medium event still legitimately accumulates evidence
+        (+1, leaking by ``exp(-dt/tau)``) so the channel eventually reaches the
+        ON count and commits.  The latch stays ``suppressing`` until Arm 5
+        commits it.
+        """
+        res = pm.load_reservoir(signature.state_key) or {}
+        count = float(res.get("count", 0.0) or 0.0)
+        last_ts = float(res.get("last_ts", now) or now)
+        dt = max(0.0, now - last_ts)
+        leaked = count * math.exp(-dt / self._config.gate_reservoir_leak_tau_s)
+        pm.save_reservoir(
+            signature.state_key,
+            {
+                "count": leaked + 1.0,
+                "last_ts": now,
+                "suppressing": bool(res.get("suppressing", True)),
+            },
+        )
+
+    def _bump_suppression_stats(
+        self, signature: Signature, pm: Any, now: float
+    ) -> None:
+        """Bump ``channel_stats`` on a suppression / busy-skip (spec §6, inv. D).
+
+        Increments ``consecutive_suppressions`` and stamps
+        ``suppression_streak_started_ts`` **only on the first** suppression of a
+        streak (a delivery clears it), so anti-starvation's count + time bounds
+        measure an unbroken silence run.
+        """
+        stats = pm.load_channel_stats(signature.state_key) or {}
+        stats["seen"] = int(stats.get("seen", 0) or 0) + 1
+        stats["consecutive_suppressions"] = (
+            int(stats.get("consecutive_suppressions", 0) or 0) + 1
+        )
+        if stats.get("suppression_streak_started_ts") is None:
+            stats["suppression_streak_started_ts"] = now
+        stats["last_ts"] = now
+        pm.save_channel_stats(signature.state_key, stats)

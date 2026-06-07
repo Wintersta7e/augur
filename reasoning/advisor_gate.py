@@ -353,6 +353,13 @@ class Gate:
                 "exempt_high_correlated", deciding_arm="danger_exemption"
             )
 
+        if signature.ungateable:
+            # §5 missing-entity rule: a single event with a missing/"?"/empty
+            # entity gets ONLY the GLOBAL refractory checks — no per-channel arms
+            # (no "?" channel state created), no cap-fail-open (no per-channel
+            # key).  Suppress only if a global refractory sub-check fires.
+            return self._evaluate_ungateable(signature, pm, config, now)
+
         state = self._load_state(pm, signature)
 
         # ── Phase 1: suppressors (first to suppress wins) ──
@@ -373,6 +380,39 @@ class Gate:
             return decision.as_fire("cap_fail_open")
 
         return decision
+
+    def _evaluate_ungateable(
+        self,
+        signature: Signature,
+        pm: Any,
+        config: Any,
+        now: float,
+    ) -> GateDecision:
+        """Decide an ungateable signature with ONLY the global arms (spec §5).
+
+        A single event with a missing/``"?"``/empty entity has no stable
+        per-channel ``state_key`` to track, so the per-channel arms
+        (central_tolerance/novelty/habituation/reservoir/credibility/cost_tier/
+        anti_starvation) are skipped — they would otherwise mute every
+        entity-less event behind a bogus ``single:{domain}:?`` channel.  Only the
+        global ``refractory_burden`` sub-checks (absolute / relative-bar /
+        pressure — NOT the per-``state_key`` duplicate) apply.  Reads only the
+        global emission log + advice-rate; no per-channel state is loaded.  No
+        cap-fail-open (there is no per-channel key to refuse).  Suppress if a
+        global sub-check fires, else FIRE.
+        """
+        if not config.gate_refractory_enabled:
+            return GateDecision.fire("passed_all_arms", deciding_arm="none")
+        state = {
+            "emissions": pm.load_emissions(),
+            "advice_rate": pm.load_advice_rate(),
+        }
+        decision = self._arm_refractory_burden(
+            signature, state, config, now, random.Random(), global_only=True
+        )
+        if decision is not None:
+            return decision
+        return GateDecision.fire("passed_all_arms", deciding_arm="none")
 
     def _run_suppressors(
         self,
@@ -483,6 +523,8 @@ class Gate:
         config: Any,
         now: float,
         rng: random.Random,  # noqa: ARG002 — uniform arm signature; deterministic arm
+        *,
+        global_only: bool = False,
     ) -> GateDecision | None:
         """Arm 2 — refractory + Treg resolution + sentinel duplicate (spec §5).
 
@@ -491,6 +533,11 @@ class Gate:
         Reads the emission log IGNORING ``probe``/``audit_only`` entries (those
         are not deliveries that should refract the channel) plus the advice-rate
         EWMA.  Four sub-reasons checked in order:
+
+        When ``global_only=True`` (the ungateable path, spec §5) the per-
+        ``state_key`` **duplicate** sub-check is skipped — it is a per-channel
+        check and an ungateable signature has no stable channel; only the truly
+        global absolute / relative-bar / pressure sub-checks apply.
 
         1. **Absolute** — ``now - last_global_emit < ABSOLUTE_REFRACTORY_S`` →
            ``SUPPRESS("absolute_refractory", {remaining_s})``.
@@ -548,6 +595,9 @@ class Gate:
             )
 
         # ── Duplicate: a real same-state_key emission within the relative window ─
+        # Per-channel sub-check — skipped on the ungateable (global-only) path.
+        if global_only:
+            return None
         for e in real:
             if e.get("state_key") != sig.state_key:
                 continue
@@ -1078,6 +1128,16 @@ class Gate:
             )
             return
 
+        if signature.ungateable:
+            # §5 missing-entity rule: an ungateable event writes ONLY the global
+            # emission (for global-burden / refractory tracking) — no per-channel
+            # state (no observed/h/advice-rate/channel_stats/cost_tier on a bogus
+            # single:{domain}:? key).
+            pm.save_emission(
+                self._emission_record(signature, decision, now, tier, audit_only=False)
+            )
+            return
+
         # ── Normal delivery: advance all online state ──
         pm.save_emission(
             self._emission_record(signature, decision, now, tier, audit_only=False)
@@ -1130,6 +1190,13 @@ class Gate:
         except Exception:
             log.error("gate silence write failed for %s", signature.state_key)
             return False
+
+        if signature.ungateable:
+            # §5 missing-entity rule: the authoritative silence (invariant A) is
+            # written, but NO per-channel accumulators advance — an ungateable
+            # event has no stable channel to track (no bogus single:{domain}:?
+            # reservoir/observed/channel_stats).
+            return True
 
         self._advance_reservoir(signature, pm, now)
         pm.save_observed(

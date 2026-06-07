@@ -733,6 +733,156 @@ def test_still_starved_safe_default_true_on_read_error(fake_pm, cfg) -> None:
     assert g.still_starved(s, fake_pm, 100.0) is True
 
 
+# ── Ungateable single events: only global refractory, no per-channel state ────
+#
+# Spec §5 missing-entity rule: a single event with a missing/"?"/empty entity is
+# UNGATEABLE — per-channel arms are skipped (no "?" channel state created) and
+# ONLY the global arms (refractory) apply.  Final-review finding: build_signature
+# SET signature.ungateable but evaluate/record_* never USED it, so an ungateable
+# single+medium ran the per-channel arms (Arm 5 reservoir suppressed it as
+# single_channel_insufficient and record_suppression created a bogus
+# single:{domain}:? channel).
+
+# The per-channel gate hashes that an ungateable event must NEVER touch.
+_PER_CHANNEL_HASHES = (
+    "augur:gate:habituation",
+    "augur:gate:reservoir",
+    "augur:gate:channel_stats",
+    "augur:gate:cost_tier_memory",
+)
+
+
+def _ungateable_payload(entity) -> dict:
+    """A single+medium typing payload whose entity is missing / "?" / empty."""
+    primary: dict = {"domain": "typing", "value": 2.0, "severity": "medium"}
+    if entity is not _MISSING:
+        primary["entity"] = entity
+    return {
+        "combined_severity": "MEDIUM",
+        "correlation_found": False,
+        "primary_anomaly": primary,
+    }
+
+
+_MISSING = object()
+_UNGATEABLE_ENTITIES = pytest.mark.parametrize("entity", [_MISSING, "?", ""])
+
+
+@_UNGATEABLE_ENTITIES
+def test_ungateable_global_refractory_can_suppress(fake_pm, cfg, entity) -> None:
+    """(1) Global refractory CAN suppress an ungateable event (a global arm)."""
+    g = _gate()
+    s = build_signature(_ungateable_payload(entity))
+    assert s.ungateable is True
+    # A real global emission within the absolute window → absolute_refractory.
+    fake_pm.save_emission(
+        {
+            "ts": 100.0,
+            "decision_id": "d-100",
+            "state_key": "single:chess:user",
+            "severity": "medium",
+            "tier": 2,
+            "probe": False,
+            "audit_only": False,
+            "withheld_reason": None,
+            "mrt_eligible": False,
+            "p_fire": None,
+        }
+    )
+    d = g.evaluate(s, fake_pm, cfg, now=120.0)
+    assert d.action == "suppress"
+    assert d.reason == "absolute_refractory"
+    assert d.deciding_arm == "refractory_burden"
+
+
+@_UNGATEABLE_ENTITIES
+def test_ungateable_fires_absent_refractory(fake_pm, cfg, entity) -> None:
+    """(2) Absent any global refractory, an ungateable event FIRES.
+
+    The per-channel reservoir arm (Arm 5) would otherwise suppress a fresh
+    single+medium as single_channel_insufficient — but it is a per-channel arm
+    and must be skipped for an ungateable signature.
+    """
+    g = _gate()
+    s = build_signature(_ungateable_payload(entity))
+    d = g.evaluate(s, fake_pm, cfg, now=100.0)
+    assert d.action == "fire"
+    # Specifically NOT the per-channel reservoir suppression.
+    assert d.reason != "single_channel_insufficient"
+
+
+@_UNGATEABLE_ENTITIES
+def test_ungateable_evaluate_does_not_load_per_channel_state(
+    fake_pm, cfg, entity
+) -> None:
+    """An ungateable evaluate loads NO per-channel state (only global arms)."""
+    g = _gate()
+    s = build_signature(_ungateable_payload(entity))
+
+    def _boom(*_a, **_k):
+        raise AssertionError("per-channel state must not be loaded for ungateable")
+
+    # Per-channel loaders must never be called during an ungateable evaluate.
+    for name in (
+        "load_habituation",
+        "load_habituation_floor",
+        "load_reservoir",
+        "load_cost_tier_memory",
+        "load_channel_stats",
+        "is_self_tolerant",
+        "load_observed",
+        "load_credibility",
+    ):
+        setattr(fake_pm, name, _boom)
+    d = g.evaluate(s, fake_pm, cfg, now=100.0)
+    assert d.action == "fire"
+
+
+@_UNGATEABLE_ENTITIES
+def test_ungateable_delivery_writes_no_per_channel_keys(fake_pm, cfg, entity) -> None:
+    """(3) record_delivery_success writes ONLY the global emission for ungateable.
+
+    No per-channel hash (habituation/reservoir/channel_stats/cost_tier_memory)
+    and no per-channel observed window are created.
+    """
+    g = _gate()
+    s = build_signature(_ungateable_payload(entity))
+    d = GateDecision.fire("passed_all_arms", tier=2)
+    g.record_delivery_success(s, fake_pm, 100.0, decision=d, tier=2)
+
+    # The global emission IS written (for global-burden / refractory tracking).
+    assert len(fake_pm.load_emissions(limit=10)) == 1
+    # No per-channel hash key was created at all.
+    for hash_key in _PER_CHANNEL_HASHES:
+        assert fake_pm._redis.exists(hash_key) == 0, hash_key
+    # No per-channel observed window for the bogus state_key.
+    assert fake_pm._redis.exists("augur:gate:observed") == 0
+
+
+@_UNGATEABLE_ENTITIES
+def test_ungateable_suppression_writes_only_silence(fake_pm, cfg, entity) -> None:
+    """(3) record_suppression writes ONLY the authoritative silence for ungateable.
+
+    The silence record (invariant A) is committed, but NO per-channel state
+    (reservoir/observed/channel_stats) is created — so no bogus single:{domain}:?
+    channel ever exists.
+    """
+    g = _gate()
+    s = build_signature(_ungateable_payload(entity))
+    d = GateDecision.suppress("absolute_refractory", deciding_arm="refractory_burden")
+    ok = g.record_suppression(d, s, fake_pm, 100.0)
+    assert ok is True
+
+    # The authoritative silence IS written (invariant A holds for ungateable).
+    silences = fake_pm.load_silence_records(limit=10)
+    assert len(silences) == 1
+    assert silences[0]["reason"] == "absolute_refractory"
+    # No per-channel hash key and no per-channel observed window created.
+    for hash_key in _PER_CHANNEL_HASHES:
+        assert fake_pm._redis.exists(hash_key) == 0, hash_key
+    assert fake_pm._redis.exists("augur:gate:observed") == 0
+
+
 # ── Task 8.1: _build_advice_event MRT fields + new subjects (spec §8/§9) ──────
 
 

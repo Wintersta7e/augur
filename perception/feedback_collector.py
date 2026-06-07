@@ -107,6 +107,13 @@ class PendingAdvice:
         temporal_lag_seconds: float | None = None,
         correlation_span_s: float | None = None,
         rule_window_s: float | None = None,
+        # Advisor-gate MRT fields (spec §9): decision_id joins this fired
+        # decision to its emission/silence/feedback; probe marks a bet-hedge
+        # probe-fire; mrt_eligible/p_fire make the fired arm IPW-weightable.
+        decision_id: str | None = None,
+        probe: bool = False,
+        mrt_eligible: bool = False,
+        p_fire: float | None = None,
     ) -> None:
         self.advice_id = advice_id
         self.domain = domain
@@ -128,6 +135,11 @@ class PendingAdvice:
         self.temporal_lag_seconds = temporal_lag_seconds
         self.correlation_span_s = correlation_span_s
         self.rule_window_s = rule_window_s
+        # Advisor-gate MRT fields (spec §9)
+        self.decision_id = decision_id
+        self.probe = probe
+        self.mrt_eligible = mrt_eligible
+        self.p_fire = p_fire
 
     def add_post_move(self, value: float) -> None:
         if len(self.think_times_after) < POST_ADVICE_TRACK_MOVES:
@@ -187,6 +199,13 @@ class PendingAdvice:
             "temporal_lag_seconds": self.temporal_lag_seconds,
             "correlation_span_s": self.correlation_span_s,
             "rule_window_s": self.rule_window_s,
+            # Advisor-gate MRT fields (spec §9). behavioral_finalized lets the
+            # offline audit tell an unfinalized 0.0 from a genuine low score.
+            "decision_id": self.decision_id,
+            "probe": self.probe,
+            "mrt_eligible": self.mrt_eligible,
+            "p_fire": self.p_fire,
+            "behavioral_finalized": self.finalized,
         }
 
 
@@ -331,6 +350,13 @@ async def run() -> None:
         temporal_lag_seconds = data.get("temporal_lag_seconds")
         correlation_span_s = data.get("correlation_span_s")
         rule_window_s = data.get("rule_window_s")
+        # Advisor-gate MRT linkage (spec §9): decision_id joins this fired
+        # decision to its emission/silence/feedback by exact key; probe marks a
+        # bet-hedge probe-fire; mrt_eligible/p_fire make it IPW-weightable.
+        decision_id = data.get("decision_id")
+        probe = bool(data.get("probe", False))
+        mrt_eligible = bool(data.get("mrt_eligible", False))
+        p_fire = data.get("p_fire")
 
         # Read baseline mean for the ACTUAL primary domain (was hardcoded "chess")
         baseline_raw = pm.load_baseline(primary_domain, entity)
@@ -354,6 +380,10 @@ async def run() -> None:
             temporal_lag_seconds=temporal_lag_seconds,
             correlation_span_s=correlation_span_s,
             rule_window_s=rule_window_s,
+            decision_id=decision_id,
+            probe=probe,
+            mrt_eligible=mrt_eligible,
+            p_fire=p_fire,
         )
         advice_events.append(pending)
 

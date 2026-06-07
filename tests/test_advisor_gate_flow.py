@@ -637,13 +637,225 @@ async def test_descriptor_map_fills_on_silence(fake_pm, cfg, nc, http_client) ->
         config=cfg,
         lane=lane,
     )
-    # enrich_payload_descriptors ran before the gate → lane consulted.
-    assert lane.enqueue.called or True  # enrich attempted regardless
+    # enrich_payload_descriptors ran before the gate → the unclassified entity
+    # (empty descriptor map, no app_identity) was enqueued for classification.
+    lane.enqueue.assert_called_once_with("someapp.exe")
     # Suppressed (no advice).
     from reasoning.augur_advisor import PUBLISH_SUBJECT
 
     assert _published_on(nc, PUBLISH_SUBJECT) == []
     assert len(fake_pm.load_silence_records(limit=10)) == 1
+
+
+# ── record_busy_skip raises (lock held) ⇒ fail-open must-fire (invariant C) ───
+
+
+async def test_record_busy_skip_exception_fails_open_and_fires(
+    fake_pm, cfg, nc, http_client, lane, monkeypatch
+) -> None:
+    # An ordinary fire is busy-skipped because the lock is held; if
+    # record_busy_skip itself *raises*, the code must convert to
+    # gate_error_fail_open and deliver via the scheduler (never a silent drop).
+    from dataclasses import replace
+
+    cfg2 = replace(cfg, gate_cost_tier_enabled=False)
+    gate = Gate(arms=[], config=cfg2)  # passes all arms → ordinary fire
+
+    def _boom(*a, **k):
+        raise RuntimeError("record_busy_skip bug")
+
+    monkeypatch.setattr(gate, "record_busy_skip", _boom)
+    scheduler = _scheduler()
+    assert scheduler.try_acquire_ordinary() is True  # slot held in-flight
+
+    task = asyncio.create_task(
+        _run(
+            payload=SINGLE_MEDIUM_TYPING,
+            gate=gate,
+            scheduler=scheduler,
+            pm=fake_pm,
+            nc=nc,
+            http_client=http_client,
+            config=cfg2,
+            lane=lane,
+        )
+    )
+    await asyncio.sleep(0.01)  # let the fail-open must-fire enqueue + block
+    scheduler.release_ordinary()  # frees the slot → dispatch grants the fail-open
+    await task
+    from reasoning.augur_advisor import PUBLISH_SUBJECT, SUBJECT_SUPPRESSED
+
+    # The dropped ordinary fire is delivered (fail open), never silenced.
+    assert len(_published_on(nc, PUBLISH_SUBJECT)) == 1
+    assert _published_on(nc, SUBJECT_SUPPRESSED) == []
+
+
+# ── record_suppression itself raises ⇒ FIRE (invariant A try/except) ──────────
+
+
+async def test_record_suppression_raises_fires(
+    fake_pm, cfg, nc, http_client, lane, monkeypatch
+) -> None:
+    # save_silence_record-raising is caught *inside* record_suppression (returns
+    # False); to exercise process_message's own try/except around the call we
+    # make record_suppression itself raise.
+    def _suppress(gate, sig, state, config, now, rng):
+        return GateDecision.suppress("habituated", deciding_arm="habituation")
+
+    gate = Gate(arms=[_suppress], config=cfg)
+
+    def _boom(*a, **k):
+        raise RuntimeError("record_suppression bug")
+
+    monkeypatch.setattr(gate, "record_suppression", _boom)
+    await _run(
+        payload=SINGLE_MEDIUM_TYPING,
+        gate=gate,
+        scheduler=_scheduler(),
+        pm=fake_pm,
+        nc=nc,
+        http_client=http_client,
+        config=cfg,
+        lane=lane,
+    )
+    from reasoning.augur_advisor import PUBLISH_SUBJECT, SUBJECT_SUPPRESSED
+
+    # No suppressed event; advice fired instead (fail open at the call site).
+    assert _published_on(nc, SUBJECT_SUPPRESSED) == []
+    assert len(_published_on(nc, PUBLISH_SUBJECT)) == 1
+
+
+# ── Distinct Ollama failure reason labels (ollama_unreachable / _timeout) ──────
+
+
+async def test_ollama_connect_error_records_unreachable(
+    fake_pm, cfg, nc, http_client, lane
+) -> None:
+    import httpx
+
+    from dataclasses import replace
+
+    cfg2 = replace(cfg, gate_cost_tier_enabled=False)
+    gate = Gate(arms=[], config=cfg2)  # ordinary fire
+    failing = AsyncMock(side_effect=httpx.ConnectError("refused"))
+
+    await _run(
+        payload=SINGLE_MEDIUM_TYPING,
+        gate=gate,
+        scheduler=_scheduler(),
+        pm=fake_pm,
+        nc=nc,
+        http_client=http_client,
+        config=cfg2,
+        lane=lane,
+        query_ollama=failing,
+    )
+    from reasoning.augur_advisor import PUBLISH_SUBJECT
+
+    assert _published_on(nc, PUBLISH_SUBJECT) == []
+    failures = fake_pm.load_delivery_failures(limit=10)
+    assert any(f["reason"] == "ollama_unreachable" for f in failures)
+
+
+async def test_ollama_timeout_records_timeout(
+    fake_pm, cfg, nc, http_client, lane
+) -> None:
+    import httpx
+
+    from dataclasses import replace
+
+    cfg2 = replace(cfg, gate_cost_tier_enabled=False)
+    gate = Gate(arms=[], config=cfg2)  # ordinary fire
+    failing = AsyncMock(side_effect=httpx.TimeoutException("slow"))
+
+    await _run(
+        payload=SINGLE_MEDIUM_TYPING,
+        gate=gate,
+        scheduler=_scheduler(),
+        pm=fake_pm,
+        nc=nc,
+        http_client=http_client,
+        config=cfg2,
+        lane=lane,
+        query_ollama=failing,
+    )
+    from reasoning.augur_advisor import PUBLISH_SUBJECT
+
+    assert _published_on(nc, PUBLISH_SUBJECT) == []
+    failures = fake_pm.load_delivery_failures(limit=10)
+    assert any(f["reason"] == "ollama_timeout" for f in failures)
+
+
+# ── Anti-starvation coalesce + under-lock re-check (concurrency branches) ──────
+
+
+async def test_anti_starvation_coalesced_when_in_flight(
+    fake_pm, cfg, nc, http_client, lane
+) -> None:
+    # A release whose state_key is already in-flight returns immediately
+    # (coalesce: one in-flight anti-starvation release per channel).
+    fake_pm.save_channel_stats(
+        "single:typing:user",
+        {"consecutive_suppressions": 8, "suppression_streak_started_ts": 10.0},
+    )
+
+    def _suppress(gate, sig, state, config, now, rng):
+        return GateDecision.suppress("habituated", deciding_arm="habituation")
+
+    gate = Gate(arms=[_suppress], config=cfg)
+    scheduler = _scheduler()
+    # Pre-arm the in-flight token for this channel → the new release coalesces.
+    scheduler._release_in_flight.add("single:typing:user")
+
+    await _run(
+        payload=SINGLE_MEDIUM_TYPING,
+        gate=gate,
+        scheduler=scheduler,
+        pm=fake_pm,
+        nc=nc,
+        http_client=http_client,
+        config=cfg,
+        lane=lane,
+    )
+    from reasoning.augur_advisor import PUBLISH_SUBJECT
+
+    # Coalesced → nothing published, no emission.
+    assert _published_on(nc, PUBLISH_SUBJECT) == []
+    assert fake_pm.load_emissions(limit=10) == []
+
+
+async def test_anti_starvation_recheck_skips_when_not_starved(
+    fake_pm, cfg, nc, http_client, lane, monkeypatch
+) -> None:
+    # After acquiring the lock the release re-checks still_starved; if a
+    # concurrent delivery already served the channel (still_starved False), it
+    # skips the redundant release.
+    fake_pm.save_channel_stats(
+        "single:typing:user",
+        {"consecutive_suppressions": 8, "suppression_streak_started_ts": 10.0},
+    )
+
+    def _suppress(gate, sig, state, config, now, rng):
+        return GateDecision.suppress("habituated", deciding_arm="habituation")
+
+    gate = Gate(arms=[_suppress], config=cfg)
+    monkeypatch.setattr(gate, "still_starved", lambda *a, **k: False)
+
+    await _run(
+        payload=SINGLE_MEDIUM_TYPING,
+        gate=gate,
+        scheduler=_scheduler(),
+        pm=fake_pm,
+        nc=nc,
+        http_client=http_client,
+        config=cfg,
+        lane=lane,
+    )
+    from reasoning.augur_advisor import PUBLISH_SUBJECT
+
+    # Re-check returned not-starved → skipped, no advice, no emission.
+    assert _published_on(nc, PUBLISH_SUBJECT) == []
+    assert fake_pm.load_emissions(limit=10) == []
 
 
 # ── Ordinary fire happy path records emission after publish ───────────────────

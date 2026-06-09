@@ -302,8 +302,18 @@ class PendingGateDecision(_BehavioralTracker):
         mrt_eligible: bool,
         p_withhold: float | None,
         reason: str,
+        # Defaulted args MUST follow the required ones above (no default-before-
+        # required — that is a SyntaxError). Decision-time snapshot + 1B fields.
+        baseline_std: float = 0.0,
+        deviation_at_decision: float = 0.0,
+        baseline_observation_count: int = 0,
+        session_id: str | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(
+            baseline_std=baseline_std,
+            deviation_at_decision=deviation_at_decision,
+            baseline_observation_count=baseline_observation_count,
+        )
         self.decision_id = decision_id
         self.state_key = state_key
         self.domain = domain
@@ -314,6 +324,12 @@ class PendingGateDecision(_BehavioralTracker):
         self.mrt_eligible = mrt_eligible
         self.p_withhold = p_withhold
         self.reason = reason
+        self.session_id = session_id
+        # 1B withheld-rating state: selection is set at suppression; the rating
+        # probability is set only when a prompt is actually issued (the IPW
+        # exclusion key), so a selected-but-never-prompted row stays in the estimand.
+        self.selected_for_rating = False
+        self.withheld_rating_p: float | None = None
 
     def to_record(self) -> dict:
         return {
@@ -325,6 +341,12 @@ class PendingGateDecision(_BehavioralTracker):
             "mrt_eligible": self.mrt_eligible,
             "p_withhold": self.p_withhold,
             "baseline_mean": self.baseline_mean,
+            "baseline_std_at_time": self.baseline_std,
+            "deviation_at_decision": self.deviation_at_decision,
+            "baseline_observation_count": self.baseline_observation_count,
+            "unmeasurable": self.unmeasurable,
+            "outcome_metric_version": self.outcome_metric_version,
+            "withheld_rating_p": self.withheld_rating_p,
             "behavioral_score": self.behavioral_score,
             "behavioral_finalized": self.finalized,
             "explicit_rating": self.explicit_rating,
@@ -625,6 +647,10 @@ async def run() -> None:
             mrt_eligible=bool(data.get("mrt_eligible", False)),
             p_withhold=data.get("p_withhold"),
             reason=data.get("reason", ""),
+            baseline_std=float(data.get("baseline_std") or 0.0),
+            deviation_at_decision=float(data.get("deviation_score") or 0.0),
+            baseline_observation_count=int(data.get("baseline_observation_count") or 0),
+            session_id=data.get("session_id"),
         )
         gate_decision_events.append(pending)
         tracked_decision_ids.add(decision_id)

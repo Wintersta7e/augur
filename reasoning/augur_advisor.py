@@ -684,6 +684,11 @@ async def publish_suppressed_event(
         "entity": signature.entity,
         "value": signature.value,
         "baseline_mean": _primary_field(payload, "baseline_mean"),
+        "baseline_std": _primary_field(payload, "baseline_std"),
+        "deviation_score": _primary_field(payload, "deviation_score"),
+        "baseline_observation_count": _primary_field(
+            payload, "baseline_observation_count"
+        ),
         "severity": signature.severity,
         "session_id": _resolve_session_id(redis_client),
         "arm": decision.deciding_arm,

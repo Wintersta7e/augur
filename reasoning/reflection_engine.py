@@ -257,11 +257,13 @@ def analyze_utility(feedback: dict, config: AugurConfig) -> dict:
         sum(explicit_scores) / len(explicit_scores) if explicit_scores else 0.5
     )
 
-    # Behavioral component
+    # Behavioral component. Under the surprise-reduction metric (spec §7) a
+    # finalized 0.0 is a VALID strong-negative outcome, not "missing" — filter
+    # on behavioral_finalized + not unmeasurable, never on `> 0`.
     behavioral_scores = [
         ev.get("behavioral_score", 0.5)
         for ev in advice_events
-        if ev.get("behavioral_score", 0) > 0
+        if ev.get("behavioral_finalized") and not ev.get("unmeasurable")
     ]
     behavioral_avg = (
         sum(behavioral_scores) / len(behavioral_scores) if behavioral_scores else 0.5
@@ -459,10 +461,12 @@ def analyze_correlation_tuning(
         ]
         explicit_avg = sum(explicit_scores) / len(explicit_scores)
 
+        # A finalized 0.0 is a valid negative outcome under the surprise-reduction
+        # metric (spec §7) — filter on behavioral_finalized, not `> 0`.
         behavioral_scores = [
             ev.get("behavioral_score", 0.0)
             for ev in events
-            if ev.get("behavioral_score", 0.0) > 0
+            if ev.get("behavioral_finalized") and not ev.get("unmeasurable")
         ]
         behavioral_avg = (
             sum(behavioral_scores) / len(behavioral_scores)
@@ -940,6 +944,11 @@ def _mrt_ipw_readout(
         fb = fired_by_id.get(did)
         if fb is None or not fb.get("behavioral_finalized"):
             continue
+        # Exclude unmeasurable rows (forced-0.5, not a measurement) and old
+        # chess-formula rows (no outcome_metric_version → incompatible) so the
+        # estimand is over one homogeneous, measured outcome (spec §7).
+        if fb.get("unmeasurable") or fb.get("outcome_metric_version") != 2:
+            continue
         p = em.get("p_fire") or fb.get("p_fire")
         if not p or p <= 0.0:
             continue
@@ -965,6 +974,13 @@ def _mrt_ipw_readout(
             unobservable += 1
             continue
         if not fb.get("behavioral_finalized"):
+            continue
+        # Same homogeneity exclusions as the fired arm, plus rated control rows
+        # (non-null withheld_rating_p) which received a post-window interruption
+        # and are stratified out of the primary behavioral estimand (spec §5.3).
+        if fb.get("unmeasurable") or fb.get("outcome_metric_version") != 2:
+            continue
+        if fb.get("withheld_rating_p") is not None:
             continue
         p = si.get("p_withhold") or fb.get("p_withhold")
         if not p or p <= 0.0:

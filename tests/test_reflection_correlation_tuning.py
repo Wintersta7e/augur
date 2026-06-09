@@ -22,6 +22,8 @@ def _advice(
     behavioral: float = 0.0,
     correlation_found: bool = True,
     escalation_rule: str | None = None,
+    behavioral_finalized: bool = True,
+    unmeasurable: bool = False,
 ) -> dict:
     return {
         "advice_id": "adv",
@@ -30,6 +32,8 @@ def _advice(
         "severity": "medium",
         "explicit_rating": explicit,
         "behavioral_score": behavioral,
+        "behavioral_finalized": behavioral_finalized,
+        "unmeasurable": unmeasurable,
         "think_times_after": [],
         "baseline_mean_at_time": 5.0,
         "timestamp": "2026-04-09T12:00:00+00:00",
@@ -76,10 +80,17 @@ class TestEmptyAndNonCorrelated:
 
 class TestFirstObservation:
     def test_first_observation_starts_at_one_and_drops_with_bad_feedback(self) -> None:
-        # One LOW+LOW event, negative rating, no behavioral data
-        # explicit_avg = 0.0, behavioral_avg = 0.5 (default since 0 excluded) → utility = 0.2
+        # One LOW+LOW event, negative rating, no behavioral data (unfinalized →
+        # excluded, behavioral_avg defaults to 0.5) → utility = 0.2
         # EWMA: (1-0.2)*1.0 + 0.2*0.2 = 0.84
-        events = [_advice(rule_key="LOW+LOW", explicit="n", behavioral=0.0)]
+        events = [
+            _advice(
+                rule_key="LOW+LOW",
+                explicit="n",
+                behavioral=0.0,
+                behavioral_finalized=False,
+            )
+        ]
         result = analyze_correlation_tuning(
             _feedback(events), DEFAULT_ESCALATION_MATRIX, {}, CONFIG
         )
@@ -297,9 +308,17 @@ class TestDisableCapturesRestoreIfNone:
     def test_first_session_disable_captures_current_target(self) -> None:
         matrix = {"version": "1.0", "rules": {"LOW+LOW": "MEDIUM"}}
         state = {"LOW+LOW": {"confidence": 0.32, "restore_target": None}}
-        # utility = 0.6*0 + 0.4*0.5 = 0.2 (behavioral=0 excluded, defaults to 0.5)
+        # utility = 0.6*0 + 0.4*0.5 = 0.2 (no behavioral outcome — unfinalized →
+        # excluded, behavioral_avg defaults to 0.5)
         # conf: 0.8*0.32 + 0.2*0.2 = 0.296, below 0.3 → disable
-        events = [_advice(rule_key="LOW+LOW", explicit="n", behavioral=0.0)]
+        events = [
+            _advice(
+                rule_key="LOW+LOW",
+                explicit="n",
+                behavioral=0.0,
+                behavioral_finalized=False,
+            )
+        ]
         result = analyze_correlation_tuning(_feedback(events), matrix, state, CONFIG)
         per = result["per_rule"]["LOW+LOW"]
         assert per["confidence_after"] == 0.296

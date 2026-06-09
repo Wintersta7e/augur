@@ -192,6 +192,9 @@ class PendingAdvice(_BehavioralTracker):
         severity: str,
         baseline_mean: float,
         timestamp: str,
+        baseline_std: float = 0.0,
+        deviation_at_decision: float = 0.0,
+        baseline_observation_count: int = 0,
         correlation_found: bool = False,
         correlated_domains: list[str] | None = None,
         rule_key: str | None = None,
@@ -209,7 +212,11 @@ class PendingAdvice(_BehavioralTracker):
         mrt_eligible: bool = False,
         p_fire: float | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(
+            baseline_std=baseline_std,
+            deviation_at_decision=deviation_at_decision,
+            baseline_observation_count=baseline_observation_count,
+        )
         self.advice_id = advice_id
         self.domain = domain
         self.entity = entity
@@ -242,6 +249,11 @@ class PendingAdvice(_BehavioralTracker):
             "behavioral_score": self.behavioral_score,
             "think_times_after": self.think_times_after,
             "baseline_mean_at_time": self.baseline_mean,
+            "baseline_std_at_time": self.baseline_std,
+            "deviation_at_decision": self.deviation_at_decision,
+            "baseline_observation_count": self.baseline_observation_count,
+            "unmeasurable": self.unmeasurable,
+            "outcome_metric_version": self.outcome_metric_version,
             "timestamp": self.timestamp,
             # Correlation metadata (added for matrix tuning)
             "correlation_found": self.correlation_found,
@@ -478,11 +490,24 @@ async def run() -> None:
         mrt_eligible = bool(data.get("mrt_eligible", False))
         p_fire = data.get("p_fire")
 
-        # Read baseline mean for the ACTUAL primary domain (was hardcoded "chess")
+        # Freeze the decision-time baseline (μ₀, σ₀, dev₀, obs₀) for the
+        # domain-agnostic outcome metric (spec 1A). Prefer the advice payload's
+        # values (carried pre-update from the triggering anomaly); fall back to
+        # Redis for baseline_mean/std.
         baseline_raw = pm.load_baseline(primary_domain, entity)
-        baseline_mean = (
-            baseline_raw.get("ewma_mean", think_time) if baseline_raw else think_time
-        )
+        baseline_mean = data.get("baseline_mean")
+        if baseline_mean is None:
+            baseline_mean = (
+                baseline_raw.get("ewma_mean", think_time)
+                if baseline_raw
+                else think_time
+            )
+        baseline_std = data.get("baseline_std")
+        if baseline_std is None and baseline_raw:
+            baseline_std = baseline_raw.get("ewma_var", 0.0) ** 0.5
+        baseline_std = float(baseline_std or 0.0)
+        deviation_at_decision = float(data.get("deviation_score") or 0.0)
+        baseline_obs = int(data.get("baseline_observation_count") or 0)
 
         advice_id = str(uuid.uuid4())[:8]
         pending = PendingAdvice(
@@ -491,6 +516,9 @@ async def run() -> None:
             entity=entity,
             severity=severity,
             baseline_mean=baseline_mean,
+            baseline_std=baseline_std,
+            deviation_at_decision=deviation_at_decision,
+            baseline_observation_count=baseline_obs,
             timestamp=datetime.now(timezone.utc).isoformat(),
             correlation_found=correlation_found,
             correlated_domains=correlated_domains,

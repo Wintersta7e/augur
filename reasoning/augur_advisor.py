@@ -561,6 +561,13 @@ def _build_advice_event(
         "player": primary.get("entity", entity),
         "move": primary.get("move", primary.get("context", {}).get("label", "?")),
         "think_time": primary.get("value", value),
+        # Decision-time frozen baseline for the outcome metric (spec 1A/§4.3):
+        # the detector emits these pre-update on every anomaly; thread them so
+        # feedback scores surprise-reduction against the decision-time baseline.
+        "baseline_mean": primary.get("baseline_mean"),
+        "baseline_std": primary.get("baseline_std"),
+        "deviation_score": primary.get("deviation_score"),
+        "baseline_observation_count": primary.get("baseline_observation_count"),
         # NEW Phase 3 polish fields
         "involved_domains": payload.get("involved_domains") or [primary_domain],
         "correlation_span_s": payload.get("correlation_span_s"),

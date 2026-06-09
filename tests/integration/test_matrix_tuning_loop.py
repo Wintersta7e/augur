@@ -38,6 +38,12 @@ def _correlated_advice_event(
         "severity": "medium",
         "explicit_rating": explicit,
         "behavioral_score": behavioral,
+        # These fabricated fixtures use behavioral=0.0 to mean "no behavioral
+        # outcome" (the old filter excluded 0). Map that to unfinalized so the
+        # new finalized-based filter reproduces the same exclusion; a non-zero
+        # score is a real finalized outcome that counts.
+        "behavioral_finalized": behavioral > 0.0,
+        "unmeasurable": False,
         "think_times_after": [],
         "baseline_mean_at_time": 5.0,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -56,6 +62,8 @@ def _standalone_advice_event() -> dict:
         "severity": "medium",
         "explicit_rating": "y",
         "behavioral_score": 0.8,
+        "behavioral_finalized": True,
+        "unmeasurable": False,
         "think_times_after": [],
         "baseline_mean_at_time": 5.0,
         "timestamp": datetime.now(timezone.utc).isoformat(),

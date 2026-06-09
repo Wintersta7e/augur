@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import json
 import logging
 import sys
@@ -90,6 +91,60 @@ def _resolve_primary_domain(advice_data: dict) -> str | None:
     return advice_data.get("domain") or advice_data.get("primary_anomaly", {}).get(
         "domain"
     )
+
+
+def _should_select_withheld_rating(
+    config: AugurConfig,
+    *,
+    mrt_eligible: bool,
+    decision_id: str,
+    sessions_so_far: int,
+) -> bool:
+    """1B selection (deterministic in decision_id — replay-safe; no wall-clock
+    randomness). The prompt fires later, at behavioral-window finalization
+    (anti-contamination). Off unless the master flag is set, the decision is
+    mrt_eligible, and the calibration window (max_sessions) is not exhausted."""
+    if not config.gate_mrt_withheld_rating or not mrt_eligible:
+        return False
+    if sessions_so_far >= config.gate_mrt_withheld_rating_max_sessions:
+        return False
+    if config.gate_mrt_withheld_rating_rate <= 0.0:
+        return False
+    frac = int(hashlib.sha256(decision_id.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+    return frac < config.gate_mrt_withheld_rating_rate
+
+
+async def maybe_prompt_withheld_rating(pending, config: AugurConfig, pm) -> bool:
+    """Issue the calibration control-arm rating IFF this finalized tracker was
+    selected and not yet prompted (spec §5.3).
+
+    No-ops for non-selected / non-finalized / already-prompted / fired-arm
+    trackers (the getattr guard covers PendingAdvice). Sets ``withheld_rating_p``
+    ONLY when a prompt is issued — that is the IPW-exclusion key, so a
+    selected-but-never-prompted row keeps it None and stays in the estimand.
+    Returns True iff a prompt was recorded; the caller MUST then persist
+    (save_current_feedback) so the rating survives a crash.
+    """
+    if not getattr(pending, "selected_for_rating", False):
+        return False
+    if not pending.finalized:
+        return False
+    if getattr(pending, "withheld_rating_p", None) is not None:
+        return False  # already prompted
+    print(
+        f"\n{CYAN}[AUGUR]{RESET} (calibration) Would advice have helped a moment "
+        f"ago? {BOLD}[y/n/s]{RESET} {GRAY}({EXPLICIT_TIMEOUT_S}s, s=skip){RESET} ",
+        end="",
+        flush=True,
+    )
+    resp = await read_stdin_with_timeout(EXPLICIT_TIMEOUT_S)
+    pending.explicit_rating = (
+        "y" if resp in ("y", "yes") else "n" if resp in ("n", "no") else "no_response"
+    )
+    pending.withheld_rating_p = config.gate_mrt_withheld_rating_rate
+    if getattr(pending, "session_id", None):
+        pm.mark_mrt_rating_session(pending.session_id)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +653,12 @@ async def run() -> None:
                 tracking_key,
             )
         active_tracking[tracking_key] = pending
+        # Prompt a displaced withheld tracker AFTER installing the new one
+        # (ordering invariant, spec §5.3) — no-ops for the common fired-arm case.
+        if displaced is not None and await maybe_prompt_withheld_rating(
+            displaced, config, pm
+        ):
+            save_current_feedback()
 
         log.info(
             "Advice received for %s (%s, %s) — awaiting feedback",
@@ -683,11 +744,32 @@ async def run() -> None:
 
         # Same post-decision tracking as the fired arm: register on the primary
         # (domain, entity), finalizing any displaced tracker first (BUG-04).
+        # Ordering invariant (spec §5.3): install the NEW tracker BEFORE awaiting
+        # any prompt for the displaced one, so a concurrent callback never races
+        # on a stale entry.
         tracking_key = TrackingKey(domain, entity)
         displaced = active_tracking.get(tracking_key)
         if displaced is not None and not displaced.finalized:
             displaced._compute_behavioral_score()
         active_tracking[tracking_key] = pending
+
+        # 1B: select this withheld decision for a (later, post-finalization)
+        # control-arm rating. Sets only the flag — withheld_rating_p is set when
+        # the prompt actually fires (the IPW-exclusion key).
+        if _should_select_withheld_rating(
+            config,
+            mrt_eligible=pending.mrt_eligible,
+            decision_id=decision_id,
+            sessions_so_far=pm.count_mrt_rating_sessions(),
+        ):
+            pending.selected_for_rating = True
+
+        # Prompt the displaced tracker (held in a local; the new tracker is
+        # already installed above, so no active_tracking race on the await).
+        if displaced is not None and await maybe_prompt_withheld_rating(
+            displaced, config, pm
+        ):
+            save_current_feedback()
 
         log.info(
             "Gate suppressed %s (%s/%s) — tracking withheld arm",
@@ -729,7 +811,13 @@ async def run() -> None:
                 entity,
                 pending.behavioral_score,
             )
-            del active_tracking[tracking_key]
+            # Ordering invariant (spec §5.3): remove from active_tracking BEFORE
+            # awaiting the rating prompt, so a concurrent event installing a new
+            # tracker for this key is never deleted by the resumed handler. The
+            # identity guard ensures we only delete this exact tracker.
+            if active_tracking.get(tracking_key) is pending:
+                del active_tracking[tracking_key]
+            await maybe_prompt_withheld_rating(pending, config, pm)
             save_current_feedback()
 
     # -- Session end handler -------------------------------------------------
@@ -742,11 +830,16 @@ async def run() -> None:
             )
             return
 
-        # Force-finalize any pending tracking
-        for pending in active_tracking.values():
+        # Force-finalize any pending tracking. Snapshot + clear BEFORE any await
+        # (ordering invariant, spec §5.3): a concurrent callback during a rating
+        # prompt must not mutate the live dict mid-iteration. Iterate the
+        # snapshot, not active_tracking.
+        to_finalize = list(active_tracking.values())
+        active_tracking.clear()
+        for pending in to_finalize:
             if not pending.finalized:
                 pending._compute_behavioral_score()
-        active_tracking.clear()
+            await maybe_prompt_withheld_rating(pending, config, pm)
 
         save_current_feedback()
         summary = build_session_summary()

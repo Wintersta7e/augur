@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 from datetime import datetime, timezone
@@ -153,8 +154,12 @@ async def pipeline(
         )
         procs[name] = proc
 
-    # Give components time to connect to Redis/NATS and subscribe
-    await asyncio.sleep(3.0)
+    # Give components time to connect to Redis/NATS and subscribe. The wait is
+    # AUGUR_TEST_STARTUP_WAIT_S-overridable: native-Linux CI is fast (~3s), but a
+    # WSL/Windows-mount dev box imports river/numba off a slow filesystem and
+    # needs longer or it injects events before the detector has subscribed (NATS
+    # core has no persistence → the event is dropped → no baseline).
+    await asyncio.sleep(float(os.environ.get("AUGUR_TEST_STARTUP_WAIT_S", "3.0")))
 
     yield procs
 

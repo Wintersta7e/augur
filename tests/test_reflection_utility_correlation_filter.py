@@ -26,6 +26,8 @@ def _advice(explicit: str, behavioral: float, correlation_found: bool) -> dict:
         "severity": "medium",
         "explicit_rating": explicit,
         "behavioral_score": behavioral,
+        "behavioral_finalized": True,
+        "unmeasurable": False,
         "think_times_after": [],
         "baseline_mean_at_time": 5.0,
         "timestamp": "2026-04-09T12:00:00+00:00",

@@ -32,6 +32,10 @@ def _make_feedback(
         ev = {"explicit_rating": rating, "correlation_found": False}
         if behavioral_scores and i < len(behavioral_scores):
             ev["behavioral_score"] = behavioral_scores[i]
+            # A provided behavioral score is a finalized, measurable outcome
+            # (real records carry these flags; the new filter keys on them).
+            ev["behavioral_finalized"] = True
+            ev["unmeasurable"] = False
         events.append(ev)
     return {
         "advice_events": events,

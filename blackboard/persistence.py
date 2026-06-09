@@ -168,6 +168,42 @@ class PersistenceManager:
         log.info("Rolled back prompt for domain %s", domain)
         return True
 
+    def update_current_prompt_score(self, domain: str, realized_score: float) -> None:
+        """Overwrite the CURRENT prompt entry's score in place (no archive).
+
+        Lets the reflection cycle stamp the live prompt's REALIZED score (spec
+        1E §9) so the rollback check compares current-vs-previous realized scores
+        rather than the stale motivating-utility recorded at mutation time.
+        """
+        current_key = f"augur:prompts:{domain}:current"
+        raw = self._r.get(current_key)
+        if raw is None:
+            return
+        entry = json.loads(raw)
+        entry["score"] = realized_score
+        self._r.set(current_key, json.dumps(entry))
+
+    def get_prompt_score_pair(self, domain: str) -> tuple[float | None, float | None]:
+        """Return (current_score, most_recent_previous_score) for the domain's
+        prompt — the realized-score pair the 1E rollback gate compares."""
+        current_key = f"augur:prompts:{domain}:current"
+        history_key = f"augur:prompts:{domain}:history"
+        cur_raw = self._r.get(current_key)
+        cur = json.loads(cur_raw).get("score") if cur_raw else None
+        prev_list = self._r.lrange(history_key, 0, 0)
+        prev = json.loads(prev_list[0]).get("score") if prev_list else None
+        return cur, prev
+
+    # -- MRT withheld-rating calibration tracking (spec 1B) ------------------
+
+    def mark_mrt_rating_session(self, session_id: str) -> None:
+        """Record that a session issued >=1 withheld-rating prompt (set: dedups)."""
+        self._r.sadd("augur:gate:mrt_rating_sessions", session_id)
+
+    def count_mrt_rating_sessions(self) -> int:
+        """Number of distinct sessions that issued a withheld-rating prompt."""
+        return int(self._r.scard("augur:gate:mrt_rating_sessions"))
+
     # -- Threshold config ----------------------------------------------------
 
     def save_thresholds(self, domain: str, thresholds_dict: dict) -> None:

@@ -211,11 +211,20 @@ class PendingAdvice(_BehavioralTracker):
         probe: bool = False,
         mrt_eligible: bool = False,
         p_fire: float | None = None,
+        # Scoring config (threaded from AugurConfig at construction)
+        window: int = POST_ADVICE_TRACK_MOVES,
+        min_baseline_std: float = 0.01,
+        trend_bonus: float = 0.1,
+        min_observations: int = 15,
     ) -> None:
         super().__init__(
             baseline_std=baseline_std,
             deviation_at_decision=deviation_at_decision,
             baseline_observation_count=baseline_observation_count,
+            window=window,
+            min_baseline_std=min_baseline_std,
+            trend_bonus=trend_bonus,
+            min_observations=min_observations,
         )
         self.advice_id = advice_id
         self.domain = domain
@@ -308,11 +317,20 @@ class PendingGateDecision(_BehavioralTracker):
         deviation_at_decision: float = 0.0,
         baseline_observation_count: int = 0,
         session_id: str | None = None,
+        # Scoring config (threaded from AugurConfig at construction)
+        window: int = POST_ADVICE_TRACK_MOVES,
+        min_baseline_std: float = 0.01,
+        trend_bonus: float = 0.1,
+        min_observations: int = 15,
     ) -> None:
         super().__init__(
             baseline_std=baseline_std,
             deviation_at_decision=deviation_at_decision,
             baseline_observation_count=baseline_observation_count,
+            window=window,
+            min_baseline_std=min_baseline_std,
+            trend_bonus=trend_bonus,
+            min_observations=min_observations,
         )
         self.decision_id = decision_id
         self.state_key = state_key
@@ -554,6 +572,10 @@ async def run() -> None:
             probe=probe,
             mrt_eligible=mrt_eligible,
             p_fire=p_fire,
+            window=config.post_decision_window,
+            min_baseline_std=config.min_baseline_std,
+            trend_bonus=config.outcome_trend_bonus,
+            min_observations=config.min_observations,
         )
         advice_events.append(pending)
         # Mark the decision_id tracked so a re-published augur.advisor.suppressed
@@ -651,6 +673,10 @@ async def run() -> None:
             deviation_at_decision=float(data.get("deviation_score") or 0.0),
             baseline_observation_count=int(data.get("baseline_observation_count") or 0),
             session_id=data.get("session_id"),
+            window=config.post_decision_window,
+            min_baseline_std=config.min_baseline_std,
+            trend_bonus=config.outcome_trend_bonus,
+            min_observations=config.min_observations,
         )
         gate_decision_events.append(pending)
         tracked_decision_ids.add(decision_id)

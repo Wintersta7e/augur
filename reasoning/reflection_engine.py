@@ -697,6 +697,28 @@ def analyze_correlation_window_tuning(
 # ---------------------------------------------------------------------------
 
 
+def _violates_forbidden_patterns(prompt_text: str, config: AugurConfig) -> bool:
+    """True if the mutated prompt reintroduces a forbidden valence/meta pattern
+    (the exact 1D failure mode, or LLM meta-text like 'as an ai'). Spec 1E §9."""
+    low = prompt_text.lower()
+    return any(pat.lower() in low for pat in config.prompt_forbidden_patterns)
+
+
+def maybe_rollback_prompt(
+    pm: PersistenceManager, domain: str, config: AugurConfig
+) -> bool:
+    """Roll back if the current prompt's REALIZED score regressed past the margin
+    vs its predecessor's realized score (spec 1E §9). Both scores must exist
+    (a freshly-seeded prompt with no predecessor never rolls back). Returns True
+    iff a rollback was performed."""
+    cur, prev = pm.get_prompt_score_pair(domain)
+    if cur is None or prev is None:
+        return False
+    if (prev - cur) > config.prompt_rollback_margin:
+        return pm.rollback_prompt(domain)
+    return False
+
+
 async def mutate_prompt(
     pm: PersistenceManager,
     domain: str,
@@ -706,12 +728,17 @@ async def mutate_prompt(
 ) -> dict | None:
     """Ask Ollama to suggest a better system prompt based on feedback."""
     current_prompt = pm.load_prompt(domain)
-    if current_prompt is None:
-        # No managed prompt yet — create a seed
+    seeded = current_prompt is None
+    if seeded:
+        # No managed prompt yet — create a seed.
         current_prompt = (
             "You are a chess analyst reviewing a game in progress. "
             "Provide concise, actionable advice about timing anomalies."
         )
+        # Persist the seed (with the current realized utility) BEFORE mutating so
+        # the first mutation archives it into history → rollback has a target
+        # (spec 1E, MEDIUM-2).
+        pm.save_prompt(domain, current_prompt, score=utility_result["utility_score"])
 
     prompt = f"""You are an AI prompt engineer. A chess advisor system has been receiving
 low utility scores from users (score: {utility_result["utility_score"]:.2f}/1.0).
@@ -749,6 +776,12 @@ Return ONLY the new prompt text, nothing else."""
         if not new_prompt or len(new_prompt) < 20:
             log.warning("Ollama returned unusable prompt mutation")
             return None
+
+        # 1E content guard: reject a mutation that reintroduces a forbidden
+        # valence/meta pattern (e.g. "take a break") — keep the current prompt.
+        if _violates_forbidden_patterns(new_prompt, config):
+            log.warning("Rejected prompt mutation for '%s' (forbidden pattern)", domain)
+            return {"mutated": False, "rejected": "forbidden_pattern"}
 
         # Save with the current utility score
         pm.save_prompt(domain, new_prompt, score=utility_result["utility_score"])
@@ -1174,18 +1207,27 @@ async def run_reflection(
     utility = analyze_utility(feedback, config)
     log.info("Utility: %s", utility["reason"])
 
-    # Prompt mutation if utility is low
+    # 1E: stamp the live prompt's REALIZED score (this session's utility), then
+    # roll back a regression OR mutate a low-utility prompt (mutually exclusive),
+    # behind a per-session marker so a re-run neither double-rolls nor re-mutates.
     mutation_result = None
-    if utility["needs_prompt_mutation"]:
-        log.info(
-            "Utility below %.1f — attempting prompt mutation",
-            config.utility_mutation_threshold,
-        )
-        mutation_result = await mutate_prompt(pm, domain, utility, http_client, config)
-        if mutation_result and mutation_result.get("mutated"):
-            log.info("Prompt mutation successful")
-        else:
-            log.warning("Prompt mutation skipped or failed")
+    if not pm.is_tuning_applied(session_id, pass_name="prompt"):
+        pm.update_current_prompt_score(domain, utility["utility_score"])
+        if maybe_rollback_prompt(pm, domain, config):
+            log.info("Auto-rolled-back regressed prompt for '%s'", domain)
+        elif utility["needs_prompt_mutation"]:
+            log.info(
+                "Utility below %.1f — attempting prompt mutation",
+                config.utility_mutation_threshold,
+            )
+            mutation_result = await mutate_prompt(
+                pm, domain, utility, http_client, config
+            )
+            if mutation_result and mutation_result.get("mutated"):
+                log.info("Prompt mutation successful")
+            else:
+                log.warning("Prompt mutation skipped or failed")
+        pm.mark_tuning_applied(session_id, pass_name="prompt")
 
     # 3. Counterfactual analysis
     counterfactual = analyze_counterfactual(pm, domain, current_thresholds)

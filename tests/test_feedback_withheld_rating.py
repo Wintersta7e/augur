@@ -1,6 +1,5 @@
 """1B calibration-era withheld-rating selection + prompt helper (spec §5.3)."""
 
-import hashlib
 
 import pytest
 
@@ -79,13 +78,37 @@ def test_rate_zero_never_selects():
     )
 
 
-def test_selection_matches_hash_contract():
+def test_selection_boundary_for_low_fraction_id():
+    # 'zzz' hashes to frac=0.0935 (precomputed sha256[:8]/0xFFFFFFFF — asserted as
+    # a literal, NOT recomputed, so a wrong slice/divisor would shift the boundary
+    # and fail here). rate just above the frac → selected; just below → not.
+    above = _cfg(gate_mrt_withheld_rating=True, gate_mrt_withheld_rating_rate=0.12)
+    below = _cfg(gate_mrt_withheld_rating=True, gate_mrt_withheld_rating_rate=0.05)
+    assert (
+        _should_select_withheld_rating(
+            above, mrt_eligible=True, decision_id="zzz", sessions_so_far=0
+        )
+        is True
+    )
+    assert (
+        _should_select_withheld_rating(
+            below, mrt_eligible=True, decision_id="zzz", sessions_so_far=0
+        )
+        is False
+    )
+
+
+def test_high_fraction_ids_never_selected_within_rate_cap():
+    # These ids hash to frac > 0.5 (d1=0.5442, dX=0.6874, d2=0.9044), and the rate
+    # is capped at 0.5, so they can never be selected — the cap is a hard ceiling.
     cfg = _cfg(gate_mrt_withheld_rating=True, gate_mrt_withheld_rating_rate=0.5)
-    for did in ["d1", "d2", "d3", "dX", "abc", "zzz", "alpha", "beta"]:
-        frac = int(hashlib.sha256(did.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
-        assert _should_select_withheld_rating(
-            cfg, mrt_eligible=True, decision_id=did, sessions_so_far=0
-        ) == (frac < 0.5)
+    for did in ["d1", "dX", "d2"]:
+        assert (
+            _should_select_withheld_rating(
+                cfg, mrt_eligible=True, decision_id=did, sessions_so_far=0
+            )
+            is False
+        )
 
 
 def test_deterministic_by_decision_id():

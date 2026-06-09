@@ -249,9 +249,11 @@ class AugurConfig:
             raise ValueError(
                 f"drift_reset_cooldown_obs={self.drift_reset_cooldown_obs} outside [0, 10000]"
             )
-        if not (0.1 <= self.drift_restart_std_factor <= 10.0):
+        if not (0.25 <= self.drift_restart_std_factor <= 4.0):
+            # Bound matches the effective clamp in anomaly_detector._maybe_drift_reset
+            # ([|Δ|*0.25, |Δ|*4.0]); values outside it had no effect, so reject them.
             raise ValueError(
-                f"drift_restart_std_factor={self.drift_restart_std_factor} outside [0.1, 10]"
+                f"drift_restart_std_factor={self.drift_restart_std_factor} outside [0.25, 4.0]"
             )
         if not (0.0 <= self.prompt_rollback_margin <= 1.0):
             raise ValueError(

@@ -210,6 +210,55 @@ def classify_severity(
     return "low"
 
 
+def build_anomaly_payload(
+    event: PerceptionEvent,
+    *,
+    deviation: float,
+    hst_score: float,
+    severity: str,
+    mean_before: float,
+    std_before: float,
+    obs_before: int,
+    drift_reset: bool,
+    timestamp: str,
+) -> dict:
+    """Assemble the ``augur.detection.anomaly`` payload from the DECISION-TIME
+    (pre-update) baseline snapshot.
+
+    Kept a pure function (taking the frozen snapshot explicitly, never the live
+    baseline) so the spec §4.3 invariant — ``baseline_mean``/``baseline_std``
+    are the PRE-update values, consistent with ``deviation_score`` — is
+    structurally guaranteed and unit-testable. A regression to post-update
+    values is impossible here because this function has no access to the
+    updated baseline.
+    """
+    ctx = event.context
+    label = ctx.get("move_san", ctx.get("label", f"{event.value}{event.unit}"))
+    return {
+        "domain": event.domain,
+        "stream_id": event.stream_id,
+        "entity": event.entity,
+        "event_type": event.event_type,
+        "value": round(event.value, 3),
+        "unit": event.unit,
+        "context": ctx,
+        "session_id": event.session_id,
+        "baseline_mean": round(mean_before, 3),
+        "baseline_std": round(std_before, 3),
+        "baseline_observation_count": obs_before,
+        "deviation_score": round(deviation, 3),
+        "drift_reset": drift_reset,
+        "anomaly_score": round(hst_score, 3),
+        "severity": severity,
+        "timestamp": timestamp,
+        # Compat aliases for downstream consumers not yet updated
+        "player": event.entity,
+        "move": ctx.get("move_san", label),
+        "move_number": ctx.get("move_number", 0),
+        "think_time": round(event.value, 3),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Threshold loading
 # ---------------------------------------------------------------------------
@@ -399,30 +448,19 @@ async def run() -> None:
             th["severity_high_sigma"],
         )
 
-        # Anomaly payload includes full event context plus compat aliases
-        anomaly_payload = {
-            "domain": domain,
-            "stream_id": event.stream_id,
-            "entity": entity,
-            "event_type": event.event_type,
-            "value": round(value, 3),
-            "unit": event.unit,
-            "context": ctx,
-            "session_id": event.session_id,
-            "baseline_mean": round(mean_before, 3),
-            "baseline_std": round(std_before, 3),
-            "baseline_observation_count": obs_before,
-            "deviation_score": round(deviation, 3),
-            "drift_reset": bool(bl._just_reset),
-            "anomaly_score": round(hst_score, 3),
-            "severity": severity,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            # Compat aliases for downstream consumers not yet updated
-            "player": entity,
-            "move": ctx.get("move_san", label),
-            "move_number": ctx.get("move_number", 0),
-            "think_time": round(value, 3),
-        }
+        # Anomaly payload from the pre-update snapshot (spec §4.3); the pure
+        # builder guarantees baseline_mean/std are decision-time values.
+        anomaly_payload = build_anomaly_payload(
+            event,
+            deviation=deviation,
+            hst_score=hst_score,
+            severity=severity,
+            mean_before=mean_before,
+            std_before=std_before,
+            obs_before=obs_before,
+            drift_reset=bool(bl._just_reset),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
 
         log.warning(
             "  \u26a0 ANOMALY [%s] %s/%s: value=%.2f  dev=%.1f\u03c3  hst=%.3f",

@@ -33,7 +33,8 @@ def test_measurement_defaults():
         {"gate_mrt_withheld_rating_max_sessions": 0},
         {"drift_detector": "bogus"},
         {"drift_reset_cooldown_obs": -1},
-        {"drift_restart_std_factor": 0.0},
+        {"drift_restart_std_factor": 0.0},  # below [0.25, 4.0]
+        {"drift_restart_std_factor": 5.0},  # above [0.25, 4.0] (matches the clamp)
         {"prompt_rollback_margin": 1.5},
     ],
 )

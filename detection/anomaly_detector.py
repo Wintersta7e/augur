@@ -256,6 +256,14 @@ async def run() -> None:
         deviation, hst_score = bl.score(value)
         is_trained = bl.observation_count >= th["min_observations"]
 
+        # Freeze the DECISION-TIME (pre-update) baseline so the emitted
+        # baseline_mean/std are consistent with deviation_score (also pre-update)
+        # and the downstream outcome metric (spec 2026-06-09 §4.3). Persistence
+        # still saves the UPDATED baseline below.
+        mean_before = bl.ewma_mean
+        std_before = bl.ewma_std
+        obs_before = bl.observation_count
+
         # Update baseline
         bl.update(value, th["ewma_alpha"])
 
@@ -321,8 +329,9 @@ async def run() -> None:
             "unit": event.unit,
             "context": ctx,
             "session_id": event.session_id,
-            "baseline_mean": round(bl.ewma_mean, 3),
-            "baseline_std": round(bl.ewma_std, 3),
+            "baseline_mean": round(mean_before, 3),
+            "baseline_std": round(std_before, 3),
+            "baseline_observation_count": obs_before,
             "deviation_score": round(deviation, 3),
             "anomaly_score": round(hst_score, 3),
             "severity": severity,

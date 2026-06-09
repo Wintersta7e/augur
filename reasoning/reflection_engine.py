@@ -905,6 +905,57 @@ def _behavioral_audit(advice_rows: list[dict], config: AugurConfig) -> dict[str,
     }
 
 
+def _audit_slice(rows: list[dict], config: AugurConfig) -> dict[str, Any]:
+    """Reliability stats over one slice (spec §7). Genuine y/n + finalized +
+    measurable + current metric version only — matching the IPW filter so the
+    validation Pearson is over one homogeneous metric."""
+    total = len(rows)
+    genuine = [
+        r
+        for r in rows
+        if r.get("explicit_rating") in ("y", "n")
+        and r.get("behavioral_finalized")
+        and not r.get("unmeasurable")
+        and r.get("outcome_metric_version") == 2
+    ]
+    excluded_old_version = sum(
+        1
+        for r in rows
+        if r.get("explicit_rating") in ("y", "n")
+        and r.get("behavioral_finalized")
+        and not r.get("unmeasurable")
+        and r.get("outcome_metric_version") != 2
+    )
+    explicit_vals = [1.0 if r["explicit_rating"] == "y" else 0.0 for r in genuine]
+    behavioral_vals = [float(r.get("behavioral_score", 0.0) or 0.0) for r in genuine]
+    n = len(genuine)
+    sufficient = n >= config.gate_behavioral_min_samples
+    return {
+        "genuine_samples": n,
+        "genuine_response_rate": round(total and n / total or 0.0, 4),
+        "excluded_old_version": excluded_old_version,
+        "sufficient": sufficient,
+        "correlation": _pearson(behavioral_vals, explicit_vals) if sufficient else None,
+    }
+
+
+def _behavioral_audit_per_arm(rows: list[dict], config: AugurConfig) -> dict[str, Any]:
+    """Per-arm + per-domain reliability audit (spec §7). Rows carry ``_arm``
+    ('fired'|'withheld') and ``domain``. Reports the overall slice plus per-arm
+    and per-domain breakdowns so we can see whether the σ-space metric tracks
+    felt usefulness symmetrically across arms and for non-chess domains."""
+    by_arm: dict[str, list[dict]] = {}
+    by_domain: dict[str, list[dict]] = {}
+    for r in rows:
+        by_arm.setdefault(r.get("_arm", "fired"), []).append(r)
+        by_domain.setdefault(r.get("domain", "unknown"), []).append(r)
+    return {
+        "overall": _audit_slice(rows, config),
+        "per_arm": {a: _audit_slice(rs, config) for a, rs in by_arm.items()},
+        "per_domain": {d: _audit_slice(rs, config) for d, rs in by_domain.items()},
+    }
+
+
 def _mrt_ipw_readout(
     emissions: list[dict],
     silences: list[dict],
@@ -1121,6 +1172,14 @@ def analyze_gate(
 
     # ── Behavioral audit + MRT/IPW readout ───────────────────────────────────
     audit = _behavioral_audit(advice_rows, config)
+    # Per-arm + per-domain reliability audit (spec §7 — the validation
+    # deliverable). Tag each row with its arm, then split fired vs withheld and
+    # by domain so we can see whether the σ-metric tracks felt usefulness.
+    for r in advice_rows:
+        r["_arm"] = "fired"
+    for r in gate_rows:
+        r["_arm"] = "withheld"
+    reliability_audit = _behavioral_audit_per_arm(advice_rows + gate_rows, config)
     mrt = _mrt_ipw_readout(
         pm.load_emissions(limit=100),
         pm.load_silence_records(limit=100),
@@ -1155,6 +1214,7 @@ def analyze_gate(
         "credibility_classes_tuned": sorted(credibility.keys()),
         "advice_rate": advice_rate_update,
         "behavioral_audit": audit,
+        "reliability_audit": reliability_audit,
         "mrt": mrt,
     }
 

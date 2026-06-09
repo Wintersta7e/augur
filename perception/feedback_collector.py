@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import json
 import logging
 import sys
@@ -61,6 +62,12 @@ SUBJECT_SUPPRESSED = "augur.advisor.suppressed"
 EXPLICIT_TIMEOUT_S = 10
 POST_ADVICE_TRACK_MOVES = 3
 
+# Outcome-metric constants (spec 2026-06-09 §1A/§4)
+_EPS = 1e-9
+MIN_DECISION_DEVIATION = 1.0  # below this, an HST-only fire — sigma-metric unmeasurable
+MIN_POST_OBS = 2  # minimum post-decision observations to score
+OUTCOME_METRIC_VERSION = 2  # v1 = legacy chess think-time formula
+
 # ---------------------------------------------------------------------------
 # ANSI helpers (for the inline prompt)
 # ---------------------------------------------------------------------------
@@ -86,65 +93,147 @@ def _resolve_primary_domain(advice_data: dict) -> str | None:
     )
 
 
+def _should_select_withheld_rating(
+    config: AugurConfig,
+    *,
+    mrt_eligible: bool,
+    decision_id: str,
+    sessions_so_far: int,
+) -> bool:
+    """1B selection (deterministic in decision_id — replay-safe; no wall-clock
+    randomness). The prompt fires later, at behavioral-window finalization
+    (anti-contamination). Off unless the master flag is set, the decision is
+    mrt_eligible, and the calibration window (max_sessions) is not exhausted."""
+    if not config.gate_mrt_withheld_rating or not mrt_eligible:
+        return False
+    if sessions_so_far >= config.gate_mrt_withheld_rating_max_sessions:
+        return False
+    if config.gate_mrt_withheld_rating_rate <= 0.0:
+        return False
+    frac = int(hashlib.sha256(decision_id.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+    return frac < config.gate_mrt_withheld_rating_rate
+
+
+async def maybe_prompt_withheld_rating(pending, config: AugurConfig, pm) -> bool:
+    """Issue the calibration control-arm rating IFF this finalized tracker was
+    selected and not yet prompted (spec §5.3).
+
+    No-ops for non-selected / non-finalized / already-prompted / fired-arm
+    trackers (the getattr guard covers PendingAdvice). Sets ``withheld_rating_p``
+    ONLY when a prompt is issued — that is the IPW-exclusion key, so a
+    selected-but-never-prompted row keeps it None and stays in the estimand.
+    Returns True iff a prompt was recorded; the caller MUST then persist
+    (save_current_feedback) so the rating survives a crash.
+    """
+    if not getattr(pending, "selected_for_rating", False):
+        return False
+    if not pending.finalized:
+        return False
+    if getattr(pending, "withheld_rating_p", None) is not None:
+        return False  # already prompted
+    print(
+        f"\n{CYAN}[AUGUR]{RESET} (calibration) Would advice have helped a moment "
+        f"ago? {BOLD}[y/n/s]{RESET} {GRAY}({EXPLICIT_TIMEOUT_S}s, s=skip){RESET} ",
+        end="",
+        flush=True,
+    )
+    resp = await read_stdin_with_timeout(EXPLICIT_TIMEOUT_S)
+    pending.explicit_rating = (
+        "y" if resp in ("y", "yes") else "n" if resp in ("n", "no") else "no_response"
+    )
+    pending.withheld_rating_p = config.gate_mrt_withheld_rating_rate
+    if getattr(pending, "session_id", None):
+        pm.mark_mrt_rating_session(pending.session_id)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Pending advice tracker
 # ---------------------------------------------------------------------------
 
 
 class _BehavioralTracker:
-    """Shared post-decision behavioral-score tracking.
+    """Shared post-decision outcome scoring (spec 2026-06-09 §1A).
 
     Both the fired arm (``PendingAdvice``) and the withheld/control arm
-    (``PendingGateDecision``) track the same post-decision perception values
-    and compute the same behavioral score (spec §9), so the MRT compares the
-    same outcome across arms. Subclasses set ``baseline_mean``; this base owns
-    the move buffer + scoring.
+    (``PendingGateDecision``) compute the same DOMAIN-AGNOSTIC surprise-reduction
+    score: the fraction of decision-time surprise removed in the post-decision
+    window. Under a Gaussian baseline, surprise ∝ deviation²; the score is
+    direction-agnostic and measured against the baseline frozen at decision time
+    (baseline_mean, baseline_std, deviation_at_decision, baseline_observation_count),
+    so the MRT compares the same outcome across arms. ``think_times_after`` keeps
+    its legacy name but now holds generic post-decision values for any domain.
+    Unmeasurable fires (degenerate σ, HST-only dev₀, or untrained baseline) score
+    a neutral 0.5 with ``unmeasurable=True``.
     """
 
     baseline_mean: float
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        baseline_std: float = 0.0,
+        deviation_at_decision: float = 0.0,
+        baseline_observation_count: int = 0,
+        window: int = POST_ADVICE_TRACK_MOVES,
+        min_baseline_std: float = 0.01,
+        trend_bonus: float = 0.1,
+        min_post_obs: int = MIN_POST_OBS,
+        min_observations: int = 15,
+    ) -> None:
         self.explicit_rating: Literal["y", "n", "no_response"] = "no_response"
         self.think_times_after: list[float] = []
         self.behavioral_score: float = 0.0
         self.finalized = False
+        self.unmeasurable = False
+        self.outcome_metric_version = OUTCOME_METRIC_VERSION
+        # Decision-time-frozen baseline
+        self.baseline_std = baseline_std
+        self.deviation_at_decision = deviation_at_decision
+        self.baseline_observation_count = baseline_observation_count
+        # Scoring config (threaded from AugurConfig at construction)
+        self._window = window
+        self._min_baseline_std = min_baseline_std
+        self._trend_bonus = trend_bonus
+        self._min_post_obs = min_post_obs
+        self._min_observations = min_observations
 
     def add_post_move(self, value: float) -> None:
-        if len(self.think_times_after) < POST_ADVICE_TRACK_MOVES:
+        if len(self.think_times_after) < self._window:
             self.think_times_after.append(round(value, 3))
-        if len(self.think_times_after) >= POST_ADVICE_TRACK_MOVES:
+        if len(self.think_times_after) >= self._window:
             self._compute_behavioral_score()
 
     def _compute_behavioral_score(self) -> None:
-        if not self.think_times_after or self.baseline_mean <= 0:
+        n = len(self.think_times_after)
+        if n < self._min_post_obs:
+            # Incomplete window (session-end path) — not scorable yet.
+            self.finalized = False
+            return
+        self.finalized = True
+        # Measurability gate (spec §4.1/§4.4): the sigma-surprise metric only
+        # applies to a trained, deviation-driven fire against a non-degenerate σ.
+        if (
+            self.baseline_std < self._min_baseline_std
+            or self.deviation_at_decision < MIN_DECISION_DEVIATION
+            or self.baseline_observation_count < self._min_observations
+        ):
+            self.unmeasurable = True
             self.behavioral_score = 0.5
             return
 
-        scores: list[float] = []
-        for t in self.think_times_after:
-            ratio = t / self.baseline_mean
-            if ratio <= 1.0:
-                # At or faster than baseline — positive signal
-                scores.append(min(1.0, 1.0 - (ratio - 0.5) * 0.5))
-            elif ratio <= 1.5:
-                # Slightly slower — neutral
-                scores.append(0.5)
-            else:
-                # Much slower — negative signal
-                scores.append(max(0.0, 1.0 - (ratio - 1.0) * 0.5))
-
-        # Check if times are normalizing (trending toward baseline)
-        if len(self.think_times_after) >= 2:
-            diffs = [
-                abs(self.think_times_after[i] - self.baseline_mean)
-                for i in range(len(self.think_times_after))
-            ]
-            if diffs[-1] < diffs[0]:
-                # Normalizing — bonus
-                scores.append(0.8)
-
-        self.behavioral_score = round(sum(scores) / len(scores), 3) if scores else 0.5
-        self.finalized = True
+        devs = [
+            abs(v - self.baseline_mean) / self.baseline_std
+            for v in self.think_times_after
+        ]
+        surprise_after = sum(d * d for d in devs) / len(devs)
+        surprise_before = self.deviation_at_decision**2  # ≥ 1.0 by the gate
+        score = 1.0 - surprise_after / max(surprise_before, _EPS)
+        # σ-space trajectory bonus: ONLY when net-positive AND shrinking, so it
+        # can't rescue a net-worsening window into a positive score.
+        if surprise_after < surprise_before and len(devs) >= 2 and devs[-1] < devs[0]:
+            score += self._trend_bonus
+        self.behavioral_score = round(min(1.0, max(0.0, score)), 3)
 
 
 class PendingAdvice(_BehavioralTracker):
@@ -158,6 +247,9 @@ class PendingAdvice(_BehavioralTracker):
         severity: str,
         baseline_mean: float,
         timestamp: str,
+        baseline_std: float = 0.0,
+        deviation_at_decision: float = 0.0,
+        baseline_observation_count: int = 0,
         correlation_found: bool = False,
         correlated_domains: list[str] | None = None,
         rule_key: str | None = None,
@@ -174,8 +266,21 @@ class PendingAdvice(_BehavioralTracker):
         probe: bool = False,
         mrt_eligible: bool = False,
         p_fire: float | None = None,
+        # Scoring config (threaded from AugurConfig at construction)
+        window: int = POST_ADVICE_TRACK_MOVES,
+        min_baseline_std: float = 0.01,
+        trend_bonus: float = 0.1,
+        min_observations: int = 15,
     ) -> None:
-        super().__init__()
+        super().__init__(
+            baseline_std=baseline_std,
+            deviation_at_decision=deviation_at_decision,
+            baseline_observation_count=baseline_observation_count,
+            window=window,
+            min_baseline_std=min_baseline_std,
+            trend_bonus=trend_bonus,
+            min_observations=min_observations,
+        )
         self.advice_id = advice_id
         self.domain = domain
         self.entity = entity
@@ -208,6 +313,11 @@ class PendingAdvice(_BehavioralTracker):
             "behavioral_score": self.behavioral_score,
             "think_times_after": self.think_times_after,
             "baseline_mean_at_time": self.baseline_mean,
+            "baseline_std_at_time": self.baseline_std,
+            "deviation_at_decision": self.deviation_at_decision,
+            "baseline_observation_count": self.baseline_observation_count,
+            "unmeasurable": self.unmeasurable,
+            "outcome_metric_version": self.outcome_metric_version,
             "timestamp": self.timestamp,
             # Correlation metadata (added for matrix tuning)
             "correlation_found": self.correlation_found,
@@ -256,8 +366,27 @@ class PendingGateDecision(_BehavioralTracker):
         mrt_eligible: bool,
         p_withhold: float | None,
         reason: str,
+        # Defaulted args MUST follow the required ones above (no default-before-
+        # required — that is a SyntaxError). Decision-time snapshot + 1B fields.
+        baseline_std: float = 0.0,
+        deviation_at_decision: float = 0.0,
+        baseline_observation_count: int = 0,
+        session_id: str | None = None,
+        # Scoring config (threaded from AugurConfig at construction)
+        window: int = POST_ADVICE_TRACK_MOVES,
+        min_baseline_std: float = 0.01,
+        trend_bonus: float = 0.1,
+        min_observations: int = 15,
     ) -> None:
-        super().__init__()
+        super().__init__(
+            baseline_std=baseline_std,
+            deviation_at_decision=deviation_at_decision,
+            baseline_observation_count=baseline_observation_count,
+            window=window,
+            min_baseline_std=min_baseline_std,
+            trend_bonus=trend_bonus,
+            min_observations=min_observations,
+        )
         self.decision_id = decision_id
         self.state_key = state_key
         self.domain = domain
@@ -268,6 +397,12 @@ class PendingGateDecision(_BehavioralTracker):
         self.mrt_eligible = mrt_eligible
         self.p_withhold = p_withhold
         self.reason = reason
+        self.session_id = session_id
+        # 1B withheld-rating state: selection is set at suppression; the rating
+        # probability is set only when a prompt is actually issued (the IPW
+        # exclusion key), so a selected-but-never-prompted row stays in the estimand.
+        self.selected_for_rating = False
+        self.withheld_rating_p: float | None = None
 
     def to_record(self) -> dict:
         return {
@@ -279,6 +414,12 @@ class PendingGateDecision(_BehavioralTracker):
             "mrt_eligible": self.mrt_eligible,
             "p_withhold": self.p_withhold,
             "baseline_mean": self.baseline_mean,
+            "baseline_std_at_time": self.baseline_std,
+            "deviation_at_decision": self.deviation_at_decision,
+            "baseline_observation_count": self.baseline_observation_count,
+            "unmeasurable": self.unmeasurable,
+            "outcome_metric_version": self.outcome_metric_version,
+            "withheld_rating_p": self.withheld_rating_p,
             "behavioral_score": self.behavioral_score,
             "behavioral_finalized": self.finalized,
             "explicit_rating": self.explicit_rating,
@@ -444,11 +585,24 @@ async def run() -> None:
         mrt_eligible = bool(data.get("mrt_eligible", False))
         p_fire = data.get("p_fire")
 
-        # Read baseline mean for the ACTUAL primary domain (was hardcoded "chess")
+        # Freeze the decision-time baseline (μ₀, σ₀, dev₀, obs₀) for the
+        # domain-agnostic outcome metric (spec 1A). Prefer the advice payload's
+        # values (carried pre-update from the triggering anomaly); fall back to
+        # Redis for baseline_mean/std.
         baseline_raw = pm.load_baseline(primary_domain, entity)
-        baseline_mean = (
-            baseline_raw.get("ewma_mean", think_time) if baseline_raw else think_time
-        )
+        baseline_mean = data.get("baseline_mean")
+        if baseline_mean is None:
+            baseline_mean = (
+                baseline_raw.get("ewma_mean", think_time)
+                if baseline_raw
+                else think_time
+            )
+        baseline_std = data.get("baseline_std")
+        if baseline_std is None and baseline_raw:
+            baseline_std = baseline_raw.get("ewma_var", 0.0) ** 0.5
+        baseline_std = float(baseline_std or 0.0)
+        deviation_at_decision = float(data.get("deviation_score") or 0.0)
+        baseline_obs = int(data.get("baseline_observation_count") or 0)
 
         advice_id = str(uuid.uuid4())[:8]
         pending = PendingAdvice(
@@ -457,6 +611,9 @@ async def run() -> None:
             entity=entity,
             severity=severity,
             baseline_mean=baseline_mean,
+            baseline_std=baseline_std,
+            deviation_at_decision=deviation_at_decision,
+            baseline_observation_count=baseline_obs,
             timestamp=datetime.now(timezone.utc).isoformat(),
             correlation_found=correlation_found,
             correlated_domains=correlated_domains,
@@ -470,6 +627,10 @@ async def run() -> None:
             probe=probe,
             mrt_eligible=mrt_eligible,
             p_fire=p_fire,
+            window=config.post_decision_window,
+            min_baseline_std=config.min_baseline_std,
+            trend_bonus=config.outcome_trend_bonus,
+            min_observations=config.min_observations,
         )
         advice_events.append(pending)
         # Mark the decision_id tracked so a re-published augur.advisor.suppressed
@@ -492,6 +653,12 @@ async def run() -> None:
                 tracking_key,
             )
         active_tracking[tracking_key] = pending
+        # Prompt a displaced withheld tracker AFTER installing the new one
+        # (ordering invariant, spec §5.3) — no-ops for the common fired-arm case.
+        if displaced is not None and await maybe_prompt_withheld_rating(
+            displaced, config, pm
+        ):
+            save_current_feedback()
 
         log.info(
             "Advice received for %s (%s, %s) — awaiting feedback",
@@ -563,17 +730,46 @@ async def run() -> None:
             mrt_eligible=bool(data.get("mrt_eligible", False)),
             p_withhold=data.get("p_withhold"),
             reason=data.get("reason", ""),
+            baseline_std=float(data.get("baseline_std") or 0.0),
+            deviation_at_decision=float(data.get("deviation_score") or 0.0),
+            baseline_observation_count=int(data.get("baseline_observation_count") or 0),
+            session_id=data.get("session_id"),
+            window=config.post_decision_window,
+            min_baseline_std=config.min_baseline_std,
+            trend_bonus=config.outcome_trend_bonus,
+            min_observations=config.min_observations,
         )
         gate_decision_events.append(pending)
         tracked_decision_ids.add(decision_id)
 
         # Same post-decision tracking as the fired arm: register on the primary
         # (domain, entity), finalizing any displaced tracker first (BUG-04).
+        # Ordering invariant (spec §5.3): install the NEW tracker BEFORE awaiting
+        # any prompt for the displaced one, so a concurrent callback never races
+        # on a stale entry.
         tracking_key = TrackingKey(domain, entity)
         displaced = active_tracking.get(tracking_key)
         if displaced is not None and not displaced.finalized:
             displaced._compute_behavioral_score()
         active_tracking[tracking_key] = pending
+
+        # 1B: select this withheld decision for a (later, post-finalization)
+        # control-arm rating. Sets only the flag — withheld_rating_p is set when
+        # the prompt actually fires (the IPW-exclusion key).
+        if _should_select_withheld_rating(
+            config,
+            mrt_eligible=pending.mrt_eligible,
+            decision_id=decision_id,
+            sessions_so_far=pm.count_mrt_rating_sessions(),
+        ):
+            pending.selected_for_rating = True
+
+        # Prompt the displaced tracker (held in a local; the new tracker is
+        # already installed above, so no active_tracking race on the await).
+        if displaced is not None and await maybe_prompt_withheld_rating(
+            displaced, config, pm
+        ):
+            save_current_feedback()
 
         log.info(
             "Gate suppressed %s (%s/%s) — tracking withheld arm",
@@ -615,7 +811,13 @@ async def run() -> None:
                 entity,
                 pending.behavioral_score,
             )
-            del active_tracking[tracking_key]
+            # Ordering invariant (spec §5.3): remove from active_tracking BEFORE
+            # awaiting the rating prompt, so a concurrent event installing a new
+            # tracker for this key is never deleted by the resumed handler. The
+            # identity guard ensures we only delete this exact tracker.
+            if active_tracking.get(tracking_key) is pending:
+                del active_tracking[tracking_key]
+            await maybe_prompt_withheld_rating(pending, config, pm)
             save_current_feedback()
 
     # -- Session end handler -------------------------------------------------
@@ -628,11 +830,16 @@ async def run() -> None:
             )
             return
 
-        # Force-finalize any pending tracking
-        for pending in active_tracking.values():
+        # Force-finalize any pending tracking. Snapshot + clear BEFORE any await
+        # (ordering invariant, spec §5.3): a concurrent callback during a rating
+        # prompt must not mutate the live dict mid-iteration. Iterate the
+        # snapshot, not active_tracking.
+        to_finalize = list(active_tracking.values())
+        active_tracking.clear()
+        for pending in to_finalize:
             if not pending.finalized:
                 pending._compute_behavioral_score()
-        active_tracking.clear()
+            await maybe_prompt_withheld_rating(pending, config, pm)
 
         save_current_feedback()
         summary = build_session_summary()

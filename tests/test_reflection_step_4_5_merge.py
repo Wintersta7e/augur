@@ -29,6 +29,7 @@ async def test_step_4_and_5_save_single_merged_matrix():
 
     pm = MagicMock()
     pm.is_tuning_applied.return_value = False
+    pm.get_prompt_score_pair.return_value = (None, None)  # 1E prompt pass no-op
     pm.load_escalation_matrix.return_value = {
         "version": "1.0",
         "rules": {"LOW+LOW": "MEDIUM"},
@@ -81,6 +82,7 @@ async def test_window_state_persisted_independently_from_matrix():
     }
     pm = MagicMock()
     pm.is_tuning_applied.return_value = False
+    pm.get_prompt_score_pair.return_value = (None, None)  # 1E prompt pass no-op
     pm.load_escalation_matrix.return_value = {
         "version": "1.0",
         "rules": {"LOW+LOW": "MEDIUM"},
@@ -124,6 +126,7 @@ async def test_marker_set_after_both_writes():
     }
     pm = MagicMock()
     pm.is_tuning_applied.return_value = False
+    pm.get_prompt_score_pair.return_value = (None, None)  # 1E prompt pass no-op
     pm.load_escalation_matrix.return_value = {
         "version": "1.0",
         "rules": {"LOW+LOW": "MEDIUM"},
@@ -167,6 +170,7 @@ async def test_marker_NOT_set_when_matrix_save_fails():
     }
     pm = MagicMock()
     pm.is_tuning_applied.return_value = False
+    pm.get_prompt_score_pair.return_value = (None, None)  # 1E prompt pass no-op
     pm.load_escalation_matrix.return_value = {
         "version": "1.0",
         "rules": {"LOW+LOW": "MEDIUM"},
@@ -221,6 +225,7 @@ async def test_marker_NOT_set_when_state_save_fails():
     }
     pm = MagicMock()
     pm.is_tuning_applied.return_value = False
+    pm.get_prompt_score_pair.return_value = (None, None)  # 1E prompt pass no-op
     pm.load_escalation_matrix.return_value = {
         "version": "1.0",
         "rules": {"LOW+LOW": "MEDIUM"},

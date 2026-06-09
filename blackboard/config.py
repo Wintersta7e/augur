@@ -140,6 +140,29 @@ class AugurConfig:
     gate_mrt_withheld_rating: bool = False
     gate_tier1_mode: str = "note"
 
+    # ── Lane 1: causal measurement & data-quality (spec 2026-06-09) ──────────
+    # 1A — domain-agnostic surprise-reduction outcome metric
+    post_decision_window: int = 3
+    min_baseline_std: float = 0.01
+    outcome_trend_bonus: float = 0.1
+    # 1B — calibration-era control-arm explicit rating (withheld arm)
+    gate_mrt_withheld_rating_rate: float = 0.12
+    gate_mrt_withheld_rating_max_sessions: int = 15
+    # 1C — River drift detector → deliberate baseline reset
+    drift_detector_enabled: bool = True
+    drift_detector: str = "adwin"  # {"adwin", "pagehinkley"}
+    drift_reset_cooldown_obs: int = 30
+    drift_restart_std_factor: float = 1.0
+    # 1E — prompt-mutation safety
+    prompt_rollback_margin: float = 0.1
+    prompt_forbidden_patterns: tuple[str, ...] = (
+        "take a break",
+        "you are fatigued",
+        "you seem distracted",
+        "you appear stuck",
+        "as an ai",
+    )
+
     def __post_init__(self) -> None:
         """Validate bounds on tuning fields. Raises ValueError on out-of-range.
 
@@ -199,6 +222,43 @@ class AugurConfig:
             raise ValueError(
                 f"gate_tier1_mode={self.gate_tier1_mode!r} must be 'note' or 'silent'"
             )
+        # ── Lane 1 bounds (spec 2026-06-09) ─────────────────────────────────
+        if not (2 <= self.post_decision_window <= 50):
+            raise ValueError(
+                f"post_decision_window={self.post_decision_window} outside [2, 50]"
+            )
+        if not (self.min_baseline_std > 0.0):
+            raise ValueError(f"min_baseline_std={self.min_baseline_std} must be > 0")
+        if not (0.0 <= self.outcome_trend_bonus <= 0.5):
+            raise ValueError(
+                f"outcome_trend_bonus={self.outcome_trend_bonus} outside [0, 0.5]"
+            )
+        if not (0.0 <= self.gate_mrt_withheld_rating_rate <= 0.5):
+            raise ValueError(
+                f"gate_mrt_withheld_rating_rate={self.gate_mrt_withheld_rating_rate} outside [0, 0.5]"
+            )
+        if not (1 <= self.gate_mrt_withheld_rating_max_sessions <= 1000):
+            raise ValueError(
+                f"gate_mrt_withheld_rating_max_sessions={self.gate_mrt_withheld_rating_max_sessions} outside [1, 1000]"
+            )
+        if self.drift_detector not in {"adwin", "pagehinkley"}:
+            raise ValueError(
+                f"drift_detector={self.drift_detector!r} must be 'adwin' or 'pagehinkley'"
+            )
+        if not (0 <= self.drift_reset_cooldown_obs <= 10000):
+            raise ValueError(
+                f"drift_reset_cooldown_obs={self.drift_reset_cooldown_obs} outside [0, 10000]"
+            )
+        if not (0.25 <= self.drift_restart_std_factor <= 4.0):
+            # Bound matches the effective clamp in anomaly_detector._maybe_drift_reset
+            # ([|Δ|*0.25, |Δ|*4.0]); values outside it had no effect, so reject them.
+            raise ValueError(
+                f"drift_restart_std_factor={self.drift_restart_std_factor} outside [0.25, 4.0]"
+            )
+        if not (0.0 <= self.prompt_rollback_margin <= 1.0):
+            raise ValueError(
+                f"prompt_rollback_margin={self.prompt_rollback_margin} outside [0, 1]"
+            )
 
     # ── Constructors ───────────────────────────────────────────────────────
 
@@ -256,6 +316,25 @@ def _coerce_gate_tier1_mode(v: str) -> str:
     raise ValueError(f"gate_tier1_mode={v!r} must be 'note' or 'silent'")
 
 
+def _coerce_drift_detector(v: str) -> str:
+    """Validate drift_detector value; raises ValueError for unknown values."""
+    if v in {"adwin", "pagehinkley"}:
+        return v
+    raise ValueError(f"drift_detector={v!r} must be 'adwin' or 'pagehinkley'")
+
+
+def _coerce_str_tuple(v: str) -> tuple[str, ...]:
+    """Comma-split into a tuple of non-empty stripped strings.
+
+    NOT ``tuple(v)`` (which the auto-build loop would assign, splitting a string
+    into characters). Used for AUGUR_PROMPT_FORBIDDEN_PATTERNS.
+    """
+    parts = tuple(p.strip() for p in v.split(",") if p.strip())
+    if not parts:
+        raise ValueError("expected a non-empty comma-separated list")
+    return parts
+
+
 # Build the type-coercion map now that the class exists.
 #
 # Under ``from __future__ import annotations`` (PEP 563), field.type is a
@@ -273,3 +352,7 @@ for _field in dataclasses.fields(AugurConfig):
 # gate_tier1_mode needs a validating coercion assigned AFTER the auto-build
 # loop, which would otherwise overwrite it with plain str.
 _TYPE_COERCIONS["gate_tier1_mode"] = _coerce_gate_tier1_mode
+# Same pattern for the Lane-1 string/tuple-enum fields: the auto-build loop maps
+# drift_detector→str and prompt_forbidden_patterns→tuple (which char-splits).
+_TYPE_COERCIONS["drift_detector"] = _coerce_drift_detector
+_TYPE_COERCIONS["prompt_forbidden_patterns"] = _coerce_str_tuple

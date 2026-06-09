@@ -257,11 +257,13 @@ def analyze_utility(feedback: dict, config: AugurConfig) -> dict:
         sum(explicit_scores) / len(explicit_scores) if explicit_scores else 0.5
     )
 
-    # Behavioral component
+    # Behavioral component. Under the surprise-reduction metric (spec §7) a
+    # finalized 0.0 is a VALID strong-negative outcome, not "missing" — filter
+    # on behavioral_finalized + not unmeasurable, never on `> 0`.
     behavioral_scores = [
         ev.get("behavioral_score", 0.5)
         for ev in advice_events
-        if ev.get("behavioral_score", 0) > 0
+        if ev.get("behavioral_finalized") and not ev.get("unmeasurable")
     ]
     behavioral_avg = (
         sum(behavioral_scores) / len(behavioral_scores) if behavioral_scores else 0.5
@@ -459,10 +461,12 @@ def analyze_correlation_tuning(
         ]
         explicit_avg = sum(explicit_scores) / len(explicit_scores)
 
+        # A finalized 0.0 is a valid negative outcome under the surprise-reduction
+        # metric (spec §7) — filter on behavioral_finalized, not `> 0`.
         behavioral_scores = [
             ev.get("behavioral_score", 0.0)
             for ev in events
-            if ev.get("behavioral_score", 0.0) > 0
+            if ev.get("behavioral_finalized") and not ev.get("unmeasurable")
         ]
         behavioral_avg = (
             sum(behavioral_scores) / len(behavioral_scores)
@@ -697,6 +701,28 @@ def analyze_correlation_window_tuning(
 # ---------------------------------------------------------------------------
 
 
+def _violates_forbidden_patterns(prompt_text: str, config: AugurConfig) -> bool:
+    """True if the mutated prompt reintroduces a forbidden valence/meta pattern
+    (the exact 1D failure mode, or LLM meta-text like 'as an ai'). Spec 1E §9."""
+    low = prompt_text.lower()
+    return any(pat.lower() in low for pat in config.prompt_forbidden_patterns)
+
+
+def maybe_rollback_prompt(
+    pm: PersistenceManager, domain: str, config: AugurConfig
+) -> bool:
+    """Roll back if the current prompt's REALIZED score regressed past the margin
+    vs its predecessor's realized score (spec 1E §9). Both scores must exist
+    (a freshly-seeded prompt with no predecessor never rolls back). Returns True
+    iff a rollback was performed."""
+    cur, prev = pm.get_prompt_score_pair(domain)
+    if cur is None or prev is None:
+        return False
+    if (prev - cur) > config.prompt_rollback_margin:
+        return pm.rollback_prompt(domain)
+    return False
+
+
 async def mutate_prompt(
     pm: PersistenceManager,
     domain: str,
@@ -706,12 +732,17 @@ async def mutate_prompt(
 ) -> dict | None:
     """Ask Ollama to suggest a better system prompt based on feedback."""
     current_prompt = pm.load_prompt(domain)
-    if current_prompt is None:
-        # No managed prompt yet — create a seed
+    seeded = current_prompt is None
+    if seeded:
+        # No managed prompt yet — create a seed.
         current_prompt = (
             "You are a chess analyst reviewing a game in progress. "
             "Provide concise, actionable advice about timing anomalies."
         )
+        # Persist the seed (with the current realized utility) BEFORE mutating so
+        # the first mutation archives it into history → rollback has a target
+        # (spec 1E, MEDIUM-2).
+        pm.save_prompt(domain, current_prompt, score=utility_result["utility_score"])
 
     prompt = f"""You are an AI prompt engineer. A chess advisor system has been receiving
 low utility scores from users (score: {utility_result["utility_score"]:.2f}/1.0).
@@ -749,6 +780,12 @@ Return ONLY the new prompt text, nothing else."""
         if not new_prompt or len(new_prompt) < 20:
             log.warning("Ollama returned unusable prompt mutation")
             return None
+
+        # 1E content guard: reject a mutation that reintroduces a forbidden
+        # valence/meta pattern (e.g. "take a break") — keep the current prompt.
+        if _violates_forbidden_patterns(new_prompt, config):
+            log.warning("Rejected prompt mutation for '%s' (forbidden pattern)", domain)
+            return {"mutated": False, "rejected": "forbidden_pattern"}
 
         # Save with the current utility score
         pm.save_prompt(domain, new_prompt, score=utility_result["utility_score"])
@@ -868,6 +905,57 @@ def _behavioral_audit(advice_rows: list[dict], config: AugurConfig) -> dict[str,
     }
 
 
+def _audit_slice(rows: list[dict], config: AugurConfig) -> dict[str, Any]:
+    """Reliability stats over one slice (spec §7). Genuine y/n + finalized +
+    measurable + current metric version only — matching the IPW filter so the
+    validation Pearson is over one homogeneous metric."""
+    total = len(rows)
+    genuine = [
+        r
+        for r in rows
+        if r.get("explicit_rating") in ("y", "n")
+        and r.get("behavioral_finalized")
+        and not r.get("unmeasurable")
+        and r.get("outcome_metric_version") == 2
+    ]
+    excluded_old_version = sum(
+        1
+        for r in rows
+        if r.get("explicit_rating") in ("y", "n")
+        and r.get("behavioral_finalized")
+        and not r.get("unmeasurable")
+        and r.get("outcome_metric_version") != 2
+    )
+    explicit_vals = [1.0 if r["explicit_rating"] == "y" else 0.0 for r in genuine]
+    behavioral_vals = [float(r.get("behavioral_score", 0.0) or 0.0) for r in genuine]
+    n = len(genuine)
+    sufficient = n >= config.gate_behavioral_min_samples
+    return {
+        "genuine_samples": n,
+        "genuine_response_rate": round(total and n / total or 0.0, 4),
+        "excluded_old_version": excluded_old_version,
+        "sufficient": sufficient,
+        "correlation": _pearson(behavioral_vals, explicit_vals) if sufficient else None,
+    }
+
+
+def _behavioral_audit_per_arm(rows: list[dict], config: AugurConfig) -> dict[str, Any]:
+    """Per-arm + per-domain reliability audit (spec §7). Rows carry ``_arm``
+    ('fired'|'withheld') and ``domain``. Reports the overall slice plus per-arm
+    and per-domain breakdowns so we can see whether the σ-space metric tracks
+    felt usefulness symmetrically across arms and for non-chess domains."""
+    by_arm: dict[str, list[dict]] = {}
+    by_domain: dict[str, list[dict]] = {}
+    for r in rows:
+        by_arm.setdefault(r.get("_arm", "fired"), []).append(r)
+        by_domain.setdefault(r.get("domain", "unknown"), []).append(r)
+    return {
+        "overall": _audit_slice(rows, config),
+        "per_arm": {a: _audit_slice(rs, config) for a, rs in by_arm.items()},
+        "per_domain": {d: _audit_slice(rs, config) for d, rs in by_domain.items()},
+    }
+
+
 def _mrt_ipw_readout(
     emissions: list[dict],
     silences: list[dict],
@@ -907,6 +995,11 @@ def _mrt_ipw_readout(
         fb = fired_by_id.get(did)
         if fb is None or not fb.get("behavioral_finalized"):
             continue
+        # Exclude unmeasurable rows (forced-0.5, not a measurement) and old
+        # chess-formula rows (no outcome_metric_version → incompatible) so the
+        # estimand is over one homogeneous, measured outcome (spec §7).
+        if fb.get("unmeasurable") or fb.get("outcome_metric_version") != 2:
+            continue
         p = em.get("p_fire") or fb.get("p_fire")
         if not p or p <= 0.0:
             continue
@@ -932,6 +1025,13 @@ def _mrt_ipw_readout(
             unobservable += 1
             continue
         if not fb.get("behavioral_finalized"):
+            continue
+        # Same homogeneity exclusions as the fired arm, plus rated control rows
+        # (non-null withheld_rating_p) which received a post-window interruption
+        # and are stratified out of the primary behavioral estimand (spec §5.3).
+        if fb.get("unmeasurable") or fb.get("outcome_metric_version") != 2:
+            continue
+        if fb.get("withheld_rating_p") is not None:
             continue
         p = si.get("p_withhold") or fb.get("p_withhold")
         if not p or p <= 0.0:
@@ -1072,6 +1172,14 @@ def analyze_gate(
 
     # ── Behavioral audit + MRT/IPW readout ───────────────────────────────────
     audit = _behavioral_audit(advice_rows, config)
+    # Per-arm + per-domain reliability audit (spec §7 — the validation
+    # deliverable). Tag each row with its arm, then split fired vs withheld and
+    # by domain so we can see whether the σ-metric tracks felt usefulness.
+    for r in advice_rows:
+        r["_arm"] = "fired"
+    for r in gate_rows:
+        r["_arm"] = "withheld"
+    reliability_audit = _behavioral_audit_per_arm(advice_rows + gate_rows, config)
     mrt = _mrt_ipw_readout(
         pm.load_emissions(limit=100),
         pm.load_silence_records(limit=100),
@@ -1106,6 +1214,7 @@ def analyze_gate(
         "credibility_classes_tuned": sorted(credibility.keys()),
         "advice_rate": advice_rate_update,
         "behavioral_audit": audit,
+        "reliability_audit": reliability_audit,
         "mrt": mrt,
     }
 
@@ -1174,18 +1283,27 @@ async def run_reflection(
     utility = analyze_utility(feedback, config)
     log.info("Utility: %s", utility["reason"])
 
-    # Prompt mutation if utility is low
+    # 1E: stamp the live prompt's REALIZED score (this session's utility), then
+    # roll back a regression OR mutate a low-utility prompt (mutually exclusive),
+    # behind a per-session marker so a re-run neither double-rolls nor re-mutates.
     mutation_result = None
-    if utility["needs_prompt_mutation"]:
-        log.info(
-            "Utility below %.1f — attempting prompt mutation",
-            config.utility_mutation_threshold,
-        )
-        mutation_result = await mutate_prompt(pm, domain, utility, http_client, config)
-        if mutation_result and mutation_result.get("mutated"):
-            log.info("Prompt mutation successful")
-        else:
-            log.warning("Prompt mutation skipped or failed")
+    if not pm.is_tuning_applied(session_id, pass_name="prompt"):
+        pm.update_current_prompt_score(domain, utility["utility_score"])
+        if maybe_rollback_prompt(pm, domain, config):
+            log.info("Auto-rolled-back regressed prompt for '%s'", domain)
+        elif utility["needs_prompt_mutation"]:
+            log.info(
+                "Utility below %.1f — attempting prompt mutation",
+                config.utility_mutation_threshold,
+            )
+            mutation_result = await mutate_prompt(
+                pm, domain, utility, http_client, config
+            )
+            if mutation_result and mutation_result.get("mutated"):
+                log.info("Prompt mutation successful")
+            else:
+                log.warning("Prompt mutation skipped or failed")
+        pm.mark_tuning_applied(session_id, pass_name="prompt")
 
     # 3. Counterfactual analysis
     counterfactual = analyze_counterfactual(pm, domain, current_thresholds)

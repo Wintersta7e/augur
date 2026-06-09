@@ -210,11 +210,17 @@ def build_typing_prompt(
 - **Keypresses since last pause:** {pause_position}
 
 ## Your task
-1. What might this typing pattern indicate about the user's cognitive state?
-2. Are they likely stuck on a problem, distracted, or fatigued?
-3. Provide one concrete, helpful suggestion (e.g., take a break, switch tasks, review what they just wrote).
+1. Interpret the typing pattern. Consider all plausible explanations:
+   - A normal variation that simply differs from the per-user baseline (most common).
+   - Deep focused thought, composing, or reading before typing.
+   - A genuine pause for an unrelated reason (interruption, stretch).
+   - Being stuck, distracted, or fatigued.
+   Default to "normal variation" unless other context clearly points elsewhere.
+   Baselines form in only a few observations, so early sessions over-report.
+2. Only if a brief, gentle intervention is clearly warranted, suggest one.
+   Otherwise say none is needed.
 
-Keep your response concise (2-4 sentences). Be supportive, not intrusive. Focus on cognitive well-being and productivity."""
+Keep your response concise (2-3 sentences). Be supportive, not intrusive."""
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +350,14 @@ def build_generic_prompt(
 - **Severity:** {severity}
 - **Context:** {json.dumps(ctx, indent=2)}
 
-Analyze this anomaly and provide a concise assessment (2-4 sentences)."""
+## Your task
+1. Interpret the anomaly. The most common cause is normal variation from a
+   baseline formed in only a few observations (early sessions over-report).
+   Weigh benign explanations before concerning ones.
+2. Only if a brief, gentle intervention is clearly warranted, suggest one.
+   Otherwise say none is needed.
+
+Keep your response concise (2-3 sentences). Be supportive, not intrusive."""
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +574,13 @@ def _build_advice_event(
         "player": primary.get("entity", entity),
         "move": primary.get("move", primary.get("context", {}).get("label", "?")),
         "think_time": primary.get("value", value),
+        # Decision-time frozen baseline for the outcome metric (spec 1A/§4.3):
+        # the detector emits these pre-update on every anomaly; thread them so
+        # feedback scores surprise-reduction against the decision-time baseline.
+        "baseline_mean": primary.get("baseline_mean"),
+        "baseline_std": primary.get("baseline_std"),
+        "deviation_score": primary.get("deviation_score"),
+        "baseline_observation_count": primary.get("baseline_observation_count"),
         # NEW Phase 3 polish fields
         "involved_domains": payload.get("involved_domains") or [primary_domain],
         "correlation_span_s": payload.get("correlation_span_s"),
@@ -677,6 +697,11 @@ async def publish_suppressed_event(
         "entity": signature.entity,
         "value": signature.value,
         "baseline_mean": _primary_field(payload, "baseline_mean"),
+        "baseline_std": _primary_field(payload, "baseline_std"),
+        "deviation_score": _primary_field(payload, "deviation_score"),
+        "baseline_observation_count": _primary_field(
+            payload, "baseline_observation_count"
+        ),
         "severity": signature.severity,
         "session_id": _resolve_session_id(redis_client),
         "arm": decision.deciding_arm,

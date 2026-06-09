@@ -22,6 +22,7 @@ from pathlib import Path
 
 import nats
 import redis
+from river import drift as river_drift
 from river.anomaly import HalfSpaceTrees
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -66,6 +67,10 @@ DEFAULT_THRESHOLDS = {
 # dropped rather than creating a new baseline.
 MAX_BASELINE_ENTITIES = 10_000
 
+# 1C drift reset: cap the restart variance at this multiple of |Δmean| so a
+# reset never carries the old (inflated) std forward (spec §6).
+DRIFT_RESTART_STD_CAP_FACTOR = 4.0
+
 # ---------------------------------------------------------------------------
 # Per-entity baseline
 # ---------------------------------------------------------------------------
@@ -87,11 +92,39 @@ class EntityBaseline:
         )
     )
 
+    # 1C drift detector (in-memory; NOT persisted — a process restart is a
+    # natural detector reset). Plain class attrs (no annotation) so the
+    # @dataclass decorator does not treat them as fields; always reassigned
+    # per-instance in enable_drift / _maybe_drift_reset.
+    _drift = None
+    _drift_cfg = None
+    _cooldown_left = 0
+    _just_reset = False
+    drift_resets = 0
+
     @property
     def ewma_std(self) -> float:
         return math.sqrt(max(self.ewma_var, 0.0))
 
+    def enable_drift(
+        self,
+        detector: str,
+        *,
+        min_observations: int,
+        cooldown_obs: int,
+        restart_std_factor: float,
+    ) -> None:
+        self._drift = (
+            river_drift.ADWIN() if detector == "adwin" else river_drift.PageHinkley()
+        )
+        self._drift_cfg = (min_observations, cooldown_obs, restart_std_factor)
+        self._cooldown_left = 0
+        self.drift_resets = 0
+
     def update(self, value: float, alpha: float) -> None:
+        self._just_reset = False
+        mean_before = self.ewma_mean
+        obs_before = self.observation_count  # pre-increment (drift trained-check)
         self.observation_count += 1
         if self.observation_count == 1:
             self.ewma_mean = value
@@ -101,6 +134,43 @@ class EntityBaseline:
             self.ewma_mean += alpha * diff
             self.ewma_var = (1 - alpha) * (self.ewma_var + alpha * diff * diff)
         self.hst.learn_one({"value": value})
+        self._maybe_drift_reset(value, mean_before, obs_before)
+
+    def _maybe_drift_reset(
+        self, value: float, mean_before: float, obs_before: int
+    ) -> None:
+        if self._drift is None or self._drift_cfg is None:
+            return
+        min_obs, cooldown_obs, restart_factor = self._drift_cfg
+        if self._cooldown_left > 0:
+            self._cooldown_left -= 1
+        if obs_before < min_obs:
+            return  # still warming up
+        # Feed the RAW value. The detector is per-(domain, entity), so there is
+        # no cross-entity scale domination to normalize away — and a z-score
+        # self-normalizes as the EWMA tracks the shift, collapsing a sustained
+        # level change into a single spike ADWIN can't detect. Raw values let
+        # ADWIN see the sustained 10→30-style shift it is designed to catch.
+        self._drift.update(value)
+        if getattr(self._drift, "drift_detected", False) and self._cooldown_left == 0:
+            delta = value - mean_before
+            # Restart variance bounded and INDEPENDENT of the (possibly inflated)
+            # std_before — never carry the old inflation forward (spec §6).
+            restart_std = restart_factor * abs(delta)
+            lo, hi = abs(delta) * 0.25, abs(delta) * DRIFT_RESTART_STD_CAP_FACTOR
+            restart_std = min(max(restart_std, lo), hi)
+            self.ewma_mean = value
+            self.ewma_var = max(restart_std, 0.01) ** 2
+            self.observation_count = max(1, min_obs // 2)
+            self._cooldown_left = cooldown_obs
+            self.drift_resets += 1
+            self._just_reset = True
+            # Fresh detector window (HST intentionally untouched — it self-recovers).
+            self._drift = (
+                river_drift.ADWIN()
+                if isinstance(self._drift, river_drift.ADWIN)
+                else river_drift.PageHinkley()
+            )
 
     def score(self, value: float) -> tuple[float, float]:
         std = self.ewma_std
@@ -138,6 +208,55 @@ def classify_severity(
     if deviation >= medium_sigma or hst_score >= 0.8:
         return "medium"
     return "low"
+
+
+def build_anomaly_payload(
+    event: PerceptionEvent,
+    *,
+    deviation: float,
+    hst_score: float,
+    severity: str,
+    mean_before: float,
+    std_before: float,
+    obs_before: int,
+    drift_reset: bool,
+    timestamp: str,
+) -> dict:
+    """Assemble the ``augur.detection.anomaly`` payload from the DECISION-TIME
+    (pre-update) baseline snapshot.
+
+    Kept a pure function (taking the frozen snapshot explicitly, never the live
+    baseline) so the spec §4.3 invariant — ``baseline_mean``/``baseline_std``
+    are the PRE-update values, consistent with ``deviation_score`` — is
+    structurally guaranteed and unit-testable. A regression to post-update
+    values is impossible here because this function has no access to the
+    updated baseline.
+    """
+    ctx = event.context
+    label = ctx.get("move_san", ctx.get("label", f"{event.value}{event.unit}"))
+    return {
+        "domain": event.domain,
+        "stream_id": event.stream_id,
+        "entity": event.entity,
+        "event_type": event.event_type,
+        "value": round(event.value, 3),
+        "unit": event.unit,
+        "context": ctx,
+        "session_id": event.session_id,
+        "baseline_mean": round(mean_before, 3),
+        "baseline_std": round(std_before, 3),
+        "baseline_observation_count": obs_before,
+        "deviation_score": round(deviation, 3),
+        "drift_reset": drift_reset,
+        "anomaly_score": round(hst_score, 3),
+        "severity": severity,
+        "timestamp": timestamp,
+        # Compat aliases for downstream consumers not yet updated
+        "player": event.entity,
+        "move": ctx.get("move_san", label),
+        "move_number": ctx.get("move_number", 0),
+        "think_time": round(event.value, 3),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -252,9 +371,27 @@ async def run() -> None:
 
         bl = baselines[key]
 
+        # Enable the drift detector once per baseline (covers freshly-created and
+        # Redis-restored baselines; detector state is in-memory, spec §6).
+        if config.drift_detector_enabled and bl._drift is None:
+            bl.enable_drift(
+                config.drift_detector,
+                min_observations=config.min_observations,
+                cooldown_obs=config.drift_reset_cooldown_obs,
+                restart_std_factor=config.drift_restart_std_factor,
+            )
+
         # Score BEFORE updating
         deviation, hst_score = bl.score(value)
         is_trained = bl.observation_count >= th["min_observations"]
+
+        # Freeze the DECISION-TIME (pre-update) baseline so the emitted
+        # baseline_mean/std are consistent with deviation_score (also pre-update)
+        # and the downstream outcome metric (spec 2026-06-09 §4.3). Persistence
+        # still saves the UPDATED baseline below.
+        mean_before = bl.ewma_mean
+        std_before = bl.ewma_std
+        obs_before = bl.observation_count
 
         # Update baseline
         bl.update(value, th["ewma_alpha"])
@@ -311,28 +448,19 @@ async def run() -> None:
             th["severity_high_sigma"],
         )
 
-        # Anomaly payload includes full event context plus compat aliases
-        anomaly_payload = {
-            "domain": domain,
-            "stream_id": event.stream_id,
-            "entity": entity,
-            "event_type": event.event_type,
-            "value": round(value, 3),
-            "unit": event.unit,
-            "context": ctx,
-            "session_id": event.session_id,
-            "baseline_mean": round(bl.ewma_mean, 3),
-            "baseline_std": round(bl.ewma_std, 3),
-            "deviation_score": round(deviation, 3),
-            "anomaly_score": round(hst_score, 3),
-            "severity": severity,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            # Compat aliases for downstream consumers not yet updated
-            "player": entity,
-            "move": ctx.get("move_san", label),
-            "move_number": ctx.get("move_number", 0),
-            "think_time": round(value, 3),
-        }
+        # Anomaly payload from the pre-update snapshot (spec §4.3); the pure
+        # builder guarantees baseline_mean/std are decision-time values.
+        anomaly_payload = build_anomaly_payload(
+            event,
+            deviation=deviation,
+            hst_score=hst_score,
+            severity=severity,
+            mean_before=mean_before,
+            std_before=std_before,
+            obs_before=obs_before,
+            drift_reset=bool(bl._just_reset),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
 
         log.warning(
             "  \u26a0 ANOMALY [%s] %s/%s: value=%.2f  dev=%.1f\u03c3  hst=%.3f",

@@ -210,11 +210,17 @@ def build_typing_prompt(
 - **Keypresses since last pause:** {pause_position}
 
 ## Your task
-1. What might this typing pattern indicate about the user's cognitive state?
-2. Are they likely stuck on a problem, distracted, or fatigued?
-3. Provide one concrete, helpful suggestion (e.g., take a break, switch tasks, review what they just wrote).
+1. Interpret the typing pattern. Consider all plausible explanations:
+   - A normal variation that simply differs from the per-user baseline (most common).
+   - Deep focused thought, composing, or reading before typing.
+   - A genuine pause for an unrelated reason (interruption, stretch).
+   - Being stuck, distracted, or fatigued.
+   Default to "normal variation" unless other context clearly points elsewhere.
+   Baselines form in only a few observations, so early sessions over-report.
+2. Only if a brief, gentle intervention is clearly warranted, suggest one.
+   Otherwise say none is needed.
 
-Keep your response concise (2-4 sentences). Be supportive, not intrusive. Focus on cognitive well-being and productivity."""
+Keep your response concise (2-3 sentences). Be supportive, not intrusive."""
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +350,14 @@ def build_generic_prompt(
 - **Severity:** {severity}
 - **Context:** {json.dumps(ctx, indent=2)}
 
-Analyze this anomaly and provide a concise assessment (2-4 sentences)."""
+## Your task
+1. Interpret the anomaly. The most common cause is normal variation from a
+   baseline formed in only a few observations (early sessions over-report).
+   Weigh benign explanations before concerning ones.
+2. Only if a brief, gentle intervention is clearly warranted, suggest one.
+   Otherwise say none is needed.
+
+Keep your response concise (2-3 sentences). Be supportive, not intrusive."""
 
 
 # ---------------------------------------------------------------------------

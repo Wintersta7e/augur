@@ -12,8 +12,13 @@ import pytest
 from perception.feedback_collector import PendingAdvice, POST_ADVICE_TRACK_MOVES
 
 
-def _make_pending(baseline_mean: float = 5.0) -> PendingAdvice:
-    return PendingAdvice(
+def _make_pending(
+    baseline_mean: float = 10.0,
+    baseline_std: float = 2.0,
+    deviation_at_decision: float = 3.0,
+    baseline_observation_count: int = 50,
+) -> PendingAdvice:
+    p = PendingAdvice(
         advice_id="test-001",
         domain="chess",
         entity="white",
@@ -21,53 +26,58 @@ def _make_pending(baseline_mean: float = 5.0) -> PendingAdvice:
         baseline_mean=baseline_mean,
         timestamp="2025-01-01T00:00:00Z",
     )
+    # Decision-time-frozen snapshot the σ-space metric scores against. Set on the
+    # instance (PendingAdvice wires these as constructor kwargs in a later task;
+    # instance assignment works either way).
+    p.baseline_std = baseline_std
+    p.deviation_at_decision = deviation_at_decision
+    p.baseline_observation_count = baseline_observation_count
+    return p
 
 
 class TestBehavioralScoreComputation:
-    """Verify _compute_behavioral_score under controlled conditions."""
+    """Verify the domain-agnostic surprise-reduction score (spec §1A) via the
+    PendingAdvice subclass. The scoring math itself is covered exhaustively in
+    test_feedback_outcome_metric.py; these confirm the subclass wires into it."""
 
-    def test_faster_than_baseline_scores_high(self) -> None:
-        p = _make_pending(baseline_mean=10.0)
-        # All moves faster than baseline
+    def test_return_to_baseline_scores_high(self) -> None:
+        # dev0 = 3σ; post-decision values sit on the mean (0σ) → surprise removed.
+        p = _make_pending()
         for _ in range(POST_ADVICE_TRACK_MOVES):
-            p.add_post_move(5.0)  # ratio = 0.5 -> fast
-        assert p.finalized
+            p.add_post_move(10.0)
+        assert p.finalized and not p.unmeasurable
         assert p.behavioral_score > 0.7
 
-    def test_much_slower_than_baseline_scores_low(self) -> None:
-        p = _make_pending(baseline_mean=5.0)
+    def test_stays_anomalous_scores_low(self) -> None:
+        # post-decision stays 3σ off → surprise unchanged.
+        p = _make_pending()
         for _ in range(POST_ADVICE_TRACK_MOVES):
-            p.add_post_move(20.0)  # ratio = 4.0 -> very slow
+            p.add_post_move(16.0)  # |16-10|/2 = 3σ
         assert p.finalized
         assert p.behavioral_score < 0.3
 
-    def test_at_baseline_scores_near_half(self) -> None:
-        p = _make_pending(baseline_mean=5.0)
+    def test_partial_return_scores_mid(self) -> None:
+        p = _make_pending()
         for _ in range(POST_ADVICE_TRACK_MOVES):
-            p.add_post_move(5.0)  # ratio = 1.0 -> at baseline
+            p.add_post_move(14.0)  # 2σ → surprise 4 of 9 → ~0.56
         assert p.finalized
-        assert 0.4 <= p.behavioral_score <= 0.85
+        assert 0.4 <= p.behavioral_score <= 0.7
 
-    def test_normalizing_trend_gets_bonus(self) -> None:
-        """Times trending toward baseline should score higher than stable slow."""
-        p_normalizing = _make_pending(baseline_mean=5.0)
-        # Trending from slow to baseline
-        p_normalizing.add_post_move(10.0)
-        p_normalizing.add_post_move(7.0)
-        p_normalizing.add_post_move(5.5)
+    def test_improving_trend_beats_worsening(self) -> None:
+        """Same mean surprise, but a shrinking-deviation window gets the bonus."""
+        improving = _make_pending()
+        for v in (16.0, 13.0, 10.0):  # 3σ→1.5σ→0σ
+            improving.add_post_move(v)
+        worsening = _make_pending()
+        for v in (10.0, 13.0, 16.0):  # 0σ→1.5σ→3σ (same mean surprise)
+            worsening.add_post_move(v)
+        assert improving.behavioral_score > worsening.behavioral_score
 
-        p_stable_slow = _make_pending(baseline_mean=5.0)
-        # Consistently slightly slow
-        p_stable_slow.add_post_move(7.5)
-        p_stable_slow.add_post_move(7.5)
-        p_stable_slow.add_post_move(7.5)
-
-        assert p_normalizing.behavioral_score > p_stable_slow.behavioral_score
-
-    def test_zero_baseline_defaults_to_half(self) -> None:
-        p = _make_pending(baseline_mean=0.0)
+    def test_degenerate_std_is_unmeasurable_half(self) -> None:
+        p = _make_pending(baseline_std=0.0)  # σ below floor
         for _ in range(POST_ADVICE_TRACK_MOVES):
-            p.add_post_move(5.0)
+            p.add_post_move(10.0)
+        assert p.finalized and p.unmeasurable
         assert p.behavioral_score == pytest.approx(0.5)
 
 

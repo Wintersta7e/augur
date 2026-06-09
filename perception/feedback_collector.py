@@ -61,6 +61,12 @@ SUBJECT_SUPPRESSED = "augur.advisor.suppressed"
 EXPLICIT_TIMEOUT_S = 10
 POST_ADVICE_TRACK_MOVES = 3
 
+# Outcome-metric constants (spec 2026-06-09 §1A/§4)
+_EPS = 1e-9
+MIN_DECISION_DEVIATION = 1.0  # below this, an HST-only fire — sigma-metric unmeasurable
+MIN_POST_OBS = 2  # minimum post-decision observations to score
+OUTCOME_METRIC_VERSION = 2  # v1 = legacy chess think-time formula
+
 # ---------------------------------------------------------------------------
 # ANSI helpers (for the inline prompt)
 # ---------------------------------------------------------------------------
@@ -92,59 +98,87 @@ def _resolve_primary_domain(advice_data: dict) -> str | None:
 
 
 class _BehavioralTracker:
-    """Shared post-decision behavioral-score tracking.
+    """Shared post-decision outcome scoring (spec 2026-06-09 §1A).
 
     Both the fired arm (``PendingAdvice``) and the withheld/control arm
-    (``PendingGateDecision``) track the same post-decision perception values
-    and compute the same behavioral score (spec §9), so the MRT compares the
-    same outcome across arms. Subclasses set ``baseline_mean``; this base owns
-    the move buffer + scoring.
+    (``PendingGateDecision``) compute the same DOMAIN-AGNOSTIC surprise-reduction
+    score: the fraction of decision-time surprise removed in the post-decision
+    window. Under a Gaussian baseline, surprise ∝ deviation²; the score is
+    direction-agnostic and measured against the baseline frozen at decision time
+    (baseline_mean, baseline_std, deviation_at_decision, baseline_observation_count),
+    so the MRT compares the same outcome across arms. ``think_times_after`` keeps
+    its legacy name but now holds generic post-decision values for any domain.
+    Unmeasurable fires (degenerate σ, HST-only dev₀, or untrained baseline) score
+    a neutral 0.5 with ``unmeasurable=True``.
     """
 
     baseline_mean: float
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        baseline_std: float = 0.0,
+        deviation_at_decision: float = 0.0,
+        baseline_observation_count: int = 0,
+        window: int = POST_ADVICE_TRACK_MOVES,
+        min_baseline_std: float = 0.01,
+        trend_bonus: float = 0.1,
+        min_post_obs: int = MIN_POST_OBS,
+        min_observations: int = 15,
+    ) -> None:
         self.explicit_rating: Literal["y", "n", "no_response"] = "no_response"
         self.think_times_after: list[float] = []
         self.behavioral_score: float = 0.0
         self.finalized = False
+        self.unmeasurable = False
+        self.outcome_metric_version = OUTCOME_METRIC_VERSION
+        # Decision-time-frozen baseline
+        self.baseline_std = baseline_std
+        self.deviation_at_decision = deviation_at_decision
+        self.baseline_observation_count = baseline_observation_count
+        # Scoring config (threaded from AugurConfig at construction)
+        self._window = window
+        self._min_baseline_std = min_baseline_std
+        self._trend_bonus = trend_bonus
+        self._min_post_obs = min_post_obs
+        self._min_observations = min_observations
 
     def add_post_move(self, value: float) -> None:
-        if len(self.think_times_after) < POST_ADVICE_TRACK_MOVES:
+        if len(self.think_times_after) < self._window:
             self.think_times_after.append(round(value, 3))
-        if len(self.think_times_after) >= POST_ADVICE_TRACK_MOVES:
+        if len(self.think_times_after) >= self._window:
             self._compute_behavioral_score()
 
     def _compute_behavioral_score(self) -> None:
-        if not self.think_times_after or self.baseline_mean <= 0:
+        n = len(self.think_times_after)
+        if n < self._min_post_obs:
+            # Incomplete window (session-end path) — not scorable yet.
+            self.finalized = False
+            return
+        self.finalized = True
+        # Measurability gate (spec §4.1/§4.4): the sigma-surprise metric only
+        # applies to a trained, deviation-driven fire against a non-degenerate σ.
+        if (
+            self.baseline_std < self._min_baseline_std
+            or self.deviation_at_decision < MIN_DECISION_DEVIATION
+            or self.baseline_observation_count < self._min_observations
+        ):
+            self.unmeasurable = True
             self.behavioral_score = 0.5
             return
 
-        scores: list[float] = []
-        for t in self.think_times_after:
-            ratio = t / self.baseline_mean
-            if ratio <= 1.0:
-                # At or faster than baseline — positive signal
-                scores.append(min(1.0, 1.0 - (ratio - 0.5) * 0.5))
-            elif ratio <= 1.5:
-                # Slightly slower — neutral
-                scores.append(0.5)
-            else:
-                # Much slower — negative signal
-                scores.append(max(0.0, 1.0 - (ratio - 1.0) * 0.5))
-
-        # Check if times are normalizing (trending toward baseline)
-        if len(self.think_times_after) >= 2:
-            diffs = [
-                abs(self.think_times_after[i] - self.baseline_mean)
-                for i in range(len(self.think_times_after))
-            ]
-            if diffs[-1] < diffs[0]:
-                # Normalizing — bonus
-                scores.append(0.8)
-
-        self.behavioral_score = round(sum(scores) / len(scores), 3) if scores else 0.5
-        self.finalized = True
+        devs = [
+            abs(v - self.baseline_mean) / self.baseline_std
+            for v in self.think_times_after
+        ]
+        surprise_after = sum(d * d for d in devs) / len(devs)
+        surprise_before = self.deviation_at_decision**2  # ≥ 1.0 by the gate
+        score = 1.0 - surprise_after / max(surprise_before, _EPS)
+        # σ-space trajectory bonus: ONLY when net-positive AND shrinking, so it
+        # can't rescue a net-worsening window into a positive score.
+        if surprise_after < surprise_before and len(devs) >= 2 and devs[-1] < devs[0]:
+            score += self._trend_bonus
+        self.behavioral_score = round(min(1.0, max(0.0, score)), 3)
 
 
 class PendingAdvice(_BehavioralTracker):

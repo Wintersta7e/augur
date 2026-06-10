@@ -171,6 +171,20 @@ class AugurConfig:
     memory_s_max: int = 365
     max_memory_items: int = 5000
     memory_decay_form: str = "exponential"  # {"exponential", "powerlaw"}
+    # ── Praefectus: faculty supervision & health (spec 2026-06-10) ───────────
+    praefectus_enabled: bool = True
+    praefectus_heartbeat_interval_s: float = 10.0
+    praefectus_stale_after_s: float = 30.0
+    praefectus_dead_after_s: float = 90.0
+    praefectus_warmup_s: float = 30.0
+    praefectus_tick_s: float = 5.0
+    praefectus_stall_window_s: float = 0.0  # 0 = auto → effective_stall_window_s
+    praefectus_stall_tolerance: int = 1
+    praefectus_stall_min_events: int = 2
+    praefectus_delivery_failure_spike: int = 3
+    praefectus_reflection_window_s: float = (
+        0.0  # 0 = auto → effective_reflection_window_s
+    )
 
     def __post_init__(self) -> None:
         """Validate bounds on tuning fields. Raises ValueError on out-of-range.
@@ -292,6 +306,61 @@ class AugurConfig:
                 f"memory_decay_form={self.memory_decay_form!r} must be "
                 "'exponential' or 'powerlaw'"
             )
+        # ── Praefectus bounds (spec 2026-06-10) ──────────────────────────────
+        if not (1.0 <= self.praefectus_heartbeat_interval_s <= 120.0):
+            raise ValueError(
+                f"praefectus_heartbeat_interval_s={self.praefectus_heartbeat_interval_s} outside [1, 120]"
+            )
+        if not (
+            self.praefectus_heartbeat_interval_s
+            <= self.praefectus_stale_after_s
+            <= 600.0
+        ):
+            raise ValueError(
+                f"praefectus_stale_after_s={self.praefectus_stale_after_s} must be in "
+                f"[heartbeat_interval={self.praefectus_heartbeat_interval_s}, 600]"
+            )
+        if not (
+            self.praefectus_stale_after_s <= self.praefectus_dead_after_s <= 3600.0
+        ):
+            raise ValueError(
+                f"praefectus_dead_after_s={self.praefectus_dead_after_s} must be in "
+                f"[stale_after={self.praefectus_stale_after_s}, 3600]"
+            )
+        if not (0.0 <= self.praefectus_warmup_s <= 600.0):
+            raise ValueError(
+                f"praefectus_warmup_s={self.praefectus_warmup_s} outside [0, 600]"
+            )
+        if not (1.0 <= self.praefectus_tick_s <= 60.0):
+            raise ValueError(
+                f"praefectus_tick_s={self.praefectus_tick_s} outside [1, 60]"
+            )
+        if self.praefectus_stall_window_s != 0.0 and not (
+            self.ollama_timeout + 60 <= self.praefectus_stall_window_s <= 1800.0
+        ):
+            raise ValueError(
+                f"praefectus_stall_window_s={self.praefectus_stall_window_s} must be 0 (auto) "
+                f"or in [ollama_timeout+60={self.ollama_timeout + 60}, 1800]"
+            )
+        if not (0 <= self.praefectus_stall_tolerance <= 100):
+            raise ValueError(
+                f"praefectus_stall_tolerance={self.praefectus_stall_tolerance} outside [0, 100]"
+            )
+        if not (1 <= self.praefectus_stall_min_events <= 100):
+            raise ValueError(
+                f"praefectus_stall_min_events={self.praefectus_stall_min_events} outside [1, 100]"
+            )
+        if not (1 <= self.praefectus_delivery_failure_spike <= 100):
+            raise ValueError(
+                f"praefectus_delivery_failure_spike={self.praefectus_delivery_failure_spike} outside [1, 100]"
+            )
+        if self.praefectus_reflection_window_s != 0.0 and not (
+            2 * self.ollama_timeout <= self.praefectus_reflection_window_s <= 3600.0
+        ):
+            raise ValueError(
+                f"praefectus_reflection_window_s={self.praefectus_reflection_window_s} must be 0 (auto) "
+                f"or in [2*ollama_timeout={2 * self.ollama_timeout}, 3600]"
+            )
 
     # ── Constructors ───────────────────────────────────────────────────────
 
@@ -340,6 +409,23 @@ class AugurConfig:
     def redis_port(self) -> int:
         """Port extracted from redis_url, defaulting to 6379."""
         return urlparse(self.redis_url).port or 6379
+
+    @property
+    def effective_stall_window_s(self) -> float:
+        """Resolved stall window: the field if set (>0), else max(300, 2*ollama_timeout).
+        Lazy on purpose — from_env() builds defaults via asdict(cls()) BEFORE applying
+        AUGUR_* overrides, so the raw 0.0 sentinel must survive to here and resolve
+        against the FINAL ollama_timeout (mirrors the redis_host/redis_port idiom)."""
+        if self.praefectus_stall_window_s > 0:
+            return self.praefectus_stall_window_s
+        return max(300.0, 2.0 * self.ollama_timeout)
+
+    @property
+    def effective_reflection_window_s(self) -> float:
+        """Resolved reflection-lag horizon: the field if set (>0), else max(300, 2*ollama_timeout)."""
+        if self.praefectus_reflection_window_s > 0:
+            return self.praefectus_reflection_window_s
+        return max(300.0, 2.0 * self.ollama_timeout)
 
 
 def _coerce_gate_tier1_mode(v: str) -> str:

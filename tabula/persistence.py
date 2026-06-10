@@ -222,13 +222,13 @@ class PersistenceManager:
 
     def save_escalation_matrix(self, matrix: dict) -> None:
         """Store the full matrix dict (including 'version' and 'rules' keys) as-is."""
-        key = "augur:config:escalation_matrix"
+        key = "augur:nexus:matrix"
         self._r.set(key, json.dumps(matrix))
         log.debug("Saved escalation matrix (version=%s)", matrix.get("version"))
 
     def load_escalation_matrix(self) -> dict | None:
         """Return the full matrix dict or None if not set."""
-        key = "augur:config:escalation_matrix"
+        key = "augur:nexus:matrix"
         raw = self._r.get(key)
         if raw is None:
             return None
@@ -288,10 +288,10 @@ class PersistenceManager:
         can return session ids without scanning keyspace. Uses a 30-day TTL
         to prevent unbounded Redis growth past the index-trim boundary.
         """
-        key = f"augur:correlation:graph:{session_id}"
+        key = f"augur:nexus:graph:{session_id}"
         self._r.set(key, json.dumps(graph_data), ex=SESSION_KEY_TTL_S)
-        self._r.lpush("augur:correlation:graph:_index", session_id)
-        self._r.ltrim("augur:correlation:graph:_index", 0, 999)
+        self._r.lpush("augur:nexus:graph:_index", session_id)
+        self._r.ltrim("augur:nexus:graph:_index", 0, 999)
         log.debug(
             "Saved correlation graph for session %s (%d nodes, %d links)",
             session_id,
@@ -301,7 +301,7 @@ class PersistenceManager:
 
     def load_correlation_graph(self, session_id: str) -> dict | None:
         """Load a persisted correlation graph or return None if absent."""
-        key = f"augur:correlation:graph:{session_id}"
+        key = f"augur:nexus:graph:{session_id}"
         raw = self._r.get(key)
         if raw is None:
             return None
@@ -312,7 +312,7 @@ class PersistenceManager:
 
         Ordered newest-first (lpush index order).
         """
-        raw_ids = self._r.lrange("augur:correlation:graph:_index", 0, limit - 1)
+        raw_ids = self._r.lrange("augur:nexus:graph:_index", 0, limit - 1)
         return [sid.decode() if isinstance(sid, bytes) else sid for sid in raw_ids]
 
     # -- Rule confidence state (reflection matrix tuning) --------------------
@@ -322,7 +322,7 @@ class PersistenceManager:
 
         Schema: {rule_key: {"confidence": float, "restore_target": str | None}}
         """
-        key = "augur:config:escalation_confidence"
+        key = "augur:nexus:escalation_confidence"
         self._r.set(key, json.dumps(confidence_state))
         log.debug(
             "Saved rule confidence state: %d rules",
@@ -331,7 +331,7 @@ class PersistenceManager:
 
     def load_rule_confidence(self) -> dict | None:
         """Return the per-rule confidence state dict or None if not set."""
-        key = "augur:config:escalation_confidence"
+        key = "augur:nexus:escalation_confidence"
         raw = self._r.get(key)
         if raw is None:
             return None
@@ -343,11 +343,11 @@ class PersistenceManager:
         Schema: {rule_key: {"ewma_lag": float}}.
         Mirrors save_rule_confidence; written to a separate Redis key.
         """
-        self._r.set("augur:config:rule_window_state", json.dumps(state))
+        self._r.set("augur:nexus:rule_window_state", json.dumps(state))
 
     def load_rule_window_state(self) -> dict:
         """Load per-rule observed-lag EWMA state. Returns {} if absent or corrupt."""
-        raw = self._r.get("augur:config:rule_window_state")
+        raw = self._r.get("augur:nexus:rule_window_state")
         if not raw:
             return {}
         try:
@@ -378,9 +378,9 @@ class PersistenceManager:
             return
         pipe = self._r.pipeline()  # transaction=True by default
         if confidence is not None:
-            pipe.set("augur:config:escalation_confidence", json.dumps(confidence))
+            pipe.set("augur:nexus:escalation_confidence", json.dumps(confidence))
         if window_state is not None:
-            pipe.set("augur:config:rule_window_state", json.dumps(window_state))
+            pipe.set("augur:nexus:rule_window_state", json.dumps(window_state))
         pipe.execute()
 
     # -- Reflection reports --------------------------------------------------

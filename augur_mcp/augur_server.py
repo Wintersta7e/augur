@@ -43,7 +43,7 @@ _processes: dict[str, dict[str, Any]] = {}
 
 COMPONENT_COMMANDS: dict[str, list[str]] = {
     "vigil": [sys.executable, "-m", "vigil.anomaly_detector"],
-    "correlator": [sys.executable, "-m", "reasoning.correlator"],
+    "nexus": [sys.executable, "-m", "nexus.correlator"],
     "advisor": [sys.executable, "-m", "reasoning.augur_advisor"],
     "feedback": [sys.executable, "-m", "perception.feedback_collector"],
     "reflection": [sys.executable, "-m", "reasoning.reflection_engine"],
@@ -674,7 +674,7 @@ def list_correlation_graphs(limit: int = 50) -> dict[str, Any]:
 def dump_correlation_window() -> dict[str, Any]:
     """Return the current contents of the correlator's sliding window.
 
-    Reads the augur:correlation:window sorted set directly and returns
+    Reads the augur:nexus:window sorted set directly and returns
     one entry per member: {anomaly: dict, score: unix_timestamp}.
     Useful for verifying what the correlator currently sees as "recent"
     when debugging correlation misses.
@@ -682,7 +682,7 @@ def dump_correlation_window() -> dict[str, Any]:
     try:
         with _redis_ctx() as r:
             raw_members = r.zrevrangebyscore(
-                "augur:correlation:window", "+inf", "-inf", withscores=True
+                "augur:nexus:window", "+inf", "-inf", withscores=True
             )
         window: list[dict[str, Any]] = []
         for member, score in raw_members:

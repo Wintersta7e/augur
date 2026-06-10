@@ -11,7 +11,7 @@ import pytest
 
 from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
-from reasoning.correlator import (
+from nexus.correlator import (
     correlate,
     ensure_matrix_seeded,
 )

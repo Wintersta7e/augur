@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tabula.config import AugurConfig
 from tabula.connections import connect_redis
 from tabula.persistence import PersistenceManager
-from reasoning.correlator import DEFAULT_ESCALATION_MATRIX
+from nexus.correlator import DEFAULT_ESCALATION_MATRIX
 
 # ---------------------------------------------------------------------------
 # Logging

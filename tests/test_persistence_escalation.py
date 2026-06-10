@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 from tabula.persistence import PersistenceManager
 
-MATRIX_KEY = "augur:config:escalation_matrix"
+MATRIX_KEY = "augur:nexus:matrix"
 
 SAMPLE_MATRIX = {
     "version": "1.0",

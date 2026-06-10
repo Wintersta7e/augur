@@ -2,7 +2,7 @@
 
 Subscribes to NATS 'augur.vigil.anomaly', maintains a Redis-backed
 sliding window + in-memory NetworkX DiGraph of correlations, and emits
-enriched events on 'augur.correlation.detected' to the advisor.
+enriched events on 'augur.nexus.detected' to the advisor.
 
 Two LOW-severity anomalies from different domains within 30 seconds
 escalate to MEDIUM via a Redis-stored matrix, producing reasoning that
@@ -36,18 +36,18 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-log = logging.getLogger("correlator")
+log = logging.getLogger("nexus")
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 SUBSCRIBE_ANOMALY = "augur.vigil.anomaly"
-SUBSCRIBE_DEBUG_DUMP = "augur.debug.graph_dump"
+SUBSCRIBE_DEBUG_DUMP = "augur.nexus.graph_dump"
 SUBSCRIBE_SESSION_END = "augur.session.end"
-PUBLISH_CORRELATION = "augur.correlation.detected"
+PUBLISH_CORRELATION = "augur.nexus.detected"
 
-REDIS_KEY_WINDOW = "augur:correlation:window"
-REDIS_KEY_MATRIX = "augur:config:escalation_matrix"
+REDIS_KEY_WINDOW = "augur:nexus:window"
+REDIS_KEY_MATRIX = "augur:nexus:matrix"
 
 # Safety valve for an in-memory session graph that never receives a
 # session.end message (e.g., publisher crash, network partition). Once a
@@ -268,7 +268,7 @@ def _build_correlation_payload(
     matrix: dict,
     config: AugurConfig,
 ) -> dict:
-    """Assemble the correlated-event payload published on augur.correlation.detected."""
+    """Assemble the correlated-event payload published on augur.nexus.detected."""
     # N-way severity tuple from primary + ALL surviving correlated events
     severities = [primary["severity"]] + [e["severity"] for e in correlated]
     combined_severity, rule_label = lookup_escalation_n_way(severities, matrix)

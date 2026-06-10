@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from reasoning.correlator import (
+from nexus.correlator import (
     compute_prune_window,
     compute_query_window,
     filter_by_pairwise_window,

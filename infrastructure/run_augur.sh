@@ -70,7 +70,7 @@ fi
 
 # 2. Correlator (cross-domain correlation — must be between detector and advisor)
 echo -ne "  [2/6] Correlator        ...  "
-$PYTHON "$PROJECT_DIR/reasoning/correlator.py" \
+$PYTHON "$PROJECT_DIR/nexus/correlator.py" \
 	>"$LOG_DIR/correlator.log" 2>&1 &
 PIDS+=($!)
 sleep 1

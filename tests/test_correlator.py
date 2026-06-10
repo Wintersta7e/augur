@@ -1,4 +1,4 @@
-"""Unit tests for reasoning/correlator.py.
+"""Unit tests for nexus/correlator.py.
 
 Pure-logic tests only — no NATS or live Redis. Redis is mocked.
 """
@@ -12,7 +12,7 @@ import networkx as nx
 import pytest
 
 from tabula.config import AugurConfig
-from reasoning.correlator import (
+from nexus.correlator import (
     DEFAULT_ESCALATION_MATRIX,
     SEVERITY_ORDER,
     add_correlation_to_graph,
@@ -193,7 +193,7 @@ class TestAddToWindow:
         mock_redis.zadd.assert_called_once()
         args, _ = mock_redis.zadd.call_args
         key, mapping = args
-        assert key == "augur:correlation:window"
+        assert key == "augur:nexus:window"
         # mapping is {json_str: score}
         assert len(mapping) == 1
         member, score = next(iter(mapping.items()))
@@ -211,7 +211,7 @@ class TestAddToWindow:
         mock_redis.zremrangebyscore.assert_called_once()
         args, _ = mock_redis.zremrangebyscore.call_args
         key, min_score, max_score = args
-        assert key == "augur:correlation:window"
+        assert key == "augur:nexus:window"
         assert min_score == "-inf"
         now = parse_timestamp("2026-03-17T14:30:00+00:00")
         # Prune everything older than now - 60s
@@ -254,7 +254,7 @@ class TestQueryWindow:
 
         args, _ = mock_redis.zrangebyscore.call_args
         key, min_score, max_score = args
-        assert key == "augur:correlation:window"
+        assert key == "augur:nexus:window"
         now = parse_timestamp(primary_ts)
         assert abs(max_score - now) < 0.001
         assert abs(min_score - (now - CORRELATION_WINDOW_S)) < 0.001

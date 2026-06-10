@@ -50,7 +50,7 @@ BG_YELLOW = "\033[43m"
 # ---------------------------------------------------------------------------
 SUBJECT_ANOMALY = "augur.vigil.anomaly"
 SUBJECT_ADVICE = "augur.reasoning.advice"
-SUBJECT_CORRELATION = "augur.correlation.detected"
+SUBJECT_CORRELATION = "augur.nexus.detected"
 SUBJECT_REFLECT = "augur.reflect.complete"
 SUBJECT_SUPPRESSED = "augur.advisor.suppressed"
 WRAP_WIDTH = 80
@@ -140,7 +140,7 @@ def render_anomaly_line(data: dict) -> str:
 
 
 def render_correlation(data: dict) -> str:
-    """Block render for a correlation event from augur.correlation.detected.
+    """Block render for a correlation event from augur.nexus.detected.
 
     Correlated event: multi-domain MEDIUM/HIGH block with contributing signals.
     Pass-through event: single-domain block identifying it as standalone.

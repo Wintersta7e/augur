@@ -1,6 +1,6 @@
 """Tests for vox/console_display.py correlation rendering.
 
-The correlation event enters via augur.correlation.detected and must:
+The correlation event enters via augur.nexus.detected and must:
 - Render a distinct MEDIUM/HIGH correlation block
 - Suppress a previously rendered low-severity one-liner for the primary
   anomaly if the same event is now surfacing as correlated
@@ -62,7 +62,7 @@ def _correlation_payload() -> dict:
 
 class TestSubject:
     def test_correlation_subject_constant(self) -> None:
-        assert SUBJECT_CORRELATION == "augur.correlation.detected"
+        assert SUBJECT_CORRELATION == "augur.nexus.detected"
 
 
 class TestRenderCorrelation:

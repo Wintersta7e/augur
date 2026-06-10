@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 
 from tabula.config import AugurConfig
-from reasoning.correlator import (
+from nexus.correlator import (
     DEFAULT_ESCALATION_MATRIX,
     _build_correlation_payload,
     _build_passthrough_payload,

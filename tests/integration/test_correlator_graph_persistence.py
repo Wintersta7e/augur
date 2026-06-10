@@ -2,7 +2,7 @@
 
 Starts detector + correlator, injects two cross-domain anomalies to
 create a correlation edge, publishes augur.session.end, and verifies
-the graph lands in Redis at augur:correlation:graph:<session_id>.
+the graph lands in Redis at augur:nexus:graph:<session_id>.
 
 No Ollama — advisor is not in the pipeline.
 """
@@ -44,7 +44,7 @@ def _make_perception_event(
     ).encode()
 
 
-@pytest.mark.parametrize("pipeline", [["vigil", "correlator"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil", "nexus"]], indirect=True)
 async def test_session_end_flushes_graph_to_redis(
     pipeline,
     redis_client,
@@ -146,7 +146,7 @@ async def test_session_end_flushes_graph_to_redis(
     )
 
     # Poll Redis for the graph
-    key = f"augur:correlation:graph:{sid}"
+    key = f"augur:nexus:graph:{sid}"
     graph_raw = None
     for _ in range(30):
         graph_raw = redis_client.get(key)
@@ -182,7 +182,7 @@ async def test_session_end_flushes_graph_to_redis(
     assert isinstance(edge["domains"], list)
 
 
-@pytest.mark.parametrize("pipeline", [["vigil", "correlator"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil", "nexus"]], indirect=True)
 async def test_session_end_with_no_correlations_still_saves_empty_graph(
     pipeline,
     redis_client,
@@ -205,7 +205,7 @@ async def test_session_end_with_no_correlations_still_saves_empty_graph(
         ).encode(),
     )
 
-    key = f"augur:correlation:graph:{sid}"
+    key = f"augur:nexus:graph:{sid}"
     graph_raw = None
     for _ in range(30):
         graph_raw = redis_client.get(key)

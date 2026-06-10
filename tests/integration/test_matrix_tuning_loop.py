@@ -20,7 +20,7 @@ import pytest
 
 from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
-from reasoning.correlator import DEFAULT_ESCALATION_MATRIX, ensure_matrix_seeded
+from nexus.correlator import DEFAULT_ESCALATION_MATRIX, ensure_matrix_seeded
 from reasoning.reflection_engine import run_reflection
 
 pytestmark = pytest.mark.asyncio

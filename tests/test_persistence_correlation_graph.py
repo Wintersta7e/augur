@@ -12,8 +12,8 @@ from unittest.mock import MagicMock
 
 from tabula.persistence import PersistenceManager
 
-GRAPH_KEY_PREFIX = "augur:correlation:graph:"
-GRAPH_INDEX_KEY = "augur:correlation:graph:_index"
+GRAPH_KEY_PREFIX = "augur:nexus:graph:"
+GRAPH_INDEX_KEY = "augur:nexus:graph:_index"
 
 SAMPLE_GRAPH_DATA = {
     "directed": True,

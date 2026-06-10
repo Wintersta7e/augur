@@ -29,7 +29,7 @@ def test_max_escalation_rules_bumped_to_40():
 
 
 def test_rules_count_under_new_cap_accepted():
-    from reasoning.correlator import DEFAULT_ESCALATION_MATRIX
+    from nexus.correlator import DEFAULT_ESCALATION_MATRIX
 
     err = _call_validate(DEFAULT_ESCALATION_MATRIX["rules"])
     assert err is None  # 16 rules <= 40 cap

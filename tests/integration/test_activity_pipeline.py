@@ -123,7 +123,7 @@ def clean_redis(session_id):
         "augur:vigil:profile:activity_*",
         "augur:vigil:history:activity_*",
         "augur:vigil:*",
-        "augur:correlation:*",
+        "augur:nexus:*",
         "augur:feedback:*",
     ]:
         keys = r.keys(pattern) or []
@@ -139,7 +139,7 @@ def clean_redis(session_id):
         "augur:vigil:profile:activity_*",
         "augur:vigil:history:activity_*",
         "augur:vigil:*",
-        "augur:correlation:*",
+        "augur:nexus:*",
         "augur:feedback:*",
     ]:
         keys = r.keys(pattern) or []
@@ -236,7 +236,7 @@ async def test_activity_intensity_event_creates_baseline(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("pipeline", [["vigil", "correlator"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil", "nexus"]], indirect=True)
 @pytest.mark.asyncio
 async def test_activity_focus_and_typing_correlate_cross_domain(
     pipeline, clean_redis, session_id
@@ -253,7 +253,7 @@ async def test_activity_focus_and_typing_correlate_cross_domain(
     async def _capture(msg):
         received.append(json.loads(msg.data.decode()))
 
-    sub = await nc.subscribe("augur.correlation.detected", cb=_capture)
+    sub = await nc.subscribe("augur.nexus.detected", cb=_capture)
     try:
         # Build baselines with varied normal values. Size adapts to
         # config.min_observations so future bumps don't break this test.
@@ -316,7 +316,7 @@ async def test_activity_focus_and_typing_correlate_cross_domain(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("pipeline", [["vigil", "correlator"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil", "nexus"]], indirect=True)
 @pytest.mark.asyncio
 async def test_activity_focus_and_intensity_correlate_cross_domain(
     pipeline, clean_redis, session_id
@@ -334,7 +334,7 @@ async def test_activity_focus_and_intensity_correlate_cross_domain(
     async def _capture(msg):
         received.append(json.loads(msg.data.decode()))
 
-    sub = await nc.subscribe("augur.correlation.detected", cb=_capture)
+    sub = await nc.subscribe("augur.nexus.detected", cb=_capture)
     try:
         # Build baselines with varied normal values. Adaptive sizing so
         # future config.min_observations bumps don't break this test.
@@ -531,9 +531,7 @@ def test_get_active_session_helper_returns_id_for_active_fresh(clean_redis_sync)
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize(
-    "pipeline", [["vigil", "correlator", "advisor"]], indirect=True
-)
+@pytest.mark.parametrize("pipeline", [["vigil", "nexus", "advisor"]], indirect=True)
 @pytest.mark.asyncio
 async def test_activity_focus_advisor_returns_advice_via_ollama(
     pipeline, clean_redis, session_id

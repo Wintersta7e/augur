@@ -58,7 +58,7 @@ log = logging.getLogger("augur_advisor")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SUBSCRIBE_SUBJECT = "augur.correlation.detected"
+SUBSCRIBE_SUBJECT = "augur.nexus.detected"
 PUBLISH_SUBJECT = "augur.reasoning.advice"
 
 # Gate visibility subjects (spec §8). Distinct subjects so the MRT control arm

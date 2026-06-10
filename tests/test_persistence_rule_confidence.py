@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 from tabula.persistence import PersistenceManager
 
-KEY = "augur:config:escalation_confidence"
+KEY = "augur:nexus:escalation_confidence"
 
 SAMPLE_STATE = {
     "LOW+LOW": {"confidence": 0.78, "restore_target": "MEDIUM"},

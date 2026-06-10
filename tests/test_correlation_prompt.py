@@ -146,7 +146,7 @@ class TestBuildCorrelationPrompt:
 
 class TestAdvisorSubscriptionAndGate:
     def test_subscribes_to_correlation_subject(self) -> None:
-        assert SUBSCRIBE_SUBJECT == "augur.correlation.detected"
+        assert SUBSCRIBE_SUBJECT == "augur.nexus.detected"
 
     def test_severity_gate_is_lowercase(self) -> None:
         # The gate itself stays lowercase; the advisor lowercases

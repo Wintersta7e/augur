@@ -182,6 +182,71 @@ def test_no_masking_between_sensors():
     assert H.liveness(states["sensus.typing"], 2000.0, 1000.0, cfg) == "alive"
 
 
+def test_evaluate_never_started_fires_once_then_silent_then_clears():
+    # T1: debounce — a never_started death ENTERS once, stays silent on the
+    # next tick (no re-fire), and CLEARS exactly once on recovery. Same states
+    # dict mutated across ticks (not fresh dicts) so reason-set diffing applies.
+    cfg = _Cfg()
+    states = H.initial_states(1000.0)  # nobody heartbeats
+    # tick1: past the never_started horizon → enters
+    r1 = H.evaluate(states, H.ActivityWindow(), 1200.0, 1000.0, cfg)
+    assert ("vox", "never_started") in r1.entered
+    # tick2: later now, still no heartbeat → no re-fire
+    r2 = H.evaluate(states, H.ActivityWindow(), 1300.0, 1000.0, cfg)
+    assert r2.entered == []
+    # recovery: vox heartbeats → clears exactly once
+    H.record_heartbeat(states, "vox", 1305.0)
+    r3 = H.evaluate(states, H.ActivityWindow(), 1306.0, 1000.0, cfg)
+    cleared_vox = [c for c in r3.cleared if c == ("vox", "never_started")]
+    assert cleared_vox == [("vox", "never_started")]
+
+
+def test_record_activity_prunes_old_entries():
+    # T2: window pruning — an entry older than the stall cutoff is dropped on
+    # the next record_activity, while the fresh entry remains.
+    states = H.initial_states(1000.0)
+    window = H.ActivityWindow(detected_mh=[0.0])  # far older than cutoff
+    cfg = _Cfg()  # effective_stall_window_s = 300.0
+    H.record_activity(
+        states,
+        window,
+        "augur.nexus.detected",
+        {"combined_severity": "HIGH"},
+        1000.0,
+        cfg,
+    )
+    # cutoff = 1000 - 300 = 700; 0.0 dropped, 1000.0 kept
+    assert window.detected_mh == [1000.0]
+
+
+def test_stall_signal_below_min_events_floor():
+    # T3a: 1 detected, 0 terminals — below min_events(2) floor → NOT degraded.
+    cfg = _Cfg()
+    w = H.ActivityWindow(detected_mh=[1.0])
+    assert H.stall_signal(w, 100.0, cfg).degraded is False
+
+
+def test_stall_signal_deficit_equals_tolerance_plus_one():
+    # T3b: 3 detected, 1 terminal — deficit (2) == tolerance(1)+1 → degraded.
+    cfg = _Cfg()
+    w = H.ActivityWindow(detected_mh=[1.0, 2.0, 3.0], advice=[1.5])
+    v = H.stall_signal(w, 100.0, cfg)
+    assert v.degraded and "consilium_stall" in v.reasons
+
+
+def test_evaluate_overall_state_masking_and_isolation():
+    # T4: a stall degrades consilium's overall_state, and the populated window
+    # does NOT leak into a non-consilium faculty's activity_state.
+    cfg = _Cfg()
+    states = H.initial_states(1000.0)
+    for f in H.REQUIRED_FACULTIES:  # everyone alive
+        H.record_heartbeat(states, f, 1000.0)
+    w = H.ActivityWindow(detected_mh=[1000.0, 1000.0, 1000.0])  # consilium stall
+    H.evaluate(states, w, 1000.0, 1000.0, cfg)
+    assert states["consilium"].overall_state == "degraded"
+    assert states["nexus"].activity_state == "ok"
+
+
 class _Cfg:
     """Minimal config stand-in for the pure functions."""
 

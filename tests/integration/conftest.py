@@ -128,12 +128,12 @@ async def pipeline(
     """Start one or more pipeline components as asyncio subprocesses.
 
     Parametrize with a list of component names, e.g.:
-        @pytest.mark.parametrize("pipeline", [["detector", "correlator", "advisor"]], indirect=True)
+        @pytest.mark.parametrize("pipeline", [["vigil", "correlator", "advisor"]], indirect=True)
 
     Available components: detector, correlator, advisor, feedback, reflection, display.
     """
     component_commands: dict[str, list[str]] = {
-        "detector": [sys.executable, "-m", "detection.anomaly_detector"],
+        "vigil": [sys.executable, "-m", "vigil.anomaly_detector"],
         "correlator": [sys.executable, "-m", "reasoning.correlator"],
         "advisor": [sys.executable, "-m", "reasoning.augur_advisor"],
         "feedback": [sys.executable, "-m", "perception.feedback_collector"],

@@ -44,7 +44,7 @@ def _make_perception_event(
     ).encode()
 
 
-@pytest.mark.parametrize("pipeline", [["detector", "correlator"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil", "correlator"]], indirect=True)
 async def test_session_end_flushes_graph_to_redis(
     pipeline,
     redis_client,
@@ -182,7 +182,7 @@ async def test_session_end_flushes_graph_to_redis(
     assert isinstance(edge["domains"], list)
 
 
-@pytest.mark.parametrize("pipeline", [["detector", "correlator"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil", "correlator"]], indirect=True)
 async def test_session_end_with_no_correlations_still_saves_empty_graph(
     pipeline,
     redis_client,

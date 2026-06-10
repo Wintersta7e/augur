@@ -56,12 +56,12 @@ class PersistenceManager:
     # -- Baseline persistence ------------------------------------------------
 
     def save_baseline(self, domain: str, entity: str, state_dict: dict) -> None:
-        key = f"augur:profile:{domain}:{entity}"
+        key = f"augur:vigil:profile:{domain}:{entity}"
         self._r.set(key, json.dumps(state_dict))
         log.debug("Saved baseline %s", key)
 
     def load_baseline(self, domain: str, entity: str) -> dict | None:
-        key = f"augur:profile:{domain}:{entity}"
+        key = f"augur:vigil:profile:{domain}:{entity}"
         raw = self._r.get(key)
         if raw is None:
             return None
@@ -70,12 +70,12 @@ class PersistenceManager:
     # -- Event history -------------------------------------------------------
 
     def append_event(self, event: PerceptionEvent) -> None:
-        key = f"augur:history:{event.domain}"
+        key = f"augur:vigil:history:{event.domain}"
         self._r.lpush(key, event.to_json())
         self._r.ltrim(key, 0, HISTORY_MAX - 1)
 
     def get_history(self, domain: str, limit: int = 100) -> list[dict]:
-        key = f"augur:history:{domain}"
+        key = f"augur:vigil:history:{domain}"
         raw_list = self._r.lrange(key, 0, limit - 1)
         return [json.loads(entry) for entry in raw_list]
 
@@ -207,12 +207,12 @@ class PersistenceManager:
     # -- Threshold config ----------------------------------------------------
 
     def save_thresholds(self, domain: str, thresholds_dict: dict) -> None:
-        key = f"augur:config:thresholds:{domain}"
+        key = f"augur:vigil:thresholds:{domain}"
         self._r.set(key, json.dumps(thresholds_dict))
         log.debug("Saved thresholds for domain %s", domain)
 
     def load_thresholds(self, domain: str) -> dict | None:
-        key = f"augur:config:thresholds:{domain}"
+        key = f"augur:vigil:thresholds:{domain}"
         raw = self._r.get(key)
         if raw is None:
             return None
@@ -409,11 +409,11 @@ class PersistenceManager:
 
     def save_last_anomaly(self, anomaly_dict: dict) -> None:
         """Persist the most recent anomaly event (no TTL — live state)."""
-        self._r.set("augur:detection:last_anomaly", json.dumps(anomaly_dict))
+        self._r.set("augur:vigil:last_anomaly", json.dumps(anomaly_dict))
 
     def load_last_anomaly(self) -> dict | None:
         """Return the most recent anomaly event or None if not set."""
-        raw = self._r.get("augur:detection:last_anomaly")
+        raw = self._r.get("augur:vigil:last_anomaly")
         if raw is None:
             return None
         return json.loads(raw)

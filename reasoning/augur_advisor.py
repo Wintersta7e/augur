@@ -1,6 +1,6 @@
 """Multi-domain LLM advisor triggered by anomaly detection.
 
-Subscribes to NATS 'augur.detection.anomaly', routes to domain-specific
+Subscribes to NATS 'augur.vigil.anomaly', routes to domain-specific
 prompt builders, queries Ollama for advice, and publishes results.
 Only activates for medium/high severity anomalies.
 

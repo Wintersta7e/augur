@@ -3,7 +3,7 @@
 Subscribes to NATS 'augur.sensus.>' (wildcard), parses incoming
 messages as PerceptionEvent, scores each observation using per-(domain,
 entity) EWMA baselines and River HalfSpaceTrees, then publishes anomalies
-to 'augur.detection.anomaly' and Redis.
+to 'augur.vigil.anomaly' and Redis.
 
 Baselines are persisted to Redis and survive restarts. Thresholds are
 loaded from PersistenceManager per domain, falling back to defaults.
@@ -44,8 +44,8 @@ log = logging.getLogger("anomaly_detector")
 # Constants
 # ---------------------------------------------------------------------------
 SUBSCRIBE_SUBJECT = "augur.sensus.>"
-PUBLISH_SUBJECT = "augur.detection.anomaly"
-REDIS_KEY_ANOMALY = "augur:detection:last_anomaly"
+PUBLISH_SUBJECT = "augur.vigil.anomaly"
+REDIS_KEY_ANOMALY = "augur:vigil:last_anomaly"
 
 # Default thresholds (overridden per-domain via PersistenceManager)
 DEFAULT_THRESHOLDS = {
@@ -222,7 +222,7 @@ def build_anomaly_payload(
     drift_reset: bool,
     timestamp: str,
 ) -> dict:
-    """Assemble the ``augur.detection.anomaly`` payload from the DECISION-TIME
+    """Assemble the ``augur.vigil.anomaly`` payload from the DECISION-TIME
     (pre-update) baseline snapshot.
 
     Kept a pure function (taking the frozen snapshot explicitly, never the live
@@ -282,11 +282,11 @@ def load_persisted_baselines(
     pm: PersistenceManager,
     r: redis.Redis,
 ) -> dict[tuple[str, str], EntityBaseline]:
-    """Scan Redis for existing augur:profile:* keys and restore baselines."""
+    """Scan Redis for existing augur:vigil:profile:* keys and restore baselines."""
     baselines: dict[tuple[str, str], EntityBaseline] = {}
     cursor = 0
     while True:
-        cursor, keys = r.scan(cursor, match="augur:profile:*", count=100)
+        cursor, keys = r.scan(cursor, match="augur:vigil:profile:*", count=100)
         for key in keys:
             key_str = key.decode() if isinstance(key, bytes) else key
             parts = key_str.split(":")

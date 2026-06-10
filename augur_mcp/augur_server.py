@@ -42,7 +42,7 @@ _config = AugurConfig.from_env()
 _processes: dict[str, dict[str, Any]] = {}
 
 COMPONENT_COMMANDS: dict[str, list[str]] = {
-    "detector": [sys.executable, "-m", "detection.anomaly_detector"],
+    "vigil": [sys.executable, "-m", "vigil.anomaly_detector"],
     "correlator": [sys.executable, "-m", "reasoning.correlator"],
     "advisor": [sys.executable, "-m", "reasoning.augur_advisor"],
     "feedback": [sys.executable, "-m", "perception.feedback_collector"],
@@ -52,7 +52,7 @@ COMPONENT_COMMANDS: dict[str, list[str]] = {
 
 # SEC-02: allowlist for domain / entity / stream_id values received through
 # MCP tool arguments. Unsanitized values would land in NATS subjects
-# (f"augur.sensus.{domain}") and Redis keys (f"augur:profile:{domain}:{entity}"),
+# (f"augur.sensus.{domain}") and Redis keys (f"augur:vigil:profile:{domain}:{entity}"),
 # where a ":" or "." or wildcard character can break downstream parsing or
 # reach unintended keyspace. Keep it narrow.
 _SAFE_LABEL_RE = re.compile(r"^[a-z0-9_]{1,64}$")

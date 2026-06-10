@@ -1,7 +1,7 @@
 services:
-  detector:
+  vigil:
     build: .
-    command: python -m detection.anomaly_detector
+    command: python -m vigil.anomaly_detector
     depends_on:
       redis:
         condition: service_healthy

@@ -16,7 +16,7 @@ from tests.integration.conftest import (
 
 @requires_ollama
 @pytest.mark.parametrize(
-    "pipeline", [["detector", "correlator", "advisor"]], indirect=True
+    "pipeline", [["vigil", "correlator", "advisor"]], indirect=True
 )
 class TestAdvicePipeline:
     """Verify that anomalies trigger advice generation via the LLM advisor."""

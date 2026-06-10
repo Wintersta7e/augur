@@ -57,7 +57,7 @@ echo -e "${RESET}"
 
 # 1. Anomaly detector (must be first — listens for chess moves)
 echo -ne "  [1/6] Anomaly detector ...  "
-$PYTHON "$PROJECT_DIR/detection/anomaly_detector.py" \
+$PYTHON "$PROJECT_DIR/vigil/anomaly_detector.py" \
 	>"$LOG_DIR/anomaly_detector.log" 2>&1 &
 PIDS+=($!)
 sleep 1

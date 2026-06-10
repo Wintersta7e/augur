@@ -48,7 +48,7 @@ BG_YELLOW = "\033[43m"
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SUBJECT_ANOMALY = "augur.detection.anomaly"
+SUBJECT_ANOMALY = "augur.vigil.anomaly"
 SUBJECT_ADVICE = "augur.reasoning.advice"
 SUBJECT_CORRELATION = "augur.correlation.detected"
 SUBJECT_REFLECT = "augur.reflect.complete"
@@ -493,7 +493,7 @@ async def run() -> None:
         primary = data.get("primary_anomaly", {})
         if dedup_should_suppress(last_rendered, primary):
             # The primary already showed as a low-severity one-liner
-            # when it first arrived on augur.detection.anomaly — do not
+            # when it first arrived on augur.vigil.anomaly — do not
             # render it again as part of the correlation block.
             # The correlation block still prints (this flag only
             # suppresses the earlier one-liner's retention).

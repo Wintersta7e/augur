@@ -120,9 +120,9 @@ def clean_redis(session_id):
     r = connect_redis(config)
     # Clean activity-related keys before the test
     for pattern in [
-        "augur:profile:activity_*",
-        "augur:history:activity_*",
-        "augur:detection:*",
+        "augur:vigil:profile:activity_*",
+        "augur:vigil:history:activity_*",
+        "augur:vigil:*",
         "augur:correlation:*",
         "augur:feedback:*",
     ]:
@@ -136,9 +136,9 @@ def clean_redis(session_id):
     yield r
     # Clean up after the test
     for pattern in [
-        "augur:profile:activity_*",
-        "augur:history:activity_*",
-        "augur:detection:*",
+        "augur:vigil:profile:activity_*",
+        "augur:vigil:history:activity_*",
+        "augur:vigil:*",
         "augur:correlation:*",
         "augur:feedback:*",
     ]:
@@ -167,7 +167,7 @@ def clean_redis_sync():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("pipeline", [["detector"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil"]], indirect=True)
 @pytest.mark.asyncio
 async def test_activity_focus_event_creates_baseline(pipeline, clean_redis, session_id):
     """Publishing focus events through NATS creates a per-(domain, entity) baseline."""
@@ -181,13 +181,15 @@ async def test_activity_focus_event_creates_baseline(pipeline, clean_redis, sess
             await _publish(nc, "augur.sensus.activity_focus", ev)
         await nc.flush()
         assert await _wait_until(
-            lambda: clean_redis.get("augur:profile:activity_focus:code") is not None,
+            lambda: (
+                clean_redis.get("augur:vigil:profile:activity_focus:code") is not None
+            ),
             timeout_s=5.0,
         ), "baseline not created within timeout"
     finally:
         await nc.drain()
 
-    raw = clean_redis.get("augur:profile:activity_focus:code")
+    raw = clean_redis.get("augur:vigil:profile:activity_focus:code")
     assert raw is not None, "baseline for (activity_focus, code) was not created"
     bl = json.loads(raw)
     assert "ewma_mean" in bl
@@ -199,7 +201,7 @@ async def test_activity_focus_event_creates_baseline(pipeline, clean_redis, sess
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("pipeline", [["detector"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil"]], indirect=True)
 @pytest.mark.asyncio
 async def test_activity_intensity_event_creates_baseline(
     pipeline, clean_redis, session_id
@@ -215,14 +217,15 @@ async def test_activity_intensity_event_creates_baseline(
         await nc.flush()
         assert await _wait_until(
             lambda: (
-                clean_redis.get("augur:profile:activity_intensity:code") is not None
+                clean_redis.get("augur:vigil:profile:activity_intensity:code")
+                is not None
             ),
             timeout_s=5.0,
         ), "baseline not created within timeout"
     finally:
         await nc.drain()
 
-    raw = clean_redis.get("augur:profile:activity_intensity:code")
+    raw = clean_redis.get("augur:vigil:profile:activity_intensity:code")
     assert raw is not None, "baseline for (activity_intensity, code) was not created"
     bl = json.loads(raw)
     assert bl["ewma_mean"] > 0
@@ -233,7 +236,7 @@ async def test_activity_intensity_event_creates_baseline(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("pipeline", [["detector", "correlator"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil", "correlator"]], indirect=True)
 @pytest.mark.asyncio
 async def test_activity_focus_and_typing_correlate_cross_domain(
     pipeline, clean_redis, session_id
@@ -271,7 +274,9 @@ async def test_activity_focus_and_typing_correlate_cross_domain(
             )
         await nc.flush()
         assert await _wait_until(
-            lambda: clean_redis.get("augur:profile:activity_focus:code") is not None,
+            lambda: (
+                clean_redis.get("augur:vigil:profile:activity_focus:code") is not None
+            ),
             timeout_s=5.0,
         ), "typing baseline not created within timeout"
 
@@ -311,7 +316,7 @@ async def test_activity_focus_and_typing_correlate_cross_domain(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("pipeline", [["detector", "correlator"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil", "correlator"]], indirect=True)
 @pytest.mark.asyncio
 async def test_activity_focus_and_intensity_correlate_cross_domain(
     pipeline, clean_redis, session_id
@@ -355,7 +360,8 @@ async def test_activity_focus_and_intensity_correlate_cross_domain(
         await nc.flush()
         assert await _wait_until(
             lambda: (
-                clean_redis.get("augur:profile:activity_intensity:code") is not None
+                clean_redis.get("augur:vigil:profile:activity_intensity:code")
+                is not None
             ),
             timeout_s=5.0,
         ), "intensity baseline not created within timeout"
@@ -526,7 +532,7 @@ def test_get_active_session_helper_returns_id_for_active_fresh(clean_redis_sync)
 
 @pytest.mark.slow
 @pytest.mark.parametrize(
-    "pipeline", [["detector", "correlator", "advisor"]], indirect=True
+    "pipeline", [["vigil", "correlator", "advisor"]], indirect=True
 )
 @pytest.mark.asyncio
 async def test_activity_focus_advisor_returns_advice_via_ollama(

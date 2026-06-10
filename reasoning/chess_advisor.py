@@ -1,6 +1,6 @@
 """LLM-powered chess advisor triggered by anomaly detection.
 
-Subscribes to NATS 'augur.detection.anomaly', enriches with board context
+Subscribes to NATS 'augur.vigil.anomaly', enriches with board context
 from Redis, queries Ollama for strategic advice, and publishes results.
 Only activates for medium/high severity anomalies.
 """
@@ -31,7 +31,7 @@ log = logging.getLogger("chess_advisor")
 # Constants
 # ---------------------------------------------------------------------------
 NATS_URL = "nats://localhost:4222"
-SUBSCRIBE_SUBJECT = "augur.detection.anomaly"
+SUBSCRIBE_SUBJECT = "augur.vigil.anomaly"
 PUBLISH_SUBJECT = "augur.reasoning.advice"
 
 REDIS_KEY_LAST_MOVE = "augur:sensus:chess:last_move"

@@ -154,7 +154,7 @@ class TestRedisProperties:
 
 
 class TestDetectorConfigParity:
-    """Guard the duplication between AugurConfig and detection.anomaly_detector.
+    """Guard the duplication between AugurConfig and vigil.anomaly_detector.
 
     DEFAULT_THRESHOLDS in the detector currently shadows AugurConfig values; if
     they drift, the MCP server reports one number while the detector behaves with
@@ -163,7 +163,7 @@ class TestDetectorConfigParity:
     """
 
     def test_detector_default_min_observations_matches_config(self) -> None:
-        from detection.anomaly_detector import DEFAULT_THRESHOLDS
+        from vigil.anomaly_detector import DEFAULT_THRESHOLDS
 
         cfg = AugurConfig()
         assert DEFAULT_THRESHOLDS["min_observations"] == cfg.min_observations

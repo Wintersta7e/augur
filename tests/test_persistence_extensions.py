@@ -57,7 +57,7 @@ class TestSaveLastAnomaly:
 
         mock_redis.set.assert_called_once()
         args, kwargs = mock_redis.set.call_args
-        assert args[0] == "augur:detection:last_anomaly"
+        assert args[0] == "augur:vigil:last_anomaly"
         assert json.loads(args[1]) == anomaly
         # Live state — no TTL
         assert "ex" not in kwargs

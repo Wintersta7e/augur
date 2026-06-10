@@ -1,6 +1,6 @@
 """Cross-domain correlator.
 
-Subscribes to NATS 'augur.detection.anomaly', maintains a Redis-backed
+Subscribes to NATS 'augur.vigil.anomaly', maintains a Redis-backed
 sliding window + in-memory NetworkX DiGraph of correlations, and emits
 enriched events on 'augur.correlation.detected' to the advisor.
 
@@ -41,7 +41,7 @@ log = logging.getLogger("correlator")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SUBSCRIBE_ANOMALY = "augur.detection.anomaly"
+SUBSCRIBE_ANOMALY = "augur.vigil.anomaly"
 SUBSCRIBE_DEBUG_DUMP = "augur.debug.graph_dump"
 SUBSCRIBE_SESSION_END = "augur.session.end"
 PUBLISH_CORRELATION = "augur.correlation.detected"

@@ -96,7 +96,7 @@ fi
 
 # 4. Feedback collector (listens for advice + perception events)
 echo -ne "  [4/6] Feedback collector...  "
-$PYTHON "$PROJECT_DIR/perception/feedback_collector.py" \
+$PYTHON "$PROJECT_DIR/responsum/feedback_collector.py" \
 	>"$LOG_DIR/feedback_collector.log" 2>&1 &
 PIDS+=($!)
 sleep 1

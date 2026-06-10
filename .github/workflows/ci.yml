@@ -48,13 +48,13 @@ jobs:
         run: |
           mypy --ignore-missing-imports --no-strict-optional \
             --explicit-package-bases \
-            tabula/ vigil/ nexus/ consilium/ limen/ reasoning/ perception/ sensus/ vox/ augur_mcp/
+            tabula/ vigil/ nexus/ consilium/ limen/ reasoning/ responsum/ sensus/ vox/ augur_mcp/
 
       - name: Run unit tests
         run: |
           pytest tests/ --ignore=tests/integration -v \
             --cov=tabula --cov=vigil --cov=nexus --cov=consilium --cov=limen --cov=reasoning \
-            --cov=perception --cov=sensus --cov=vox --cov=augur_mcp \
+            --cov=responsum --cov=sensus --cov=vox --cov=augur_mcp \
             --cov-report=xml --cov-report=term
 
       - name: Upload coverage XML
@@ -142,4 +142,4 @@ jobs:
 
       - name: Smoke-import core modules
         run: |
-          docker run --rm augur:ci python -c "import vigil.anomaly_detector; import nexus.correlator; import consilium.advisor; import perception.feedback_collector; import sensus.activity_monitor; import vox.console_display; import augur_mcp.augur_server; print('core modules import OK')"
+          docker run --rm augur:ci python -c "import vigil.anomaly_detector; import nexus.correlator; import consilium.advisor; import responsum.feedback_collector; import sensus.activity_monitor; import vox.console_display; import augur_mcp.augur_server; print('core modules import OK')"

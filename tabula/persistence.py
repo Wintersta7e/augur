@@ -82,26 +82,26 @@ class PersistenceManager:
     # -- Feedback storage ----------------------------------------------------
 
     def save_feedback(self, session_id: str, feedback_dict: dict) -> None:
-        key = f"augur:feedback:{session_id}"
+        key = f"augur:responsum:{session_id}"
         feedback_dict.setdefault(
             "timestamp",
             datetime.now(timezone.utc).isoformat(),
         )
         self._r.set(key, json.dumps(feedback_dict), ex=SESSION_KEY_TTL_S)
         # Also maintain an ordered index of session IDs for get_all_feedback
-        self._r.lpush("augur:feedback:_index", session_id)
-        self._r.ltrim("augur:feedback:_index", 0, 999)
+        self._r.lpush("augur:responsum:_index", session_id)
+        self._r.ltrim("augur:responsum:_index", 0, 999)
         log.debug("Saved feedback for session %s", session_id)
 
     def get_feedback(self, session_id: str) -> dict | None:
-        key = f"augur:feedback:{session_id}"
+        key = f"augur:responsum:{session_id}"
         raw = self._r.get(key)
         if raw is None:
             return None
         return json.loads(raw)
 
     def get_all_feedback(self, limit: int = 50) -> list[dict]:
-        session_ids = self._r.lrange("augur:feedback:_index", 0, limit - 1)
+        session_ids = self._r.lrange("augur:responsum:_index", 0, limit - 1)
         results: list[dict] = []
         for sid in session_ids:
             sid_str = sid.decode() if isinstance(sid, bytes) else sid

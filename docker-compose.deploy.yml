@@ -41,9 +41,9 @@ services:
       AUGUR_OLLAMA_URL: http://host.docker.internal:11434
     restart: unless-stopped
 
-  feedback:
+  responsum:
     build: .
-    command: python -m perception.feedback_collector
+    command: python -m responsum.feedback_collector
     depends_on:
       redis:
         condition: service_healthy

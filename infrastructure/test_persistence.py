@@ -86,9 +86,9 @@ def main() -> int:
     check("history limit works", len(limited) == 3, f"got {len(limited)}")
 
     print("\n=== Feedback storage ===")
-    track("augur:feedback:sess-001")
-    track("augur:feedback:sess-002")
-    track("augur:feedback:_index")
+    track("augur:responsum:sess-001")
+    track("augur:responsum:sess-002")
+    track("augur:responsum:_index")
 
     pm.save_feedback("sess-001", {"rating": 5, "comment": "great advice"})
     pm.save_feedback("sess-002", {"rating": 2, "comment": "not helpful"})

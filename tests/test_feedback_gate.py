@@ -15,8 +15,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import perception.feedback_collector as fc
-from perception.feedback_collector import PendingAdvice
+import responsum.feedback_collector as fc
+from responsum.feedback_collector import PendingAdvice
 
 
 def _base_kwargs() -> dict[str, Any]:
@@ -248,7 +248,7 @@ def _suppressed_payload(**overrides: Any) -> dict[str, Any]:
 
 class TestPendingGateDecision:
     def test_carries_core_fields(self) -> None:
-        from perception.feedback_collector import PendingGateDecision
+        from responsum.feedback_collector import PendingGateDecision
 
         d = PendingGateDecision(
             decision_id="dec-w001",
@@ -273,7 +273,7 @@ class TestPendingGateDecision:
         assert d.reason == "habituated channel"
 
     def test_to_record_has_spec_fields(self) -> None:
-        from perception.feedback_collector import PendingGateDecision
+        from responsum.feedback_collector import PendingGateDecision
 
         d = PendingGateDecision(
             decision_id="dec-w001",
@@ -309,7 +309,7 @@ class TestPendingGateDecision:
 
     def test_behavioral_score_matches_pending_advice(self) -> None:
         # Same post-decision behavioral-score computation as PendingAdvice.
-        from perception.feedback_collector import PendingGateDecision
+        from responsum.feedback_collector import PendingGateDecision
 
         kwargs = dict(
             domain="chess",

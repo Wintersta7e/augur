@@ -124,7 +124,7 @@ def clean_redis(session_id):
         "augur:vigil:history:activity_*",
         "augur:vigil:*",
         "augur:nexus:*",
-        "augur:feedback:*",
+        "augur:responsum:*",
     ]:
         keys = r.keys(pattern) or []
         for k in keys:
@@ -140,7 +140,7 @@ def clean_redis(session_id):
         "augur:vigil:history:activity_*",
         "augur:vigil:*",
         "augur:nexus:*",
-        "augur:feedback:*",
+        "augur:responsum:*",
     ]:
         keys = r.keys(pattern) or []
         for k in keys:
@@ -408,7 +408,7 @@ async def test_activity_focus_and_intensity_correlate_cross_domain(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("pipeline", [["feedback"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["responsum"]], indirect=True)
 @pytest.mark.asyncio
 async def test_feedback_keying_separates_focus_and_intensity_tracking(
     pipeline, clean_redis, session_id, nats_conn
@@ -441,13 +441,13 @@ async def test_feedback_keying_separates_focus_and_intensity_tracking(
     await nc.publish("augur.consilium.advice", json.dumps(advice_intensity).encode())
     await nc.flush()
     assert await _wait_until(
-        lambda: len(clean_redis.keys("augur:feedback:*") or []) > 0,
+        lambda: len(clean_redis.keys("augur:responsum:*") or []) > 0,
         timeout_s=10.0,
     ), "feedback keys not created within timeout"
 
     # Strengthened: confirm both activity_focus and activity_intensity advice
     # appear as DISTINCT entries in the same feedback session.
-    all_keys = clean_redis.keys("augur:feedback:*")
+    all_keys = clean_redis.keys("augur:responsum:*")
     seen_domains: set[str] = set()  # domains seen in advice_events
     for k in all_keys:
         # Skip the _index key which is typically a list

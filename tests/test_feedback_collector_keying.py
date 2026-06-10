@@ -13,7 +13,7 @@ from tabula.contracts import PerceptionEvent
 def test_active_tracking_handles_overlapping_entities_across_domains():
     """Two domains, same entity name. The (domain, entity) keying must
     keep their PendingAdvice records distinct."""
-    from perception.feedback_collector import PendingAdvice, TrackingKey
+    from responsum.feedback_collector import PendingAdvice, TrackingKey
 
     # Hand-construct the active_tracking dict the way the run() closure does.
     active_tracking: dict[TrackingKey, PendingAdvice] = {}

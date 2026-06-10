@@ -3,8 +3,8 @@
 import pytest
 
 from tabula.config import AugurConfig
-from perception import feedback_collector as fc
-from perception.feedback_collector import (
+from responsum import feedback_collector as fc
+from responsum.feedback_collector import (
     PendingAdvice,
     PendingGateDecision,
     _should_select_withheld_rating,

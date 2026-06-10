@@ -2,7 +2,7 @@
 threads the detector snapshot into the advice payload, and PendingAdvice freezes
 + serializes it."""
 
-from perception.feedback_collector import PendingAdvice
+from responsum.feedback_collector import PendingAdvice
 from consilium.advisor import _build_advice_event
 
 

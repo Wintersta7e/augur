@@ -1,6 +1,6 @@
 """Session reflection engine — self-adjusts Augur parameters after each session.
 
-Triggers on augur.feedback.complete (end of feedback collection) or
+Triggers on augur.responsum.complete (end of feedback collection) or
 augur.reflect.trigger (manual). Runs four analyses:
 
 1. Precision  — Were anomaly detections accurate? Adjusts sigma threshold.
@@ -48,7 +48,7 @@ log = logging.getLogger("reflection_engine")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SUBJECT_FEEDBACK_COMPLETE = "augur.feedback.complete"
+SUBJECT_FEEDBACK_COMPLETE = "augur.responsum.complete"
 SUBJECT_REFLECT_TRIGGER = "augur.reflect.trigger"
 SUBJECT_REFLECT_COMPLETE = "augur.reflect.complete"
 

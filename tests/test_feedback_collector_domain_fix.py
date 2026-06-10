@@ -1,6 +1,6 @@
 """Tests for the primary_domain fix and new metadata capture in PendingAdvice."""
 
-from perception.feedback_collector import PendingAdvice, _resolve_primary_domain
+from responsum.feedback_collector import PendingAdvice, _resolve_primary_domain
 
 
 def test_pending_advice_records_correct_domain():

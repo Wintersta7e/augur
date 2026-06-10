@@ -136,7 +136,7 @@ async def pipeline(
         "vigil": [sys.executable, "-m", "vigil.anomaly_detector"],
         "nexus": [sys.executable, "-m", "nexus.correlator"],
         "consilium": [sys.executable, "-m", "consilium.advisor"],
-        "feedback": [sys.executable, "-m", "perception.feedback_collector"],
+        "responsum": [sys.executable, "-m", "responsum.feedback_collector"],
         "reflection": [sys.executable, "-m", "reasoning.reflection_engine"],
         "vox": [sys.executable, "-m", "vox.console_display"],
     }

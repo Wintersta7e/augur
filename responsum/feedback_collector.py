@@ -53,7 +53,7 @@ log = logging.getLogger("feedback_collector")
 SUBJECT_ADVICE = "augur.consilium.advice"
 SUBJECT_PERCEPTION = "augur.sensus.>"
 SUBJECT_SESSION_END = "augur.session.end"
-SUBJECT_FEEDBACK_COMPLETE = "augur.feedback.complete"
+SUBJECT_FEEDBACK_COMPLETE = "augur.responsum.complete"
 # Gate suppression (the MRT withheld/control arm). Only gate-decision
 # suppressions are published here; infra non-deliveries use a separate subject
 # so PendingGateDecision never tracks an infra drop (spec §8).

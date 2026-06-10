@@ -40,7 +40,7 @@ from unittest.mock import AsyncMock, MagicMock
 from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
 from vox.console_display import dedup_should_suppress, update_last_rendered
-from perception.feedback_collector import PendingAdvice, _resolve_primary_domain
+from responsum.feedback_collector import PendingAdvice, _resolve_primary_domain
 from limen.gate import Gate, GateDecision, build_signature
 from limen.scheduler import MustFireScheduler
 from consilium.advisor import (

@@ -341,7 +341,7 @@ class TestCOV13FeedbackCollectorAdvicePayloadKeys:
         # to put on the advice payload for the feedback collector to
         # correctly populate PendingAdvice. If any key name drifts,
         # matrix tuning attribution silently breaks.
-        from perception.feedback_collector import PendingAdvice
+        from responsum.feedback_collector import PendingAdvice
 
         advisor_payload = {
             "player": "white",

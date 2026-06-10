@@ -529,8 +529,8 @@ class TestRunReflectionWiring:
         )
         assert "gate" in report["analyses"]
         assert report["analyses"]["gate"]["analysis"] == "gate"
-        # Six analyses total now.
-        assert len(report["analyses"]) == 6
+        # Seven analyses total now (added the memory pass).
+        assert len(report["analyses"]) == 7
 
     @pytest.mark.asyncio
     async def test_gate_pass_independent_of_correlation_marker(self) -> None:

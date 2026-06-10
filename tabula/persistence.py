@@ -34,6 +34,7 @@ MAX_GATE_DELIVERY_FAILURES: int = 500
 # Matches MAX_APP_DESCRIPTORS discipline: new keys beyond this are refused
 # (fail-open / fire-leaning); existing keys keep updating.
 MAX_GATE_STATE_KEYS: int = 2000
+MAX_MEMORY_ITEMS: int = 5000  # refuse-at-cap ceiling for Memoria tier sets (Lane 2)
 
 # Default TTL for per-session Redis keys (feedback, correlation graph,
 # reflection report). Prevents indefinite growth beyond the 1000-entry
@@ -780,3 +781,118 @@ class PersistenceManager:
         if advice_rate is not None:
             pipe.set("augur:limen:advice_rate", json.dumps(advice_rate))
         pipe.execute()
+
+    # ── Memoria memory spine (Lane 2, spec 2026-06-10) ───────────────────────
+    # Dumb transactional storage only; all decay/promote/prune POLICY lives in
+    # the pure memoria/ package. Keys: augur:memoria:{dsr,tier,archive,
+    # processed_sessions}. The processed_sessions SET is both the idempotency
+    # gate and the active-session decay clock (SCARD).
+
+    def save_memory_state(self, memory_id: str, state: dict) -> None:
+        """Insert/update a memory's DSR state + tier index. Keeps the tier
+        index single-membership (drops the other tier first) so a same-key
+        re-save with a changed tier cannot leave a stale index entry."""
+        self._r.set(f"augur:memoria:dsr:{memory_id}", json.dumps(state))
+        other = "cold" if state["tier"] == "warm" else "warm"
+        self._r.srem(f"augur:memoria:tier:{other}", memory_id)
+        self._r.sadd(f"augur:memoria:tier:{state['tier']}", memory_id)
+
+    def load_memory_state(self, memory_id: str) -> dict | None:
+        raw = self._r.get(f"augur:memoria:dsr:{memory_id}")
+        return None if raw is None else json.loads(raw)
+
+    def list_memory_ids(self, tier: str) -> list[str]:
+        # Decode set members: the live connect_redis client has NO
+        # decode_responses=True (tabula/connections.py), so smembers() returns
+        # bytes in production; fakeredis(decode_responses=True) returns str.
+        return sorted(
+            (m.decode() if isinstance(m, bytes) else m)
+            for m in self._r.smembers(f"augur:memoria:tier:{tier}")
+        )
+
+    def load_all_memory_states(self) -> list[dict]:
+        out: list[dict] = []
+        for tier in ("warm", "cold"):
+            for mid in self._r.smembers(f"augur:memoria:tier:{tier}"):
+                mid = mid.decode() if isinstance(mid, bytes) else mid
+                raw = self._r.get(f"augur:memoria:dsr:{mid}")
+                if raw is not None:
+                    out.append(json.loads(raw))
+        return out
+
+    def load_archived_memory(self, memory_id: str) -> dict | None:
+        raw = self._r.get(f"augur:memoria:archive:{memory_id}")
+        return None if raw is None else json.loads(raw)
+
+    def is_session_processed(self, session_id: str) -> bool:
+        return bool(self._r.sismember("augur:memoria:processed_sessions", session_id))
+
+    def active_session_count(self) -> int:
+        return int(self._r.scard("augur:memoria:processed_sessions"))
+
+    def record_memory_review(
+        self, memory_id: str, session_id: str, active_session: int
+    ) -> None:
+        """C2 hook: single-memory recurrence review (load → review → save)."""
+        from tabula.config import AugurConfig
+        from memoria.fsrs import review
+
+        st = self.load_memory_state(memory_id)
+        if st is None:
+            return
+        self.save_memory_state(
+            memory_id, review(st, active_session, session_id, AugurConfig.from_env())
+        )
+
+    def apply_memory_sweep(self, session_id: str, plan) -> bool:
+        """Atomically apply a SweepPlan AND record the session, or no-op.
+
+        Mirrors the save_tuning_state MULTI/EXEC discipline, with a WATCH on
+        processed_sessions so the session is committed exactly once (commit-
+        last: nothing persists until this transaction). Returns False if the
+        session was already processed.
+        """
+        pset = "augur:memoria:processed_sessions"
+        with self._r.pipeline() as pipe:
+            while True:
+                try:
+                    pipe.watch(pset)
+                    if pipe.sismember(pset, session_id):
+                        pipe.unwatch()
+                        return False
+                    pipe.multi()
+                    for st in plan.creates:
+                        pipe.set(f"augur:memoria:dsr:{st['memory_id']}", json.dumps(st))
+                        pipe.sadd(f"augur:memoria:tier:{st['tier']}", st["memory_id"])
+                    for st in plan.reviews:
+                        pipe.set(f"augur:memoria:dsr:{st['memory_id']}", json.dumps(st))
+                    for st in plan.promotions:
+                        pipe.smove(
+                            "augur:memoria:tier:warm",
+                            "augur:memoria:tier:cold",
+                            st["memory_id"],
+                        )
+                        pipe.set(f"augur:memoria:dsr:{st['memory_id']}", json.dumps(st))
+                    for st in plan.demotions:
+                        pipe.smove(
+                            "augur:memoria:tier:cold",
+                            "augur:memoria:tier:warm",
+                            st["memory_id"],
+                        )
+                        pipe.set(f"augur:memoria:dsr:{st['memory_id']}", json.dumps(st))
+                    for st in plan.prunes:
+                        archived = {**st, "status": "archived"}
+                        pipe.set(
+                            f"augur:memoria:archive:{st['memory_id']}",
+                            json.dumps(archived),
+                        )
+                        pipe.srem(f"augur:memoria:tier:{st['tier']}", st["memory_id"])
+                        pipe.delete(f"augur:memoria:dsr:{st['memory_id']}")
+                    pipe.sadd(pset, session_id)
+                    pipe.execute()
+                    return True
+                except redis.WatchError:  # pragma: no cover
+                    # Single-writer in practice (Disciplina reflection_lock); a
+                    # concurrent commit of THIS session is caught by the
+                    # sismember re-check on retry.
+                    continue

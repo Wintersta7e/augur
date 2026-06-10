@@ -1219,6 +1219,56 @@ def analyze_gate(
     }
 
 
+def run_memory_sweep(session_id: str, pm, config) -> dict:
+    """Memoria 7th reflection pass (spec 2026-06-10 §6) — commit-last.
+
+    Ingests advised-correlation patterns from this session's feedback, plans
+    decay/promote/prune via the pure memoria package, and commits atomically.
+    The durable augur:memoria:processed_sessions set is the authoritative
+    idempotency gate AND the active-session clock (SCARD).
+    """
+    from memoria.fsrs import make_memory_id, normalize_severity
+    from memoria.tiers import plan_sweep
+
+    if not config.memory_store_enabled:
+        return {"analysis": "memory", "skipped": True, "reason": "disabled"}
+    if pm.is_session_processed(session_id):
+        return {"analysis": "memory", "skipped": True, "reason": "already_processed"}
+
+    active_session = pm.active_session_count() + 1
+
+    feedback = pm.get_feedback(session_id) or {}
+    observed: dict[str, dict] = {}
+    for ev in feedback.get("advice_events", []):
+        if not ev.get("correlation_found") or ev.get("rule_key") is None:
+            continue  # advised correlations only (skip standalone passthrough)
+        pattern = {
+            "kind": "episodic",
+            "domains": sorted(d.lower() for d in ev.get("involved_domains", [])),
+            "rule_key": ev["rule_key"],
+            "severity": normalize_severity(ev.get("severity")),
+        }
+        mid = make_memory_id(pattern)
+        observed[mid] = {**pattern, "memory_id": mid}
+
+    plan = plan_sweep(
+        pm.load_all_memory_states(),
+        list(observed.values()),
+        active_session,
+        session_id,
+        config,
+    )
+    committed = pm.apply_memory_sweep(session_id, plan)
+    if not committed:
+        return {
+            "analysis": "memory",
+            "skipped": True,
+            "reason": "race_already_processed",
+        }
+    pm.mark_tuning_applied(session_id, pass_name="memory")
+    return {"analysis": "memory", "active_session": active_session, **plan.counts()}
+
+
 # ---------------------------------------------------------------------------
 # Core reflection
 # ---------------------------------------------------------------------------
@@ -1434,6 +1484,20 @@ async def run_reflection(
         gate = {"analysis": "gate", "error": "exception", "reason": str(exc)}
         log.error("Gate offline pass failed: %s", exc)
 
+    # 7. Memory spine pass (Lane 2, spec 2026-06-10) — own idempotency via the
+    # durable processed_sessions set; independent of the other markers.
+    try:
+        memory = run_memory_sweep(session_id, pm, config)
+        log.info(
+            "Memory sweep: %s",
+            memory.get("reason")
+            or f"created={memory.get('created')} reviewed={memory.get('reviewed')} "
+            f"promoted={memory.get('promoted')} archived={memory.get('archived')}",
+        )
+    except redis.RedisError as exc:
+        memory = {"analysis": "memory", "error": "exception", "reason": str(exc)}
+        log.error("Memory sweep failed: %s", exc)
+
     # Build report
     report = {
         "session_id": session_id,
@@ -1445,6 +1509,7 @@ async def run_reflection(
             "correlation_tuning": matrix_tuning,
             "correlation_window_tuning": window_tuning,
             "gate": gate,
+            "memory": memory,
         },
         "adjustments": {
             "sigma_adjusted": any_sigma_adjusted,

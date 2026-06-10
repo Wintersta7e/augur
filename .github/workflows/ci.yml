@@ -48,12 +48,12 @@ jobs:
         run: |
           mypy --ignore-missing-imports --no-strict-optional \
             --explicit-package-bases \
-            tabula/ vigil/ nexus/ consilium/ limen/ disciplina/ responsum/ sensus/ vox/ augur_mcp/
+            tabula/ vigil/ nexus/ consilium/ limen/ disciplina/ memoria/ responsum/ sensus/ vox/ augur_mcp/
 
       - name: Run unit tests
         run: |
           pytest tests/ --ignore=tests/integration -v \
-            --cov=tabula --cov=vigil --cov=nexus --cov=consilium --cov=limen --cov=disciplina \
+            --cov=tabula --cov=vigil --cov=nexus --cov=consilium --cov=limen --cov=disciplina --cov=memoria \
             --cov=responsum --cov=sensus --cov=vox --cov=augur_mcp \
             --cov-report=xml --cov-report=term
 
@@ -64,6 +64,14 @@ jobs:
           name: coverage-xml
           path: coverage.xml
           retention-days: 14
+
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v6
+        with:
+          files: coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
 
   integration:
     name: Fast integration tests
@@ -142,4 +150,4 @@ jobs:
 
       - name: Smoke-import core modules
         run: |
-          docker run --rm augur:ci python -c "import tabula.config; import sensus.activity_monitor; import vigil.anomaly_detector; import nexus.correlator; import consilium.advisor; import limen.gate; import responsum.feedback_collector; import disciplina.reflection_engine; import vox.console_display; import augur_mcp.augur_server; print('core modules import OK')"
+          docker run --rm augur:ci python -c "import tabula.config; import sensus.activity_monitor; import vigil.anomaly_detector; import nexus.correlator; import consilium.advisor; import limen.gate; import responsum.feedback_collector; import disciplina.reflection_engine; import memoria.tiers; import vox.console_display; import augur_mcp.augur_server; print('core modules import OK')"

@@ -30,6 +30,7 @@ from tabula.persistence import PersistenceManager
 async def _drive(
     monkeypatch: pytest.MonkeyPatch,
     feed: Any,
+    stdin_reader: Any = None,
 ) -> dict[str, Any]:
     """Start run(), capture subscriber closures, run a feed coroutine.
 
@@ -45,6 +46,7 @@ async def _drive(
         fc.SUBJECT_PERCEPTION: "on_perception",
         fc.SUBJECT_SESSION_END: "on_session_end",
         fc.SUBJECT_SUPPRESSED: "on_suppressed",
+        fc.SUBJECT_FEEDBACK: "on_feedback",
     }
 
     async def fake_subscribe(subject: str, cb: Any) -> MagicMock:
@@ -77,7 +79,7 @@ async def _drive(
     async def fake_read(_timeout: float) -> str:
         return "s"
 
-    monkeypatch.setattr(fc, "read_stdin_with_timeout", fake_read)
+    monkeypatch.setattr(fc, "read_stdin_with_timeout", stdin_reader or fake_read)
 
     task = asyncio.create_task(fc.run())
     for _ in range(50):
@@ -111,6 +113,12 @@ def _advice_msg(player: str, decision_id: str) -> MagicMock:
             "decision_id": decision_id,
         }
     ).encode()
+    return msg
+
+
+def _feedback_msg(**fields: Any) -> MagicMock:
+    msg = MagicMock()
+    msg.data = json.dumps(fields).encode()
     return msg
 
 
@@ -187,3 +195,104 @@ async def test_empty_session_end_still_rotates(
     # Only the real session publishes a complete; it carries the FRESH id.
     assert len(completes) == 1
     assert completes[0]["data"]["session_id"] == "sess-real"
+
+
+# ── on_feedback (headless explicit-feedback path) ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_on_feedback_sets_rating_by_decision_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def feed(cap: dict, ctx: dict) -> None:
+        _set_session(ctx["redis"], "sess-1")
+        await cap["on_advice"](_advice_msg("white", "dec-1"))
+        await cap["on_feedback"](_feedback_msg(decision_id="dec-1", rating="n"))
+        await cap["on_session_end"](MagicMock())
+
+    ctx = await _drive(monkeypatch, feed)
+    fb = ctx["pm"].get_feedback("sess-1")
+    assert fb["advice_events"][0]["explicit_rating"] == "n"
+
+
+@pytest.mark.asyncio
+async def test_on_feedback_ignores_unknown_decision_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def feed(cap: dict, ctx: dict) -> None:
+        _set_session(ctx["redis"], "sess-1")
+        await cap["on_advice"](_advice_msg("white", "dec-1"))
+        await cap["on_feedback"](_feedback_msg(decision_id="nope", rating="y"))
+        await cap["on_session_end"](MagicMock())
+
+    ctx = await _drive(monkeypatch, feed)
+    fb = ctx["pm"].get_feedback("sess-1")
+    # Unmatched feedback is a no-op: the advice keeps its default rating.
+    assert fb["advice_events"][0]["explicit_rating"] == "no_response"
+
+
+@pytest.mark.asyncio
+async def test_on_feedback_rejects_invalid_rating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def feed(cap: dict, ctx: dict) -> None:
+        _set_session(ctx["redis"], "sess-1")
+        await cap["on_advice"](_advice_msg("white", "dec-1"))
+        await cap["on_feedback"](_feedback_msg(decision_id="dec-1", rating="maybe"))
+        await cap["on_session_end"](MagicMock())
+
+    ctx = await _drive(monkeypatch, feed)
+    fb = ctx["pm"].get_feedback("sess-1")
+    # Invalid rating rejected before mutation: rating unchanged.
+    assert fb["advice_events"][0]["explicit_rating"] == "no_response"
+
+
+@pytest.mark.asyncio
+async def test_on_feedback_matches_by_advice_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # on_advice generates the advice_id; capture it via the saved record, then
+    # confirm on_feedback can target it by advice_id when decision_id is absent.
+    async def feed(cap: dict, ctx: dict) -> None:
+        _set_session(ctx["redis"], "sess-1")
+        await cap["on_advice"](_advice_msg("white", "dec-1"))
+        # Read back the assigned advice_id from the intermediate save.
+        fb = ctx["pm"].get_feedback("sess-1")
+        advice_id = fb["advice_events"][0]["advice_id"]
+        await cap["on_feedback"](_feedback_msg(advice_id=advice_id, rating="y"))
+        await cap["on_session_end"](MagicMock())
+
+    ctx = await _drive(monkeypatch, feed)
+    fb = ctx["pm"].get_feedback("sess-1")
+    assert fb["advice_events"][0]["explicit_rating"] == "y"
+
+
+@pytest.mark.asyncio
+async def test_stdin_timeout_does_not_clobber_out_of_band_rating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Race regression: on_advice appends the PendingAdvice, then awaits the
+    # stdin prompt for up to EXPLICIT_TIMEOUT_S. With an open-but-idle stdin
+    # (TTY allocated, unattended) the read times out (returns None). If an
+    # out-of-band rating arrives via on_feedback DURING that window, the
+    # else-branch must NOT overwrite it back to 'no_response' — that would
+    # silently lose the operator's headless feedback, defeating the whole
+    # submit_feedback feature. Here the patched stdin reader fires on_feedback
+    # mid-await (rating 'y'), then returns None to hit the timeout/else-branch.
+    holder: dict[str, Any] = {}
+
+    async def stdin_injects_feedback(_timeout: float) -> None:
+        # Simulate a headless rating landing in the stdin-await window.
+        await holder["on_feedback"](_feedback_msg(decision_id="dec-1", rating="y"))
+        return None  # idle stdin times out -> on_advice falls to else-branch
+
+    async def feed(cap: dict, ctx: dict) -> None:
+        holder["on_feedback"] = cap["on_feedback"]
+        _set_session(ctx["redis"], "sess-1")
+        await cap["on_advice"](_advice_msg("white", "dec-1"))
+        await cap["on_session_end"](MagicMock())
+
+    ctx = await _drive(monkeypatch, feed, stdin_reader=stdin_injects_feedback)
+    fb = ctx["pm"].get_feedback("sess-1")
+    # The out-of-band 'y' must survive the stdin timeout, not be reset.
+    assert fb["advice_events"][0]["explicit_rating"] == "y"

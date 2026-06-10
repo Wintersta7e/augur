@@ -36,11 +36,11 @@ async def _list_tools():
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_tool_count_is_24():
-    """Tool count must be 24 after adding get_pipeline_health."""
+def test_mcp_tool_count_is_25():
+    """Tool count must be 25 after adding submit_feedback."""
     tools = asyncio.run(_list_tools())
-    assert len(tools) == 24, (
-        f"Expected 24 MCP tools, got {len(tools)}: {[t.name for t in tools]}"
+    assert len(tools) == 25, (
+        f"Expected 25 MCP tools, got {len(tools)}: {[t.name for t in tools]}"
     )
 
 

@@ -55,6 +55,11 @@ SUBJECT_ADVICE = "augur.consilium.advice"
 SUBJECT_PERCEPTION = "augur.sensus.>"
 SUBJECT_SESSION_END = "augur.session.end"
 SUBJECT_FEEDBACK_COMPLETE = "augur.responsum.complete"
+# Headless explicit-feedback ingress: a y/n/no_response rating for an in-flight
+# decision, keyed by decision_id (or advice_id). The TTY stdin prompt has no
+# TTY in a container, so this subject (fed by the MCP submit_feedback tool)
+# carries the explicit signal Disciplina's matrix self-tuning needs.
+SUBJECT_FEEDBACK = "augur.responsum.feedback"
 # Gate suppression (the MRT withheld/control arm). Only gate-decision
 # suppressions are published here; infra non-deliveries use a separate subject
 # so PendingGateDecision never tracks an infra drop (spec §8).
@@ -694,8 +699,13 @@ async def run() -> None:
             pending.explicit_rating = "no_response"
             print(f"{GRAY}Skipped{RESET}", flush=True)
         else:
-            pending.explicit_rating = "no_response"
-            print(f"\n{GRAY}No response — logged as neutral{RESET}", flush=True)
+            # Do NOT overwrite a rating set out-of-band by on_feedback during the
+            # stdin window: the headless submit_feedback path may have recorded
+            # 'y'/'n' while we were awaiting an idle/open stdin that timed out.
+            # The field already defaults to 'no_response', so only the message is
+            # needed here (guarded so a real rating survives the timeout).
+            if pending.explicit_rating == "no_response":
+                print(f"\n{GRAY}No response — logged as neutral{RESET}", flush=True)
 
         # Save intermediate feedback
         save_current_feedback()
@@ -896,6 +906,50 @@ async def run() -> None:
         tracked_decision_ids.clear()
         current_session_id = None
 
+    # -- Headless explicit-feedback handler ----------------------------------
+    async def on_feedback(msg: nats.aio.client.Msg) -> None:
+        # Out-of-band explicit rating (the container has no TTY for the stdin
+        # prompt). Targets an in-flight PendingAdvice by decision_id or
+        # advice_id and records its explicit_rating, then persists so the
+        # rating survives a crash and reaches Disciplina's matrix self-tuning.
+        try:
+            data = json.loads(msg.data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        decision_id = data.get("decision_id")
+        advice_id = data.get("advice_id")
+        rating = data.get("rating")
+        if rating not in ("y", "n", "no_response"):
+            log.error("on_feedback: invalid rating %r; skipping", rating)
+            return
+
+        target = next(
+            (
+                a
+                for a in advice_events
+                if (decision_id and a.decision_id == decision_id)
+                or (advice_id and a.advice_id == advice_id)
+            ),
+            None,
+        )
+        if target is None:
+            log.debug(
+                "on_feedback: no pending advice for decision_id=%r advice_id=%r",
+                decision_id,
+                advice_id,
+            )
+            return
+
+        target.explicit_rating = rating
+        save_current_feedback()
+        log.info(
+            "Recorded explicit feedback %r for decision_id=%r advice_id=%r",
+            rating,
+            target.decision_id,
+            target.advice_id,
+        )
+
     # -- Subscribe -----------------------------------------------------------
     # R2-LEAK-01: save subscription handles so unsubscribe() is called on
     # shutdown rather than relying on nc.close() to tear them down abruptly.
@@ -906,13 +960,15 @@ async def run() -> None:
     sub_perception = await nc.subscribe(SUBJECT_PERCEPTION, cb=on_perception)
     sub_session_end = await nc.subscribe(SUBJECT_SESSION_END, cb=on_session_end)
     sub_suppressed = await nc.subscribe(SUBJECT_SUPPRESSED, cb=on_suppressed)
+    sub_feedback = await nc.subscribe(SUBJECT_FEEDBACK, cb=on_feedback)
 
     log.info(
-        "Subscribed to: %s, %s, %s, %s",
+        "Subscribed to: %s, %s, %s, %s, %s",
         SUBJECT_ADVICE,
         SUBJECT_PERCEPTION,
         SUBJECT_SESSION_END,
         SUBJECT_SUPPRESSED,
+        SUBJECT_FEEDBACK,
     )
     log.info("Waiting for advice events...")
 
@@ -933,6 +989,7 @@ async def run() -> None:
             await sub_perception.unsubscribe()
             await sub_session_end.unsubscribe()
             await sub_suppressed.unsubscribe()
+            await sub_feedback.unsubscribe()
         except Exception as exc:
             log.debug("Unsubscribe failed during shutdown: %s", exc)
         await nc.close()

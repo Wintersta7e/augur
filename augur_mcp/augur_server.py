@@ -964,6 +964,53 @@ async def trigger_reflection(session_id: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
+async def submit_feedback(decision_id: str, rating: str) -> dict[str, Any]:
+    """Submit an explicit y/n rating for a decision (headless feedback path).
+
+    The interactive stdin prompt in the feedback collector has no TTY in a
+    container, so deployed advice always logs no_response. This tool publishes
+    an out-of-band explicit rating to augur.responsum.feedback, where the
+    collector matches it to the in-flight advice by decision_id and records the
+    rating. That explicit signal is what lets Disciplina's matrix self-tuning
+    cross the disable threshold and flip a noisy correlation rule to LOW.
+
+    Args:
+        decision_id: The decision_id carried by the advice to rate.
+        rating: One of "y" (useful), "n" (not useful), or "no_response".
+
+    Returns:
+        Dict with 'status' and 'decision_id', or {'error': ...} on a bad rating.
+    """
+    if rating not in {"y", "n", "no_response"}:
+        return {"error": f"invalid rating {rating!r}; expected y, n, or no_response"}
+
+    payload = json.dumps({"decision_id": decision_id, "rating": rating}).encode()
+
+    # LEAK-04: guarantee nc.close() even if publish raises.
+    try:
+        nc = await asyncio.wait_for(
+            nats_client.connect(
+                _config.nats_url,
+                connect_timeout=_config.nats_connect_timeout,
+            ),
+            timeout=_config.nats_connect_timeout + 1,
+        )
+    except Exception as exc:
+        return {"status": "error", "error": f"NATS connect failed: {exc}"}
+
+    try:
+        await nc.publish("augur.responsum.feedback", payload)
+        return {"status": "submitted", "decision_id": decision_id}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+    finally:
+        try:
+            await nc.close()
+        except Exception as exc:
+            log.debug("NATS close failed after submit_feedback: %s", exc)
+
+
+@mcp.tool()
 def flush_state(confirm: bool = False) -> dict[str, Any]:
     """Delete all augur:* keys from Redis.
 

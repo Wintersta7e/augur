@@ -1,0 +1,16 @@
+# Codecov configuration — informational only.
+# Coverage is a signal, not a gate: a personal research project shouldn't fail
+# CI on a coverage delta. The status checks are reported but never block.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+# The test suite and the manual infra smoke scripts are not production code.
+ignore:
+  - "tests/"
+  - "infrastructure/"

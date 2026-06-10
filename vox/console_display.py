@@ -18,6 +18,7 @@ import nats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tabula.config import AugurConfig  # noqa: E402
+from tabula.heartbeat import start_heartbeat  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging (minimal — this module IS the display)
@@ -468,6 +469,11 @@ async def run() -> None:
     nc = await nats.connect(
         config.nats_url, connect_timeout=config.nats_connect_timeout
     )
+    hb_task = (
+        start_heartbeat(nc, "vox", config.praefectus_heartbeat_interval_s)
+        if config.praefectus_enabled
+        else None
+    )
 
     last_rendered: dict[str, tuple[str, str]] = {}
 
@@ -543,6 +549,8 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        if hb_task is not None:
+            hb_task.cancel()
         try:
             await sub_anomaly.unsubscribe()
             await sub_correlation.unsubscribe()

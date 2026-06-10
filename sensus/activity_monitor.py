@@ -715,6 +715,7 @@ def main() -> None:  # pragma: no cover - CLI entrypoint
     # Lazy imports for runtime-only paths (keeps tests importable).
     from tabula.config import AugurConfig
     from tabula.connections import connect_redis
+    from tabula.heartbeat import start_heartbeat
     import nats
 
     logging.basicConfig(
@@ -749,10 +750,19 @@ def main() -> None:  # pragma: no cover - CLI entrypoint
         nc = await nats.connect(
             config.nats_url, connect_timeout=config.nats_connect_timeout
         )
+        hb_task = (
+            start_heartbeat(
+                nc, "sensus.activity", config.praefectus_heartbeat_interval_s
+            )
+            if config.praefectus_enabled
+            else None
+        )
         mon = ActivityMonitor(config, redis_client, nc)
         try:
             await mon.run()
         finally:
+            if hb_task is not None:
+                hb_task.cancel()
             await nc.drain()
 
     asyncio.run(_run())

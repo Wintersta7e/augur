@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tabula.config import AugurConfig
 from tabula.connections import connect_redis
 from tabula.contracts import PerceptionEvent
+from tabula.heartbeat import start_heartbeat
 from tabula.persistence import PersistenceManager
 from tabula.session import SessionManager
 
@@ -177,6 +178,11 @@ async def run() -> None:
     nc = await nats.connect(
         config.nats_url, connect_timeout=config.nats_connect_timeout
     )
+    hb_task = (
+        start_heartbeat(nc, "sensus.typing", config.praefectus_heartbeat_interval_s)
+        if config.praefectus_enabled
+        else None
+    )
     log.info("NATS connected (%s)", config.nats_url)
 
     # Publish session start
@@ -317,6 +323,8 @@ async def run() -> None:
     except (asyncio.CancelledError, KeyboardInterrupt):
         pass
     finally:
+        if hb_task is not None:
+            hb_task.cancel()
         keyboard.unhook_all()
         log.info("Keyboard hooks removed")
 

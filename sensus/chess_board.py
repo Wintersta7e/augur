@@ -356,6 +356,9 @@ def main() -> None:
         log.error("Cannot connect to NATS: %s", exc)
         sys.exit(1)
 
+    if config.praefectus_enabled:
+        nats_pub.start_heartbeat("sensus.chess", config.praefectus_heartbeat_interval_s)
+
     # Session management
     session_mgr = SessionManager(redis_client)
     session_id = session_mgr.start()
@@ -517,6 +520,7 @@ def main() -> None:
         log.error("Failed to publish session end: %s", exc)
 
     # Cleanup
+    nats_pub.stop_heartbeat()  # no-op if never started
     nats_pub.close()
     pygame.quit()
 

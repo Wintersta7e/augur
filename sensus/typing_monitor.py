@@ -2,10 +2,10 @@
 
 Captures system-wide keypresses via the 'keyboard' library, tracks
 inter-keypress intervals, detects pauses (> 3s gaps), and publishes
-PerceptionEvents to NATS on 'augur.perception.typing'.
+PerceptionEvents to NATS on 'augur.sensus.typing'.
 
 Requires root on Linux (keyboard library needs /dev/input access).
-Run with: sudo .venv/bin/python perception/typing_monitor.py
+Run with: sudo .venv/bin/python sensus/typing_monitor.py
 """
 
 from __future__ import annotations
@@ -24,11 +24,11 @@ import nats
 import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from blackboard.config import AugurConfig
-from blackboard.connections import connect_redis
-from blackboard.contracts import PerceptionEvent
-from blackboard.persistence import PersistenceManager
-from blackboard.session import SessionManager
+from tabula.config import AugurConfig
+from tabula.connections import connect_redis
+from tabula.contracts import PerceptionEvent
+from tabula.persistence import PersistenceManager
+from tabula.session import SessionManager
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -42,7 +42,7 @@ log = logging.getLogger("typing_monitor")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-NATS_SUBJECT = "augur.perception.typing"
+NATS_SUBJECT = "augur.sensus.typing"
 
 DOMAIN = "typing"
 STREAM_ID = "typing_rhythm"

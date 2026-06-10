@@ -12,14 +12,14 @@ import json
 from unittest.mock import MagicMock
 
 
-from blackboard.config import AugurConfig
-from reasoning.correlator import (
+from tabula.config import AugurConfig
+from nexus.correlator import (
     DEFAULT_ESCALATION_MATRIX,
     _build_correlation_payload,
     _build_passthrough_payload,
     correlate,
 )
-from reasoning.reflection_engine import (
+from disciplina.reflection_engine import (
     analyze_correlation_tuning,
     analyze_utility,
 )
@@ -341,7 +341,7 @@ class TestCOV13FeedbackCollectorAdvicePayloadKeys:
         # to put on the advice payload for the feedback collector to
         # correctly populate PendingAdvice. If any key name drifts,
         # matrix tuning attribution silently breaks.
-        from perception.feedback_collector import PendingAdvice
+        from responsum.feedback_collector import PendingAdvice
 
         advisor_payload = {
             "player": "white",

@@ -2,7 +2,7 @@ import logging
 
 import pytest
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 
 
 def test_gate_defaults_present():

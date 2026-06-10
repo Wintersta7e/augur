@@ -22,10 +22,10 @@ import nats
 import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from blackboard.config import AugurConfig
-from blackboard.connections import connect_redis
-from blackboard.contracts import PerceptionEvent
-from blackboard.persistence import PersistenceManager
+from tabula.config import AugurConfig
+from tabula.connections import connect_redis
+from tabula.contracts import PerceptionEvent
+from tabula.persistence import PersistenceManager
 
 
 # ---------------------------------------------------------------------------
@@ -50,14 +50,14 @@ log = logging.getLogger("feedback_collector")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SUBJECT_ADVICE = "augur.reasoning.advice"
-SUBJECT_PERCEPTION = "augur.perception.>"
+SUBJECT_ADVICE = "augur.consilium.advice"
+SUBJECT_PERCEPTION = "augur.sensus.>"
 SUBJECT_SESSION_END = "augur.session.end"
-SUBJECT_FEEDBACK_COMPLETE = "augur.feedback.complete"
+SUBJECT_FEEDBACK_COMPLETE = "augur.responsum.complete"
 # Gate suppression (the MRT withheld/control arm). Only gate-decision
 # suppressions are published here; infra non-deliveries use a separate subject
 # so PendingGateDecision never tracks an infra drop (spec §8).
-SUBJECT_SUPPRESSED = "augur.advisor.suppressed"
+SUBJECT_SUPPRESSED = "augur.limen.suppressed"
 
 EXPLICIT_TIMEOUT_S = 10
 POST_ADVICE_TRACK_MOVES = 3
@@ -347,7 +347,7 @@ class PendingAdvice(_BehavioralTracker):
 class PendingGateDecision(_BehavioralTracker):
     """Tracks one gate-withheld decision for the MRT control arm.
 
-    Created only from ``augur.advisor.suppressed`` (gate suppressions). Carries
+    Created only from ``augur.limen.suppressed`` (gate suppressions). Carries
     the same post-decision behavioral tracking as ``PendingAdvice`` so the MRT
     compares the same outcome across the fired and withheld arms, joined by
     ``decision_id``. Probe-fired decisions get NO ``PendingGateDecision`` (a
@@ -494,11 +494,11 @@ async def run() -> None:
     # (domain, entity); one tracker per decision_id (spec §9: never two).
     active_tracking: dict[TrackingKey, PendingAdvice | PendingGateDecision] = {}
     # decision_ids already tracked (either arm) — dedup so a re-published
-    # augur.advisor.suppressed never creates a second PendingGateDecision.
+    # augur.limen.suppressed never creates a second PendingGateDecision.
     tracked_decision_ids: set[str] = set()
 
     def get_session_id() -> str:
-        # Intentionally laxer than blackboard.session.get_active_session:
+        # Intentionally laxer than tabula.session.get_active_session:
         # accepts ended sessions (so late-arriving feedback for a just-ended
         # session is still attributed correctly) and falls back to a fresh
         # uuid rather than dropping feedback on a session-record race.
@@ -633,7 +633,7 @@ async def run() -> None:
             min_observations=config.min_observations,
         )
         advice_events.append(pending)
-        # Mark the decision_id tracked so a re-published augur.advisor.suppressed
+        # Mark the decision_id tracked so a re-published augur.limen.suppressed
         # for the same decision never also creates a PendingGateDecision (spec
         # §9: one tracker per decision_id — a probe-fire is tracked here only).
         if decision_id:

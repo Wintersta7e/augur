@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from reasoning.advisor_gate import Gate, build_signature
+from limen.gate import Gate, build_signature
 from tests.conftest import EXEMPT_PAYLOAD, SINGLE_HIGH_TYPING, SINGLE_MEDIUM_TYPING
 
 
@@ -164,7 +164,7 @@ def test_refractory_duplicate_ignores_probe_same_state_key(fake_pm, cfg):
 
 def test_refractory_disabled_passes(fake_pm):
     """When gate_refractory_enabled is False, the arm never suppresses."""
-    from blackboard.config import AugurConfig
+    from tabula.config import AugurConfig
 
     cfg = AugurConfig(gate_refractory_enabled=False)
     fake_pm.save_emission(_emit("single:chess:user", "medium", ts=100.0))
@@ -283,7 +283,7 @@ def test_novelty_high_bypasses(fake_pm, cfg):
 
 def test_novelty_disabled_passes(fake_pm):
     """When gate_novelty_enabled is False, the arm never suppresses."""
-    from blackboard.config import AugurConfig
+    from tabula.config import AugurConfig
 
     cfg = AugurConfig(gate_novelty_enabled=False)
     _seed_observed(fake_pm, "single:typing:user", [2.0, 2.0, 2.0])
@@ -385,7 +385,7 @@ def test_habituation_high_punches_through_at_h_near_one(fake_pm, cfg):
 
 def test_habituation_disabled_passes(fake_pm):
     """When gate_habituation_enabled is False, the arm never suppresses."""
-    from blackboard.config import AugurConfig
+    from tabula.config import AugurConfig
 
     cfg = AugurConfig(gate_habituation_enabled=False)
     fake_pm.save_habituation(
@@ -509,7 +509,7 @@ def test_reservoir_committed_channel_re_suppresses_below_off(fake_pm, cfg):
 
 def test_reservoir_disabled_passes(fake_pm):
     """When gate_reservoir_enabled is False, the arm never suppresses."""
-    from blackboard.config import AugurConfig
+    from tabula.config import AugurConfig
 
     # cost_tier off too so the reservoir pass-through stays a plain fire.
     cfg = AugurConfig(gate_reservoir_enabled=False, gate_cost_tier_enabled=False)
@@ -554,7 +554,7 @@ def _cred_cfg():
     would otherwise hold a fresh single+medium before the credibility arm (Arm 6)
     is reached.  Disabling it isolates Arm 6 under the real evaluate pipeline.
     """
-    from blackboard.config import AugurConfig
+    from tabula.config import AugurConfig
 
     return AugurConfig(gate_reservoir_enabled=False)
 
@@ -686,7 +686,7 @@ def test_credibility_behavioral_fusion_applies_when_eligible(fake_pm):
     ``test_bet_hedge_*`` tests); otherwise Arm 8 would consume a second rng draw
     and overwrite ``p_withhold`` with ``1 - ε``.
     """
-    from blackboard.config import AugurConfig
+    from tabula.config import AugurConfig
 
     cfg = AugurConfig(gate_reservoir_enabled=False, gate_bet_hedge_enabled=False)
     _seed_credibility(
@@ -829,7 +829,7 @@ def test_credibility_high_bypasses_low_credibility_class(fake_pm, cfg):
 
 def test_credibility_disabled_passes(fake_pm):
     """When gate_credibility_enabled is False, the arm never suppresses."""
-    from blackboard.config import AugurConfig
+    from tabula.config import AugurConfig
 
     cfg = AugurConfig(gate_credibility_enabled=False)
     _seed_credibility(fake_pm, "typing:medium", cred=0.0, n=50, last_fb_ts=1.0)
@@ -885,7 +885,7 @@ def test_arm_precedence_first_suppressor_wins(fake_pm):
     habituation → reservoir → credibility), proving evaluate returns the FIRST
     suppressor and that the pipeline order matches the spec.
     """
-    from blackboard.config import AugurConfig
+    from tabula.config import AugurConfig
 
     _seed_all_suppressors(fake_pm)
     g = Gate()
@@ -950,7 +950,7 @@ def test_arm_precedence_first_suppressor_wins(fake_pm):
 
 def test_arm_precedence_all_disabled_fires(fake_pm):
     """With every suppressor disabled, the seeded channel passes all arms → fire."""
-    from blackboard.config import AugurConfig
+    from tabula.config import AugurConfig
 
     _seed_all_suppressors(fake_pm)
     cfg = AugurConfig(
@@ -1011,7 +1011,7 @@ def _all_phase1_disabled(**extra) -> "object":
     suppressors keeps these tests pinned to the cost-tier modifier alone even if
     state leaks in.
     """
-    from blackboard.config import AugurConfig
+    from tabula.config import AugurConfig
 
     return AugurConfig(
         gate_central_tolerance_enabled=False,
@@ -1149,7 +1149,7 @@ def _bet_hedge_cfg(**extra):
     produced, so the upstream reservoir arm (which would otherwise hold a fresh
     single+medium first) is disabled, mirroring ``_cred_cfg``.
     """
-    from blackboard.config import AugurConfig
+    from tabula.config import AugurConfig
 
     return AugurConfig(gate_reservoir_enabled=False, **extra)
 
@@ -1341,7 +1341,7 @@ def _seed_channel_stats(fake_pm, state_key, **entry):
 def _starve_cfg(**extra):
     """Config isolating Arm 9: reservoir off so the credibility arm produces the
     behavioral-driven SUPPRESS that Arm 9 then releases (mirrors _bet_hedge_cfg)."""
-    from blackboard.config import AugurConfig
+    from tabula.config import AugurConfig
 
     return AugurConfig(gate_reservoir_enabled=False, **extra)
 

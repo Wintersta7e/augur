@@ -15,8 +15,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import perception.feedback_collector as fc
-from perception.feedback_collector import PendingAdvice
+import responsum.feedback_collector as fc
+from responsum.feedback_collector import PendingAdvice
 
 
 def _base_kwargs() -> dict[str, Any]:
@@ -226,7 +226,7 @@ async def test_on_advice_gate_fields_default_when_absent(
 
 
 def _suppressed_payload(**overrides: Any) -> dict[str, Any]:
-    """A full §8 augur.advisor.suppressed payload (primary domain+entity)."""
+    """A full §8 augur.limen.suppressed payload (primary domain+entity)."""
     payload = {
         "decision_id": "dec-w001",
         "state_key": "single:chess:white:medium",
@@ -248,7 +248,7 @@ def _suppressed_payload(**overrides: Any) -> dict[str, Any]:
 
 class TestPendingGateDecision:
     def test_carries_core_fields(self) -> None:
-        from perception.feedback_collector import PendingGateDecision
+        from responsum.feedback_collector import PendingGateDecision
 
         d = PendingGateDecision(
             decision_id="dec-w001",
@@ -273,7 +273,7 @@ class TestPendingGateDecision:
         assert d.reason == "habituated channel"
 
     def test_to_record_has_spec_fields(self) -> None:
-        from perception.feedback_collector import PendingGateDecision
+        from responsum.feedback_collector import PendingGateDecision
 
         d = PendingGateDecision(
             decision_id="dec-w001",
@@ -309,7 +309,7 @@ class TestPendingGateDecision:
 
     def test_behavioral_score_matches_pending_advice(self) -> None:
         # Same post-decision behavioral-score computation as PendingAdvice.
-        from perception.feedback_collector import PendingGateDecision
+        from responsum.feedback_collector import PendingGateDecision
 
         kwargs = dict(
             domain="chess",
@@ -521,7 +521,7 @@ async def test_session_summary_counts_both(
 async def test_single_tracker_per_decision_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Two augur.advisor.suppressed messages for the same decision_id must
+    # Two augur.limen.suppressed messages for the same decision_id must
     # create exactly ONE PendingGateDecision tracker.
     async def feed(cap: dict, ctx: dict) -> None:
         await cap["on_suppressed"](_suppressed_msg(decision_id="dup-1"))

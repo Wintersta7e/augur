@@ -1,6 +1,6 @@
 """Test that the advisor forwards new correlation payload fields into advice."""
 
-from reasoning.augur_advisor import _build_advice_event
+from consilium.advisor import _build_advice_event
 
 
 def _make_correlation_payload() -> dict:

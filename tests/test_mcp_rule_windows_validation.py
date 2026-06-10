@@ -14,7 +14,7 @@ def _call_validate(rules, rule_windows=None, version="1.0"):
     if err:
         return err
     if rule_windows is not None:
-        from blackboard.config import AugurConfig
+        from tabula.config import AugurConfig
 
         return _validate_escalation_matrix_rule_windows(
             rule_windows, AugurConfig.from_env()
@@ -29,7 +29,7 @@ def test_max_escalation_rules_bumped_to_40():
 
 
 def test_rules_count_under_new_cap_accepted():
-    from reasoning.correlator import DEFAULT_ESCALATION_MATRIX
+    from nexus.correlator import DEFAULT_ESCALATION_MATRIX
 
     err = _call_validate(DEFAULT_ESCALATION_MATRIX["rules"])
     assert err is None  # 16 rules <= 40 cap

@@ -2,7 +2,7 @@
 
 import pytest
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 
 
 def test_measurement_defaults():

@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 
-from reasoning.correlator import DEFAULT_ESCALATION_MATRIX, ensure_matrix_seeded
+from nexus.correlator import DEFAULT_ESCALATION_MATRIX, ensure_matrix_seeded
 
 
 def test_default_matrix_contains_pairwise_rules():

@@ -1,8 +1,8 @@
 """Activity perception daemon — Windows-side, publishes to WSL NATS.
 
 Emits two PerceptionEvent streams:
-  * augur.perception.activity_focus     — on every active-window change
-  * augur.perception.activity_intensity — every activity_sampling_s seconds
+  * augur.sensus.activity_focus     — on every active-window change
+  * augur.sensus.activity_intensity — every activity_sampling_s seconds
 
 Windows-only at runtime (Win32 hooks + global input listeners), but the
 module is intentionally importable on Linux CI so unit tests can patch
@@ -10,7 +10,7 @@ the OS deps via sys.modules injection.
 
 Run on the Windows host:
     pip install -r requirements-windows.txt
-    python -m perception.activity_monitor
+    python -m sensus.activity_monitor
 """
 
 from __future__ import annotations
@@ -28,8 +28,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from blackboard.contracts import PerceptionEvent
-from blackboard.session import get_active_session
+from tabula.contracts import PerceptionEvent
+from tabula.session import get_active_session
 
 log = logging.getLogger("activity_monitor")
 
@@ -419,8 +419,8 @@ def _probe_redis_reachable(redis_url: str, timeout_s: float = 5.0) -> bool:
 class ActivityMonitor:
     """Windows-host daemon. Composes the helpers above + NATS/Redis I/O."""
 
-    SUBJECT_FOCUS = "augur.perception.activity_focus"
-    SUBJECT_INTENSITY = "augur.perception.activity_intensity"
+    SUBJECT_FOCUS = "augur.sensus.activity_focus"
+    SUBJECT_INTENSITY = "augur.sensus.activity_intensity"
 
     def __init__(
         self,
@@ -704,8 +704,8 @@ def main() -> None:  # pragma: no cover - CLI entrypoint
         sys.exit(2)
 
     # Lazy imports for runtime-only paths (keeps tests importable).
-    from blackboard.config import AugurConfig
-    from blackboard.connections import connect_redis
+    from tabula.config import AugurConfig
+    from tabula.connections import connect_redis
     import nats
 
     logging.basicConfig(

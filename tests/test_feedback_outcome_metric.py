@@ -1,6 +1,6 @@
 """Domain-agnostic surprise-reduction outcome metric (spec 2026-06-09 §1A)."""
 
-from perception.feedback_collector import _BehavioralTracker
+from responsum.feedback_collector import _BehavioralTracker
 
 
 def _tracker(mean, std, dev0, obs0=50, window=3, min_post_obs=2, min_obs=15):

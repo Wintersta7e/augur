@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from blackboard.session import SessionManager
+from tabula.session import SessionManager
 from tests.integration.conftest import (
     inject_perception_event,
     requires_ollama,
@@ -18,7 +18,7 @@ from tests.integration.conftest import (
 @requires_ollama
 @pytest.mark.parametrize(
     "pipeline",
-    [["detector", "advisor", "feedback", "reflection"]],
+    [["vigil", "consilium", "responsum", "disciplina"]],
     indirect=True,
 )
 class TestReflection:
@@ -70,16 +70,16 @@ class TestReflection:
             json.dumps({"session_id": session_id}).encode(),
         )
         await nats_conn.publish(
-            "augur.reflect.trigger",
+            "augur.disciplina.trigger",
             json.dumps({"session_id": session_id}).encode(),
         )
 
         found = await wait_for_redis_key(
-            redis_client, f"augur:reflect:{session_id}", timeout=60.0
+            redis_client, f"augur:disciplina:{session_id}", timeout=60.0
         )
         assert found, "No reflection report generated within timeout"
 
-        raw = redis_client.get(f"augur:reflect:{session_id}")
+        raw = redis_client.get(f"augur:disciplina:{session_id}")
         assert raw is not None
         report = json.loads(raw)
         assert "session_id" in report

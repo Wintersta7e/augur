@@ -16,7 +16,7 @@ import os
 import pytest
 from unittest.mock import patch
 
-from blackboard.config import AugurConfig, _coerce_bool
+from tabula.config import AugurConfig, _coerce_bool
 
 
 class TestCoerceBoolTrueValues:
@@ -166,7 +166,7 @@ class TestFromEnvGracefulCoercionFailure:
         """ARCH-01: with `from __future__ import annotations`, field.type is a
         string at runtime. The coercion map must be built from the default's
         type, not field.type. Verify the map has sensible entries."""
-        from blackboard.config import _TYPE_COERCIONS, _coerce_bool
+        from tabula.config import _TYPE_COERCIONS, _coerce_bool
 
         # bool field → _coerce_bool
         assert _TYPE_COERCIONS["correlation_tuning_enabled"] is _coerce_bool

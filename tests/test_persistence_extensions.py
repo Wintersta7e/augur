@@ -13,7 +13,7 @@ import json
 from unittest.mock import MagicMock
 
 
-from blackboard.persistence import (
+from tabula.persistence import (
     SESSION_KEY_TTL_S,
     TUNING_APPLIED_TTL_S,
     PersistenceManager,
@@ -30,7 +30,7 @@ class TestSaveReflection:
 
         mock_redis.set.assert_called_once()
         args, kwargs = mock_redis.set.call_args
-        assert args[0] == "augur:reflect:sess-1"
+        assert args[0] == "augur:disciplina:sess-1"
         assert json.loads(args[1]) == report
         assert kwargs.get("ex") == SESSION_KEY_TTL_S
 
@@ -57,7 +57,7 @@ class TestSaveLastAnomaly:
 
         mock_redis.set.assert_called_once()
         args, kwargs = mock_redis.set.call_args
-        assert args[0] == "augur:detection:last_anomaly"
+        assert args[0] == "augur:vigil:last_anomaly"
         assert json.loads(args[1]) == anomaly
         # Live state — no TTL
         assert "ex" not in kwargs
@@ -85,7 +85,7 @@ class TestSaveLastAdvice:
 
         mock_redis.set.assert_called_once()
         args, kwargs = mock_redis.set.call_args
-        assert args[0] == "augur:reasoning:last_advice"
+        assert args[0] == "augur:consilium:last_advice"
         assert json.loads(args[1]) == advice
         assert "ex" not in kwargs
 

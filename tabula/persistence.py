@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import redis
 
-from blackboard.contracts import PerceptionEvent
+from tabula.contracts import PerceptionEvent
 
 log = logging.getLogger("persistence")
 
@@ -56,12 +56,12 @@ class PersistenceManager:
     # -- Baseline persistence ------------------------------------------------
 
     def save_baseline(self, domain: str, entity: str, state_dict: dict) -> None:
-        key = f"augur:profile:{domain}:{entity}"
+        key = f"augur:vigil:profile:{domain}:{entity}"
         self._r.set(key, json.dumps(state_dict))
         log.debug("Saved baseline %s", key)
 
     def load_baseline(self, domain: str, entity: str) -> dict | None:
-        key = f"augur:profile:{domain}:{entity}"
+        key = f"augur:vigil:profile:{domain}:{entity}"
         raw = self._r.get(key)
         if raw is None:
             return None
@@ -70,38 +70,38 @@ class PersistenceManager:
     # -- Event history -------------------------------------------------------
 
     def append_event(self, event: PerceptionEvent) -> None:
-        key = f"augur:history:{event.domain}"
+        key = f"augur:vigil:history:{event.domain}"
         self._r.lpush(key, event.to_json())
         self._r.ltrim(key, 0, HISTORY_MAX - 1)
 
     def get_history(self, domain: str, limit: int = 100) -> list[dict]:
-        key = f"augur:history:{domain}"
+        key = f"augur:vigil:history:{domain}"
         raw_list = self._r.lrange(key, 0, limit - 1)
         return [json.loads(entry) for entry in raw_list]
 
     # -- Feedback storage ----------------------------------------------------
 
     def save_feedback(self, session_id: str, feedback_dict: dict) -> None:
-        key = f"augur:feedback:{session_id}"
+        key = f"augur:responsum:{session_id}"
         feedback_dict.setdefault(
             "timestamp",
             datetime.now(timezone.utc).isoformat(),
         )
         self._r.set(key, json.dumps(feedback_dict), ex=SESSION_KEY_TTL_S)
         # Also maintain an ordered index of session IDs for get_all_feedback
-        self._r.lpush("augur:feedback:_index", session_id)
-        self._r.ltrim("augur:feedback:_index", 0, 999)
+        self._r.lpush("augur:responsum:_index", session_id)
+        self._r.ltrim("augur:responsum:_index", 0, 999)
         log.debug("Saved feedback for session %s", session_id)
 
     def get_feedback(self, session_id: str) -> dict | None:
-        key = f"augur:feedback:{session_id}"
+        key = f"augur:responsum:{session_id}"
         raw = self._r.get(key)
         if raw is None:
             return None
         return json.loads(raw)
 
     def get_all_feedback(self, limit: int = 50) -> list[dict]:
-        session_ids = self._r.lrange("augur:feedback:_index", 0, limit - 1)
+        session_ids = self._r.lrange("augur:responsum:_index", 0, limit - 1)
         results: list[dict] = []
         for sid in session_ids:
             sid_str = sid.decode() if isinstance(sid, bytes) else sid
@@ -119,8 +119,8 @@ class PersistenceManager:
         prompt_text: str,
         score: float | None = None,
     ) -> None:
-        current_key = f"augur:prompts:{domain}:current"
-        history_key = f"augur:prompts:{domain}:history"
+        current_key = f"augur:consilium:prompts:{domain}:current"
+        history_key = f"augur:consilium:prompts:{domain}:history"
 
         # Archive current version before overwriting
         existing = self._r.get(current_key)
@@ -137,21 +137,21 @@ class PersistenceManager:
         log.debug("Saved prompt for domain %s (score=%s)", domain, score)
 
     def load_prompt(self, domain: str) -> str | None:
-        current_key = f"augur:prompts:{domain}:current"
+        current_key = f"augur:consilium:prompts:{domain}:current"
         raw = self._r.get(current_key)
         if raw is None:
             return None
         return json.loads(raw).get("prompt")
 
     def get_prompt_history(self, domain: str, limit: int = 10) -> list[dict]:
-        history_key = f"augur:prompts:{domain}:history"
+        history_key = f"augur:consilium:prompts:{domain}:history"
         raw_list = self._r.lrange(history_key, 0, limit - 1)
         return [json.loads(entry) for entry in raw_list]
 
     def rollback_prompt(self, domain: str) -> bool:
         """Restore previous prompt version. Returns True if rollback succeeded."""
-        current_key = f"augur:prompts:{domain}:current"
-        history_key = f"augur:prompts:{domain}:history"
+        current_key = f"augur:consilium:prompts:{domain}:current"
+        history_key = f"augur:consilium:prompts:{domain}:history"
 
         previous_raw = self._r.lpop(history_key)
         if previous_raw is None:
@@ -175,7 +175,7 @@ class PersistenceManager:
         1E §9) so the rollback check compares current-vs-previous realized scores
         rather than the stale motivating-utility recorded at mutation time.
         """
-        current_key = f"augur:prompts:{domain}:current"
+        current_key = f"augur:consilium:prompts:{domain}:current"
         raw = self._r.get(current_key)
         if raw is None:
             return
@@ -186,8 +186,8 @@ class PersistenceManager:
     def get_prompt_score_pair(self, domain: str) -> tuple[float | None, float | None]:
         """Return (current_score, most_recent_previous_score) for the domain's
         prompt — the realized-score pair the 1E rollback gate compares."""
-        current_key = f"augur:prompts:{domain}:current"
-        history_key = f"augur:prompts:{domain}:history"
+        current_key = f"augur:consilium:prompts:{domain}:current"
+        history_key = f"augur:consilium:prompts:{domain}:history"
         cur_raw = self._r.get(current_key)
         cur = json.loads(cur_raw).get("score") if cur_raw else None
         prev_list = self._r.lrange(history_key, 0, 0)
@@ -198,21 +198,21 @@ class PersistenceManager:
 
     def mark_mrt_rating_session(self, session_id: str) -> None:
         """Record that a session issued >=1 withheld-rating prompt (set: dedups)."""
-        self._r.sadd("augur:gate:mrt_rating_sessions", session_id)
+        self._r.sadd("augur:limen:mrt_rating_sessions", session_id)
 
     def count_mrt_rating_sessions(self) -> int:
         """Number of distinct sessions that issued a withheld-rating prompt."""
-        return int(self._r.scard("augur:gate:mrt_rating_sessions"))
+        return int(self._r.scard("augur:limen:mrt_rating_sessions"))
 
     # -- Threshold config ----------------------------------------------------
 
     def save_thresholds(self, domain: str, thresholds_dict: dict) -> None:
-        key = f"augur:config:thresholds:{domain}"
+        key = f"augur:vigil:thresholds:{domain}"
         self._r.set(key, json.dumps(thresholds_dict))
         log.debug("Saved thresholds for domain %s", domain)
 
     def load_thresholds(self, domain: str) -> dict | None:
-        key = f"augur:config:thresholds:{domain}"
+        key = f"augur:vigil:thresholds:{domain}"
         raw = self._r.get(key)
         if raw is None:
             return None
@@ -222,13 +222,13 @@ class PersistenceManager:
 
     def save_escalation_matrix(self, matrix: dict) -> None:
         """Store the full matrix dict (including 'version' and 'rules' keys) as-is."""
-        key = "augur:config:escalation_matrix"
+        key = "augur:nexus:matrix"
         self._r.set(key, json.dumps(matrix))
         log.debug("Saved escalation matrix (version=%s)", matrix.get("version"))
 
     def load_escalation_matrix(self) -> dict | None:
         """Return the full matrix dict or None if not set."""
-        key = "augur:config:escalation_matrix"
+        key = "augur:nexus:matrix"
         raw = self._r.get(key)
         if raw is None:
             return None
@@ -239,14 +239,14 @@ class PersistenceManager:
     def save_app_descriptor(
         self, entity: str, descriptor: str, *, overwrite: bool
     ) -> None:
-        """Store an app's descriptor in the augur:config:app_descriptors hash.
+        """Store an app's descriptor in the augur:consilium:app_descriptors hash.
 
         ``overwrite=True`` (OS FileDescription — authoritative) uses HSET and
         upgrades any earlier value. ``overwrite=False`` (LLM fallback) uses
         HSETNX so a late classification can never clobber OS truth or an
         earlier guess.
         """
-        key = "augur:config:app_descriptors"
+        key = "augur:consilium:app_descriptors"
         if (
             not self._r.hexists(key, entity)
             and self._r.hlen(key) >= MAX_APP_DESCRIPTORS
@@ -264,14 +264,14 @@ class PersistenceManager:
 
     def load_app_descriptor(self, entity: str) -> str | None:
         """Return one app's descriptor (decoded), or None if absent."""
-        raw = self._r.hget("augur:config:app_descriptors", entity)
+        raw = self._r.hget("augur:consilium:app_descriptors", entity)
         if raw is None:
             return None
         return raw.decode() if isinstance(raw, bytes) else raw
 
     def load_app_descriptors(self) -> dict[str, str]:
         """Return the full app->descriptor map with keys/values decoded to str."""
-        raw = self._r.hgetall("augur:config:app_descriptors")
+        raw = self._r.hgetall("augur:consilium:app_descriptors")
         out: dict[str, str] = {}
         for k, v in raw.items():
             key = k.decode() if isinstance(k, bytes) else k
@@ -288,10 +288,10 @@ class PersistenceManager:
         can return session ids without scanning keyspace. Uses a 30-day TTL
         to prevent unbounded Redis growth past the index-trim boundary.
         """
-        key = f"augur:correlation:graph:{session_id}"
+        key = f"augur:nexus:graph:{session_id}"
         self._r.set(key, json.dumps(graph_data), ex=SESSION_KEY_TTL_S)
-        self._r.lpush("augur:correlation:graph:_index", session_id)
-        self._r.ltrim("augur:correlation:graph:_index", 0, 999)
+        self._r.lpush("augur:nexus:graph:_index", session_id)
+        self._r.ltrim("augur:nexus:graph:_index", 0, 999)
         log.debug(
             "Saved correlation graph for session %s (%d nodes, %d links)",
             session_id,
@@ -301,7 +301,7 @@ class PersistenceManager:
 
     def load_correlation_graph(self, session_id: str) -> dict | None:
         """Load a persisted correlation graph or return None if absent."""
-        key = f"augur:correlation:graph:{session_id}"
+        key = f"augur:nexus:graph:{session_id}"
         raw = self._r.get(key)
         if raw is None:
             return None
@@ -312,7 +312,7 @@ class PersistenceManager:
 
         Ordered newest-first (lpush index order).
         """
-        raw_ids = self._r.lrange("augur:correlation:graph:_index", 0, limit - 1)
+        raw_ids = self._r.lrange("augur:nexus:graph:_index", 0, limit - 1)
         return [sid.decode() if isinstance(sid, bytes) else sid for sid in raw_ids]
 
     # -- Rule confidence state (reflection matrix tuning) --------------------
@@ -322,7 +322,7 @@ class PersistenceManager:
 
         Schema: {rule_key: {"confidence": float, "restore_target": str | None}}
         """
-        key = "augur:config:escalation_confidence"
+        key = "augur:nexus:escalation_confidence"
         self._r.set(key, json.dumps(confidence_state))
         log.debug(
             "Saved rule confidence state: %d rules",
@@ -331,7 +331,7 @@ class PersistenceManager:
 
     def load_rule_confidence(self) -> dict | None:
         """Return the per-rule confidence state dict or None if not set."""
-        key = "augur:config:escalation_confidence"
+        key = "augur:nexus:escalation_confidence"
         raw = self._r.get(key)
         if raw is None:
             return None
@@ -343,11 +343,11 @@ class PersistenceManager:
         Schema: {rule_key: {"ewma_lag": float}}.
         Mirrors save_rule_confidence; written to a separate Redis key.
         """
-        self._r.set("augur:config:rule_window_state", json.dumps(state))
+        self._r.set("augur:nexus:rule_window_state", json.dumps(state))
 
     def load_rule_window_state(self) -> dict:
         """Load per-rule observed-lag EWMA state. Returns {} if absent or corrupt."""
-        raw = self._r.get("augur:config:rule_window_state")
+        raw = self._r.get("augur:nexus:rule_window_state")
         if not raw:
             return {}
         try:
@@ -378,9 +378,9 @@ class PersistenceManager:
             return
         pipe = self._r.pipeline()  # transaction=True by default
         if confidence is not None:
-            pipe.set("augur:config:escalation_confidence", json.dumps(confidence))
+            pipe.set("augur:nexus:escalation_confidence", json.dumps(confidence))
         if window_state is not None:
-            pipe.set("augur:config:rule_window_state", json.dumps(window_state))
+            pipe.set("augur:nexus:rule_window_state", json.dumps(window_state))
         pipe.execute()
 
     # -- Reflection reports --------------------------------------------------
@@ -393,13 +393,13 @@ class PersistenceManager:
         so the key namespace is discoverable alongside other persistence
         concerns and TTL is applied consistently.
         """
-        key = f"augur:reflect:{session_id}"
+        key = f"augur:disciplina:{session_id}"
         self._r.set(key, json.dumps(report_dict), ex=SESSION_KEY_TTL_S)
         log.debug("Saved reflection report for session %s", session_id)
 
     def load_reflection(self, session_id: str) -> dict | None:
         """Return a session's reflection report or None if not set."""
-        key = f"augur:reflect:{session_id}"
+        key = f"augur:disciplina:{session_id}"
         raw = self._r.get(key)
         if raw is None:
             return None
@@ -409,22 +409,22 @@ class PersistenceManager:
 
     def save_last_anomaly(self, anomaly_dict: dict) -> None:
         """Persist the most recent anomaly event (no TTL — live state)."""
-        self._r.set("augur:detection:last_anomaly", json.dumps(anomaly_dict))
+        self._r.set("augur:vigil:last_anomaly", json.dumps(anomaly_dict))
 
     def load_last_anomaly(self) -> dict | None:
         """Return the most recent anomaly event or None if not set."""
-        raw = self._r.get("augur:detection:last_anomaly")
+        raw = self._r.get("augur:vigil:last_anomaly")
         if raw is None:
             return None
         return json.loads(raw)
 
     def save_last_advice(self, advice_dict: dict) -> None:
         """Persist the most recent LLM advice payload (no TTL — live state)."""
-        self._r.set("augur:reasoning:last_advice", json.dumps(advice_dict))
+        self._r.set("augur:consilium:last_advice", json.dumps(advice_dict))
 
     def load_last_advice(self) -> dict | None:
         """Return the most recent LLM advice payload or None if not set."""
-        raw = self._r.get("augur:reasoning:last_advice")
+        raw = self._r.get("augur:consilium:last_advice")
         if raw is None:
             return None
         return json.loads(raw)
@@ -475,12 +475,12 @@ class PersistenceManager:
     # persistence.py:297).
 
     def save_silence_record(self, record: dict) -> None:
-        """Append a gate suppression record to augur:gate:silences (capped).
+        """Append a gate suppression record to augur:limen:silences (capped).
 
         Schema: {ts, decision_id, state_key, domain, entity, severity, arm,
                  reason, metrics, mrt_eligible, p_withhold}
         """
-        key = "augur:gate:silences"
+        key = "augur:limen:silences"
         self._r.lpush(key, json.dumps(record))
         self._r.ltrim(key, 0, MAX_GATE_SILENCES - 1)
 
@@ -489,21 +489,21 @@ class PersistenceManager:
 
         Returns [] if the list is absent or any entry is corrupt.
         """
-        key = "augur:gate:silences"
+        key = "augur:limen:silences"
         raw_list = self._r.lrange(key, 0, limit - 1)
         try:
             return [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
-            log.warning("augur:gate:silences contained a corrupt entry; returning []")
+            log.warning("augur:limen:silences contained a corrupt entry; returning []")
             return []
 
     def save_emission(self, record: dict) -> None:
-        """Append a gate emission record to augur:gate:emissions (capped).
+        """Append a gate emission record to augur:limen:emissions (capped).
 
         Schema: {ts, decision_id, state_key, severity, tier, probe,
                  audit_only, withheld_reason, mrt_eligible, p_fire}
         """
-        key = "augur:gate:emissions"
+        key = "augur:limen:emissions"
         self._r.lpush(key, json.dumps(record))
         self._r.ltrim(key, 0, MAX_GATE_EMISSIONS - 1)
 
@@ -512,21 +512,21 @@ class PersistenceManager:
 
         Returns [] if the list is absent or any entry is corrupt.
         """
-        key = "augur:gate:emissions"
+        key = "augur:limen:emissions"
         raw_list = self._r.lrange(key, 0, limit - 1)
         try:
             return [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
-            log.warning("augur:gate:emissions contained a corrupt entry; returning []")
+            log.warning("augur:limen:emissions contained a corrupt entry; returning []")
             return []
 
     def save_observed(self, record: dict) -> None:
-        """Append a gate observed-value record to augur:gate:observed (capped).
+        """Append a gate observed-value record to augur:limen:observed (capped).
 
         Schema: {ts, state_key, value, severity}
         Written by both record_suppression and non-probe record_delivery_success.
         """
-        key = "augur:gate:observed"
+        key = "augur:limen:observed"
         self._r.lpush(key, json.dumps(record))
         self._r.ltrim(key, 0, MAX_GATE_OBSERVED - 1)
 
@@ -536,12 +536,12 @@ class PersistenceManager:
         Returns [] if absent or any entry is corrupt.  Filters by state_key
         after reading so the caller gets only the records relevant to one channel.
         """
-        key = "augur:gate:observed"
+        key = "augur:limen:observed"
         raw_list = self._r.lrange(key, 0, limit - 1)
         try:
             all_records = [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
-            log.warning("augur:gate:observed contained a corrupt entry; returning []")
+            log.warning("augur:limen:observed contained a corrupt entry; returning []")
             return []
         return [r for r in all_records if r.get("state_key") == state_key]
 
@@ -552,7 +552,7 @@ class PersistenceManager:
         now: str,
         decision_id: str,
     ) -> None:
-        """Append a delivery-failure record to augur:gate:delivery_failures (capped).
+        """Append a delivery-failure record to augur:limen:delivery_failures (capped).
 
         Schema: {ts, decision_id, state_key, domain, entity, reason}
         Used for infrastructure non-deliveries (busy-skip, Ollama failure, etc.).
@@ -566,7 +566,7 @@ class PersistenceManager:
             "entity": getattr(signature, "entity", None),
             "reason": reason,
         }
-        key = "augur:gate:delivery_failures"
+        key = "augur:limen:delivery_failures"
         self._r.lpush(key, json.dumps(record))
         self._r.ltrim(key, 0, MAX_GATE_DELIVERY_FAILURES - 1)
 
@@ -575,13 +575,13 @@ class PersistenceManager:
 
         Returns [] if the list is absent or any entry is corrupt.
         """
-        key = "augur:gate:delivery_failures"
+        key = "augur:limen:delivery_failures"
         raw_list = self._r.lrange(key, 0, limit - 1)
         try:
             return [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
             log.warning(
-                "augur:gate:delivery_failures contained a corrupt entry; returning []"
+                "augur:limen:delivery_failures contained a corrupt entry; returning []"
             )
             return []
 
@@ -630,71 +630,71 @@ class PersistenceManager:
 
     def save_habituation(self, state_key: str, entry: dict) -> bool:
         """Store per-channel habituation state. Returns False if refused at cap."""
-        return self._hash_save("augur:gate:habituation", state_key, entry)
+        return self._hash_save("augur:limen:habituation", state_key, entry)
 
     def load_habituation(self, state_key: str) -> dict:
         """Return habituation entry for state_key, or {} if missing/corrupt."""
-        return self._hash_load("augur:gate:habituation", state_key)
+        return self._hash_load("augur:limen:habituation", state_key)
 
     # -- habituation_floor (offline: floor, last_ts) — separate Redis key ----
 
     def save_habituation_floor(self, state_key: str, entry: dict) -> bool:
         """Store per-channel habituation floor. Returns False if refused at cap."""
-        return self._hash_save("augur:gate:habituation_floor", state_key, entry)
+        return self._hash_save("augur:limen:habituation_floor", state_key, entry)
 
     def load_habituation_floor(self, state_key: str) -> dict:
         """Return habituation floor for state_key, or {} if missing/corrupt."""
-        return self._hash_load("augur:gate:habituation_floor", state_key)
+        return self._hash_load("augur:limen:habituation_floor", state_key)
 
     # -- credibility (offline + conservative online: cred, n, last_fb_ts) ----
 
     def save_credibility(self, signal_class: str, entry: dict) -> bool:
         """Store per-class credibility state. Returns False if refused at cap."""
-        return self._hash_save("augur:gate:credibility", signal_class, entry)
+        return self._hash_save("augur:limen:credibility", signal_class, entry)
 
     def load_credibility(self, signal_class: str) -> dict:
         """Return credibility entry for signal_class, or {} if missing/corrupt."""
-        return self._hash_load("augur:gate:credibility", signal_class)
+        return self._hash_load("augur:limen:credibility", signal_class)
 
     # -- reservoir (online: count, last_ts) -----------------------------------
 
     def save_reservoir(self, state_key: str, entry: dict) -> bool:
         """Store per-channel reservoir state. Returns False if refused at cap."""
-        return self._hash_save("augur:gate:reservoir", state_key, entry)
+        return self._hash_save("augur:limen:reservoir", state_key, entry)
 
     def load_reservoir(self, state_key: str) -> dict:
         """Return reservoir entry for state_key, or {} if missing/corrupt."""
-        return self._hash_load("augur:gate:reservoir", state_key)
+        return self._hash_load("augur:limen:reservoir", state_key)
 
     # -- cost_tier_memory (online + offline: earned_tier2, helped, count, last_ts)
 
     def save_cost_tier_memory(self, state_key: str, entry: dict) -> bool:
         """Store per-channel cost-tier memory. Returns False if refused at cap."""
-        return self._hash_save("augur:gate:cost_tier_memory", state_key, entry)
+        return self._hash_save("augur:limen:cost_tier_memory", state_key, entry)
 
     def load_cost_tier_memory(self, state_key: str) -> dict:
         """Return cost-tier memory for state_key, or {} if missing/corrupt."""
-        return self._hash_load("augur:gate:cost_tier_memory", state_key)
+        return self._hash_load("augur:limen:cost_tier_memory", state_key)
 
     # -- channel_stats (online: seen, consecutive_suppressions, ...) ----------
 
     def save_channel_stats(self, state_key: str, entry: dict) -> bool:
         """Store per-channel tracking stats. Returns False if refused at cap."""
-        return self._hash_save("augur:gate:channel_stats", state_key, entry)
+        return self._hash_save("augur:limen:channel_stats", state_key, entry)
 
     def load_channel_stats(self, state_key: str) -> dict:
         """Return channel stats for state_key, or {} if missing/corrupt."""
-        return self._hash_load("augur:gate:channel_stats", state_key)
+        return self._hash_load("augur:limen:channel_stats", state_key)
 
     # -- advice_rate (string key: rate_ewma, last_ts) -------------------------
 
     def save_advice_rate(self, entry: dict) -> None:
         """Persist the global advice-rate EWMA state."""
-        self._r.set("augur:gate:advice_rate", json.dumps(entry))
+        self._r.set("augur:limen:advice_rate", json.dumps(entry))
 
     def load_advice_rate(self) -> dict:
         """Return advice-rate state, or {} if missing/corrupt."""
-        raw = self._r.get("augur:gate:advice_rate")
+        raw = self._r.get("augur:limen:advice_rate")
         if not raw:
             return {}
         try:
@@ -703,26 +703,26 @@ class PersistenceManager:
             data = json.loads(raw)
             return data if isinstance(data, dict) else {}
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
-            log.warning("augur:gate:advice_rate corrupt; returning {}")
+            log.warning("augur:limen:advice_rate corrupt; returning {}")
             return {}
 
     # -- self_tolerance set (offline: SADD/SREM/SISMEMBER/SMEMBERS) -----------
 
     def add_self_tolerance(self, state_key: str) -> None:
         """Add state_key to the self-tolerance set."""
-        self._r.sadd("augur:gate:self_tolerance", state_key)
+        self._r.sadd("augur:limen:self_tolerance", state_key)
 
     def remove_self_tolerance(self, state_key: str) -> None:
         """Remove state_key from the self-tolerance set."""
-        self._r.srem("augur:gate:self_tolerance", state_key)
+        self._r.srem("augur:limen:self_tolerance", state_key)
 
     def is_self_tolerant(self, state_key: str) -> bool:
         """Return True if state_key is in the self-tolerance set."""
-        return bool(self._r.sismember("augur:gate:self_tolerance", state_key))
+        return bool(self._r.sismember("augur:limen:self_tolerance", state_key))
 
     def load_self_tolerance(self) -> set[str]:
         """Return the full self-tolerance set (decoded to str)."""
-        raw = self._r.smembers("augur:gate:self_tolerance")
+        raw = self._r.smembers("augur:limen:self_tolerance")
         return {m.decode() if isinstance(m, bytes) else m for m in raw}
 
     # -- can_track_gate_state (read-only cap probe) ---------------------------
@@ -764,19 +764,19 @@ class PersistenceManager:
         pipe = self._r.pipeline()  # transaction=True by default
         if floors:
             for field, entry in floors.items():
-                pipe.hset("augur:gate:habituation_floor", field, json.dumps(entry))
+                pipe.hset("augur:limen:habituation_floor", field, json.dumps(entry))
         if credibility:
             for field, entry in credibility.items():
-                pipe.hset("augur:gate:credibility", field, json.dumps(entry))
+                pipe.hset("augur:limen:credibility", field, json.dumps(entry))
         if cost_tier:
             for field, entry in cost_tier.items():
-                pipe.hset("augur:gate:cost_tier_memory", field, json.dumps(entry))
+                pipe.hset("augur:limen:cost_tier_memory", field, json.dumps(entry))
         if tolerance_add:
             for state_key in tolerance_add:
-                pipe.sadd("augur:gate:self_tolerance", state_key)
+                pipe.sadd("augur:limen:self_tolerance", state_key)
         if tolerance_remove:
             for state_key in tolerance_remove:
-                pipe.srem("augur:gate:self_tolerance", state_key)
+                pipe.srem("augur:limen:self_tolerance", state_key)
         if advice_rate is not None:
-            pipe.set("augur:gate:advice_rate", json.dumps(advice_rate))
+            pipe.set("augur:limen:advice_rate", json.dumps(advice_rate))
         pipe.execute()

@@ -1,11 +1,10 @@
 """1B calibration-era withheld-rating selection + prompt helper (spec §5.3)."""
 
-
 import pytest
 
-from blackboard.config import AugurConfig
-from perception import feedback_collector as fc
-from perception.feedback_collector import (
+from tabula.config import AugurConfig
+from responsum import feedback_collector as fc
+from responsum.feedback_collector import (
     PendingAdvice,
     PendingGateDecision,
     _should_select_withheld_rating,

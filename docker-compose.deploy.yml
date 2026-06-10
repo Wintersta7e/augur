@@ -1,7 +1,7 @@
 services:
-  detector:
+  vigil:
     build: .
-    command: python -m detection.anomaly_detector
+    command: python -m vigil.anomaly_detector
     depends_on:
       redis:
         condition: service_healthy
@@ -12,9 +12,9 @@ services:
       AUGUR_REDIS_URL: redis://redis:6379
     restart: unless-stopped
 
-  correlator:
+  nexus:
     build: .
-    command: python -m reasoning.correlator
+    command: python -m nexus.correlator
     depends_on:
       redis:
         condition: service_healthy
@@ -25,15 +25,15 @@ services:
       AUGUR_REDIS_URL: redis://redis:6379
     restart: unless-stopped
 
-  advisor:
+  consilium:
     build: .
-    command: python -m reasoning.augur_advisor
+    command: python -m consilium.advisor
     depends_on:
       redis:
         condition: service_healthy
       nats:
         condition: service_healthy
-      correlator:
+      nexus:
         condition: service_started
     environment:
       AUGUR_NATS_URL: nats://nats:4222
@@ -41,9 +41,9 @@ services:
       AUGUR_OLLAMA_URL: http://host.docker.internal:11434
     restart: unless-stopped
 
-  feedback:
+  responsum:
     build: .
-    command: python -m perception.feedback_collector
+    command: python -m responsum.feedback_collector
     depends_on:
       redis:
         condition: service_healthy
@@ -54,9 +54,9 @@ services:
       AUGUR_REDIS_URL: redis://redis:6379
     restart: unless-stopped
 
-  reflection:
+  disciplina:
     build: .
-    command: python -m reasoning.reflection_engine
+    command: python -m disciplina.reflection_engine
     depends_on:
       redis:
         condition: service_healthy
@@ -68,9 +68,9 @@ services:
       AUGUR_OLLAMA_URL: http://host.docker.internal:11434
     restart: unless-stopped
 
-  display:
+  vox:
     build: .
-    command: python -m output.console_display
+    command: python -m vox.console_display
     depends_on:
       redis:
         condition: service_healthy

@@ -16,10 +16,10 @@ import pygame
 import redis
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
-from blackboard.config import AugurConfig
-from blackboard.connections import connect_redis
-from blackboard.contracts import PerceptionEvent
-from blackboard.session import SessionManager
+from tabula.config import AugurConfig
+from tabula.connections import connect_redis
+from tabula.contracts import PerceptionEvent
+from tabula.session import SessionManager
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -61,17 +61,17 @@ PIECE_UNICODE: dict[str, str] = {
     "k": "\u265a",
 }
 
-REDIS_KEY_LAST = "augur:chess:last_move"
-REDIS_KEY_HISTORY = "augur:chess:move_history"
+REDIS_KEY_LAST = "augur:sensus:chess:last_move"
+REDIS_KEY_HISTORY = "augur:sensus:chess:move_history"
 REDIS_HISTORY_MAX = 20
-NATS_SUBJECT = "augur.perception.chess"
+NATS_SUBJECT = "augur.sensus.chess"
 
 # ---------------------------------------------------------------------------
 # Redis helpers
 # ---------------------------------------------------------------------------
 #
 # ARCH-11: the local connect_redis wrapper was deleted; callers now use
-# the shared helper from blackboard.connections (imported above).
+# the shared helper from tabula.connections (imported above).
 
 
 def publish_move_redis(r: redis.Redis, payload: dict) -> None:

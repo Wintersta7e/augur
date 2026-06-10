@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from reasoning.reflection_engine import analyze_counterfactual
+from disciplina.reflection_engine import analyze_counterfactual
 
 
 def _make_pm_with_history(events: list[dict]) -> MagicMock:

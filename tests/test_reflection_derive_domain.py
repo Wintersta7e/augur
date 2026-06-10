@@ -10,7 +10,7 @@ def test_derive_domain_falls_back_to_correlated_when_no_standalone():
             {"domain": "chess", "correlation_found": True},
         ]
     }
-    from reasoning.reflection_engine import _derive_domain
+    from disciplina.reflection_engine import _derive_domain
 
     assert _derive_domain(feedback) == "typing"
 
@@ -24,6 +24,6 @@ def test_derive_domain_prefers_standalone_when_present():
             {"domain": "chess", "correlation_found": False},  # the only standalone
         ]
     }
-    from reasoning.reflection_engine import _derive_domain
+    from disciplina.reflection_engine import _derive_domain
 
     assert _derive_domain(feedback) == "chess"

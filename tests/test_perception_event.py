@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from blackboard.contracts import PerceptionEvent
+from tabula.contracts import PerceptionEvent
 
 
 @pytest.fixture

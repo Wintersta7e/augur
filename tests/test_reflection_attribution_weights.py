@@ -1,6 +1,6 @@
 """Tests for _attribution_weights — multi-domain feedback attribution helper."""
 
-from reasoning.reflection_engine import _attribution_weights
+from disciplina.reflection_engine import _attribution_weights
 
 
 def test_standalone_advice_full_weight_to_primary():

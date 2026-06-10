@@ -2,7 +2,7 @@
 
 Starts detector + correlator, injects two cross-domain anomalies to
 create a correlation edge, publishes augur.session.end, and verifies
-the graph lands in Redis at augur:correlation:graph:<session_id>.
+the graph lands in Redis at augur:nexus:graph:<session_id>.
 
 No Ollama — advisor is not in the pipeline.
 """
@@ -44,7 +44,7 @@ def _make_perception_event(
     ).encode()
 
 
-@pytest.mark.parametrize("pipeline", [["detector", "correlator"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil", "nexus"]], indirect=True)
 async def test_session_end_flushes_graph_to_redis(
     pipeline,
     redis_client,
@@ -56,14 +56,14 @@ async def test_session_end_flushes_graph_to_redis(
     # Warm chess baseline. Must be long enough that the detector's
     # min_observations gate flips to trained — pad to (gate + 5) so the test
     # adapts to future config bumps without rewriting fixed-length arrays.
-    from blackboard.config import AugurConfig  # local import — test-only
+    from tabula.config import AugurConfig  # local import — test-only
 
     _warm = AugurConfig().min_observations + 5
     _chess_pool = [5.2, 6.8, 7.4, 5.9, 8.1, 6.3, 7.0, 5.5, 6.7, 7.8]
     chess_base = [_chess_pool[i % len(_chess_pool)] for i in range(_warm)]
     for v in chess_base:
         await nats_conn.publish(
-            "augur.perception.chess",
+            "augur.sensus.chess",
             _make_perception_event(
                 "chess",
                 "white",
@@ -82,7 +82,7 @@ async def test_session_end_flushes_graph_to_redis(
     typing_base = [_typing_pool[i % len(_typing_pool)] for i in range(_warm)]
     for v in typing_base:
         await nats_conn.publish(
-            "augur.perception.typing",
+            "augur.sensus.typing",
             _make_perception_event(
                 "typing",
                 "user",
@@ -101,7 +101,7 @@ async def test_session_end_flushes_graph_to_redis(
 
     # Outlier 1: chess anomaly
     await nats_conn.publish(
-        "augur.perception.chess",
+        "augur.sensus.chess",
         _make_perception_event(
             "chess",
             "white",
@@ -117,7 +117,7 @@ async def test_session_end_flushes_graph_to_redis(
 
     # Outlier 2: typing anomaly within window
     await nats_conn.publish(
-        "augur.perception.typing",
+        "augur.sensus.typing",
         _make_perception_event(
             "typing",
             "user",
@@ -146,7 +146,7 @@ async def test_session_end_flushes_graph_to_redis(
     )
 
     # Poll Redis for the graph
-    key = f"augur:correlation:graph:{sid}"
+    key = f"augur:nexus:graph:{sid}"
     graph_raw = None
     for _ in range(30):
         graph_raw = redis_client.get(key)
@@ -182,7 +182,7 @@ async def test_session_end_flushes_graph_to_redis(
     assert isinstance(edge["domains"], list)
 
 
-@pytest.mark.parametrize("pipeline", [["detector", "correlator"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil", "nexus"]], indirect=True)
 async def test_session_end_with_no_correlations_still_saves_empty_graph(
     pipeline,
     redis_client,
@@ -205,7 +205,7 @@ async def test_session_end_with_no_correlations_still_saves_empty_graph(
         ).encode(),
     )
 
-    key = f"augur:correlation:graph:{sid}"
+    key = f"augur:nexus:graph:{sid}"
     graph_raw = None
     for _ in range(30):
         graph_raw = redis_client.get(key)

@@ -7,7 +7,7 @@ If this function misclassifies severity, either the LLM fires on noise
 from __future__ import annotations
 
 
-from detection.anomaly_detector import classify_severity, DEFAULT_THRESHOLDS
+from vigil.anomaly_detector import classify_severity, DEFAULT_THRESHOLDS
 
 # Use the actual project defaults for boundary tests
 MEDIUM = DEFAULT_THRESHOLDS["severity_medium_sigma"]  # 2.5

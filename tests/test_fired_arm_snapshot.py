@@ -2,8 +2,8 @@
 threads the detector snapshot into the advice payload, and PendingAdvice freezes
 + serializes it."""
 
-from perception.feedback_collector import PendingAdvice
-from reasoning.augur_advisor import _build_advice_event
+from responsum.feedback_collector import PendingAdvice
+from consilium.advisor import _build_advice_event
 
 
 def test_advice_event_carries_snapshot():

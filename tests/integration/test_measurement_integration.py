@@ -38,9 +38,9 @@ async def _inject(nc, value: float) -> None:
     )
 
 
-@pytest.mark.parametrize("pipeline", [["detector"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil"]], indirect=True)
 async def test_detector_emits_decision_time_snapshot(pipeline, redis_client, nats_conn):
-    baseline_key = f"augur:profile:{_DOMAIN}:{_ENTITY}"
+    baseline_key = f"augur:vigil:profile:{_DOMAIN}:{_ENTITY}"
 
     # 1) Warmup until the baseline appears — RESEND in a loop so a warmup dropped
     #    before the detector subscribed (NATS core, no persistence) is retried.
@@ -65,11 +65,11 @@ async def test_detector_emits_decision_time_snapshot(pipeline, redis_client, nat
     # 3) A large deviation-driven anomaly on this NON-chess entity.
     await _inject(nats_conn, 40.0)
     assert await wait_for_redis_key(
-        redis_client, "augur:detection:last_anomaly", timeout=15.0
+        redis_client, "augur:vigil:last_anomaly", timeout=15.0
     )
     await asyncio.sleep(0.3)  # let the final write settle
 
-    raw = redis_client.get("augur:detection:last_anomaly")
+    raw = redis_client.get("augur:vigil:last_anomaly")
     payload = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
 
     # The decision-time snapshot must be present and self-consistent.

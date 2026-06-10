@@ -1,6 +1,6 @@
-"""Tests for output/console_display.py correlation rendering.
+"""Tests for vox/console_display.py correlation rendering.
 
-The correlation event enters via augur.correlation.detected and must:
+The correlation event enters via augur.nexus.detected and must:
 - Render a distinct MEDIUM/HIGH correlation block
 - Suppress a previously rendered low-severity one-liner for the primary
   anomaly if the same event is now surfacing as correlated
@@ -9,7 +9,7 @@ The correlation event enters via augur.correlation.detected and must:
 from __future__ import annotations
 
 
-from output.console_display import (
+from vox.console_display import (
     SUBJECT_CORRELATION,
     dedup_should_suppress,
     render_correlation,
@@ -62,7 +62,7 @@ def _correlation_payload() -> dict:
 
 class TestSubject:
     def test_correlation_subject_constant(self) -> None:
-        assert SUBJECT_CORRELATION == "augur.correlation.detected"
+        assert SUBJECT_CORRELATION == "augur.nexus.detected"
 
 
 class TestRenderCorrelation:
@@ -123,7 +123,7 @@ class TestDedup:
 # render_reflection — Phase 3 per-domain shape + legacy fallback
 # ---------------------------------------------------------------------------
 
-from output.console_display import render_reflection  # noqa: E402
+from vox.console_display import render_reflection  # noqa: E402
 
 
 def test_render_reflection_handles_per_domain_precision():

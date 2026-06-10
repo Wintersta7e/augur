@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Start all Augur backend components in the correct order.
-# Chess board (perception/chess_board.py) is started separately by the user.
+# Chess board (sensus/chess_board.py) is started separately by the user.
 #
 # Optional Windows companion (not started by this script):
 #   On the Windows host (NOT in WSL), install requirements-windows.txt
 #   and run:
-#     python -m perception.activity_monitor
+#     python -m sensus.activity_monitor
 #   It will publish to WSL NATS via localhost:4222 and read the current
 #   session from Redis. Make sure a perception source that calls
 #   session_mgr.start() (chess_board or typing_monitor) has already
@@ -57,7 +57,7 @@ echo -e "${RESET}"
 
 # 1. Anomaly detector (must be first — listens for chess moves)
 echo -ne "  [1/6] Anomaly detector ...  "
-$PYTHON "$PROJECT_DIR/detection/anomaly_detector.py" \
+$PYTHON "$PROJECT_DIR/vigil/anomaly_detector.py" \
 	>"$LOG_DIR/anomaly_detector.log" 2>&1 &
 PIDS+=($!)
 sleep 1
@@ -70,7 +70,7 @@ fi
 
 # 2. Correlator (cross-domain correlation — must be between detector and advisor)
 echo -ne "  [2/6] Correlator        ...  "
-$PYTHON "$PROJECT_DIR/reasoning/correlator.py" \
+$PYTHON "$PROJECT_DIR/nexus/correlator.py" \
 	>"$LOG_DIR/correlator.log" 2>&1 &
 PIDS+=($!)
 sleep 1
@@ -83,7 +83,7 @@ fi
 
 # 3. Augur advisor (multi-domain LLM advisor — listens for correlation events)
 echo -ne "  [3/6] Augur advisor     ...  "
-$PYTHON "$PROJECT_DIR/reasoning/augur_advisor.py" \
+$PYTHON "$PROJECT_DIR/consilium/advisor.py" \
 	>"$LOG_DIR/augur_advisor.log" 2>&1 &
 PIDS+=($!)
 sleep 1
@@ -96,7 +96,7 @@ fi
 
 # 4. Feedback collector (listens for advice + perception events)
 echo -ne "  [4/6] Feedback collector...  "
-$PYTHON "$PROJECT_DIR/perception/feedback_collector.py" \
+$PYTHON "$PROJECT_DIR/responsum/feedback_collector.py" \
 	>"$LOG_DIR/feedback_collector.log" 2>&1 &
 PIDS+=($!)
 sleep 1
@@ -109,7 +109,7 @@ fi
 
 # 5. Reflection engine (triggers at end of session)
 echo -ne "  [5/6] Reflection engine ...  "
-$PYTHON "$PROJECT_DIR/reasoning/reflection_engine.py" \
+$PYTHON "$PROJECT_DIR/disciplina/reflection_engine.py" \
 	>"$LOG_DIR/reflection_engine.log" 2>&1 &
 PIDS+=($!)
 sleep 1
@@ -129,11 +129,11 @@ echo -e "${GRAY}  Logs: $LOG_DIR/${RESET}"
 echo -e "${GRAY}  PIDs: ${PIDS[*]}${RESET}"
 echo ""
 echo -e "  Start perception sources in other terminals:"
-echo -e "  ${CYAN}$PYTHON $PROJECT_DIR/perception/chess_board.py${RESET}"
-echo -e "  ${CYAN}sudo $PYTHON $PROJECT_DIR/perception/typing_monitor.py${RESET}"
+echo -e "  ${CYAN}$PYTHON $PROJECT_DIR/sensus/chess_board.py${RESET}"
+echo -e "  ${CYAN}sudo $PYTHON $PROJECT_DIR/sensus/typing_monitor.py${RESET}"
 echo ""
 echo -e "${GRAY}  Press Ctrl+C to stop all components.${RESET}"
 echo ""
 
 # Run console display in foreground (blocks until Ctrl+C)
-$PYTHON "$PROJECT_DIR/output/console_display.py"
+$PYTHON "$PROJECT_DIR/vox/console_display.py"

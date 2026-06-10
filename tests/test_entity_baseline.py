@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from detection.anomaly_detector import EntityBaseline
+from vigil.anomaly_detector import EntityBaseline
 
 
 class TestEWMAUpdate:

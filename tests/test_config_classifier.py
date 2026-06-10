@@ -1,6 +1,6 @@
 """Config defaults + env coercion for the Ollama classifier fields."""
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 
 
 def test_classifier_defaults():

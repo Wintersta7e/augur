@@ -2,10 +2,10 @@
 
 Captures system-wide keypresses via the 'keyboard' library, tracks
 inter-keypress intervals, detects pauses (> 3s gaps), and publishes
-PerceptionEvents to NATS on 'augur.perception.typing'.
+PerceptionEvents to NATS on 'augur.sensus.typing'.
 
 Requires root on Linux (keyboard library needs /dev/input access).
-Run with: sudo .venv/bin/python perception/typing_monitor.py
+Run with: sudo .venv/bin/python sensus/typing_monitor.py
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ log = logging.getLogger("typing_monitor")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-NATS_SUBJECT = "augur.perception.typing"
+NATS_SUBJECT = "augur.sensus.typing"
 
 DOMAIN = "typing"
 STREAM_ID = "typing_rhythm"

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Start all Augur backend components in the correct order.
-# Chess board (perception/chess_board.py) is started separately by the user.
+# Chess board (sensus/chess_board.py) is started separately by the user.
 #
 # Optional Windows companion (not started by this script):
 #   On the Windows host (NOT in WSL), install requirements-windows.txt
 #   and run:
-#     python -m perception.activity_monitor
+#     python -m sensus.activity_monitor
 #   It will publish to WSL NATS via localhost:4222 and read the current
 #   session from Redis. Make sure a perception source that calls
 #   session_mgr.start() (chess_board or typing_monitor) has already
@@ -129,8 +129,8 @@ echo -e "${GRAY}  Logs: $LOG_DIR/${RESET}"
 echo -e "${GRAY}  PIDs: ${PIDS[*]}${RESET}"
 echo ""
 echo -e "  Start perception sources in other terminals:"
-echo -e "  ${CYAN}$PYTHON $PROJECT_DIR/perception/chess_board.py${RESET}"
-echo -e "  ${CYAN}sudo $PYTHON $PROJECT_DIR/perception/typing_monitor.py${RESET}"
+echo -e "  ${CYAN}$PYTHON $PROJECT_DIR/sensus/chess_board.py${RESET}"
+echo -e "  ${CYAN}sudo $PYTHON $PROJECT_DIR/sensus/typing_monitor.py${RESET}"
 echo ""
 echo -e "${GRAY}  Press Ctrl+C to stop all components.${RESET}"
 echo ""

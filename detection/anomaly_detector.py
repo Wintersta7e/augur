@@ -1,6 +1,6 @@
 """Domain-agnostic anomaly detector.
 
-Subscribes to NATS 'augur.perception.>' (wildcard), parses incoming
+Subscribes to NATS 'augur.sensus.>' (wildcard), parses incoming
 messages as PerceptionEvent, scores each observation using per-(domain,
 entity) EWMA baselines and River HalfSpaceTrees, then publishes anomalies
 to 'augur.detection.anomaly' and Redis.
@@ -43,7 +43,7 @@ log = logging.getLogger("anomaly_detector")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SUBSCRIBE_SUBJECT = "augur.perception.>"
+SUBSCRIBE_SUBJECT = "augur.sensus.>"
 PUBLISH_SUBJECT = "augur.detection.anomaly"
 REDIS_KEY_ANOMALY = "augur:detection:last_anomaly"
 

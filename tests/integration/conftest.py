@@ -204,7 +204,7 @@ async def inject_perception_event(
         timestamp=datetime.now(timezone.utc).isoformat(),
         session_id=session_id,
     )
-    subject = f"augur.perception.{domain}"
+    subject = f"augur.sensus.{domain}"
     await nc.publish(subject, event.to_bytes())
     return event
 

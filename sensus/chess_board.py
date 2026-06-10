@@ -61,10 +61,10 @@ PIECE_UNICODE: dict[str, str] = {
     "k": "\u265a",
 }
 
-REDIS_KEY_LAST = "augur:chess:last_move"
-REDIS_KEY_HISTORY = "augur:chess:move_history"
+REDIS_KEY_LAST = "augur:sensus:chess:last_move"
+REDIS_KEY_HISTORY = "augur:sensus:chess:move_history"
 REDIS_HISTORY_MAX = 20
-NATS_SUBJECT = "augur.perception.chess"
+NATS_SUBJECT = "augur.sensus.chess"
 
 # ---------------------------------------------------------------------------
 # Redis helpers

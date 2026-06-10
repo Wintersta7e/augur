@@ -51,7 +51,7 @@ log = logging.getLogger("feedback_collector")
 # Constants
 # ---------------------------------------------------------------------------
 SUBJECT_ADVICE = "augur.reasoning.advice"
-SUBJECT_PERCEPTION = "augur.perception.>"
+SUBJECT_PERCEPTION = "augur.sensus.>"
 SUBJECT_SESSION_END = "augur.session.end"
 SUBJECT_FEEDBACK_COMPLETE = "augur.feedback.complete"
 # Gate suppression (the MRT withheld/control arm). Only gate-decision

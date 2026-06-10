@@ -178,7 +178,7 @@ async def test_activity_focus_event_creates_baseline(pipeline, clean_redis, sess
     try:
         for i in range(max(3, config.min_observations) + 1):
             ev = _focus_event(session_id=session_id, value=3.0 + 0.1 * i)
-            await _publish(nc, "augur.perception.activity_focus", ev)
+            await _publish(nc, "augur.sensus.activity_focus", ev)
         await nc.flush()
         assert await _wait_until(
             lambda: clean_redis.get("augur:profile:activity_focus:code") is not None,
@@ -211,7 +211,7 @@ async def test_activity_intensity_event_creates_baseline(
     try:
         for i in range(max(3, config.min_observations) + 1):
             ev = _intensity_event(session_id=session_id, value=50.0 + 10.0 * i)
-            await _publish(nc, "augur.perception.activity_intensity", ev)
+            await _publish(nc, "augur.sensus.activity_intensity", ev)
         await nc.flush()
         assert await _wait_until(
             lambda: (
@@ -263,11 +263,11 @@ async def test_activity_focus_and_typing_correlate_cross_domain(
         for val_f, val_t in zip(baseline_focus, baseline_typing):
             await _publish(
                 nc,
-                "augur.perception.activity_focus",
+                "augur.sensus.activity_focus",
                 _focus_event(session_id, value=val_f),
             )
             await _publish(
-                nc, "augur.perception.typing", _typing_event(session_id, value=val_t)
+                nc, "augur.sensus.typing", _typing_event(session_id, value=val_t)
             )
         await nc.flush()
         assert await _wait_until(
@@ -278,13 +278,11 @@ async def test_activity_focus_and_typing_correlate_cross_domain(
         # Publish extreme outliers in both domains
         await _publish(
             nc,
-            "augur.perception.activity_focus",
+            "augur.sensus.activity_focus",
             _focus_event(session_id, value=50.0, active_dwell_s=600.0),
         )
         await asyncio.sleep(0.5)
-        await _publish(
-            nc, "augur.perception.typing", _typing_event(session_id, value=50.0)
-        )
+        await _publish(nc, "augur.sensus.typing", _typing_event(session_id, value=50.0))
         await nc.flush()
         await _wait_until(
             lambda: any(
@@ -346,12 +344,12 @@ async def test_activity_focus_and_intensity_correlate_cross_domain(
         for val_f, val_i in zip(baseline_focus, baseline_intensity):
             await _publish(
                 nc,
-                "augur.perception.activity_focus",
+                "augur.sensus.activity_focus",
                 _focus_event(session_id, value=val_f),
             )
             await _publish(
                 nc,
-                "augur.perception.activity_intensity",
+                "augur.sensus.activity_intensity",
                 _intensity_event(session_id, value=val_i),
             )
         await nc.flush()
@@ -365,13 +363,13 @@ async def test_activity_focus_and_intensity_correlate_cross_domain(
         # Publish extreme outliers in both domains
         await _publish(
             nc,
-            "augur.perception.activity_focus",
+            "augur.sensus.activity_focus",
             _focus_event(session_id, value=50.0, active_dwell_s=500.0),
         )
         await asyncio.sleep(0.5)
         await _publish(
             nc,
-            "augur.perception.activity_intensity",
+            "augur.sensus.activity_intensity",
             _intensity_event(session_id, value=350.0),
         )
         await nc.flush()
@@ -556,7 +554,7 @@ async def test_activity_focus_advisor_returns_advice_via_ollama(
         for i in range(max(6, config.min_observations + 3)):
             await _publish(
                 nc,
-                "augur.perception.activity_focus",
+                "augur.sensus.activity_focus",
                 _focus_event(session_id, value=3.0),
             )
         await nc.flush()
@@ -564,7 +562,7 @@ async def test_activity_focus_advisor_returns_advice_via_ollama(
         # Outlier.
         await _publish(
             nc,
-            "augur.perception.activity_focus",
+            "augur.sensus.activity_focus",
             _focus_event(session_id, value=10.0, active_dwell_s=600.0),
         )
         await nc.flush()

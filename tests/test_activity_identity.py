@@ -1,6 +1,6 @@
 """OS identity attribution: focus uses previous app, intensity uses focused app."""
 
-from perception.activity_monitor import (
+from sensus.activity_monitor import (
     _FocusState,
     _IntensityWindow,
     _resolve_file_description,

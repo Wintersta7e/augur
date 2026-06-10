@@ -34,8 +34,8 @@ NATS_URL = "nats://localhost:4222"
 SUBSCRIBE_SUBJECT = "augur.detection.anomaly"
 PUBLISH_SUBJECT = "augur.reasoning.advice"
 
-REDIS_KEY_LAST_MOVE = "augur:chess:last_move"
-REDIS_KEY_HISTORY = "augur:chess:move_history"
+REDIS_KEY_LAST_MOVE = "augur:sensus:chess:last_move"
+REDIS_KEY_HISTORY = "augur:sensus:chess:move_history"
 REDIS_KEY_ADVICE = "augur:reasoning:last_advice"
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434")

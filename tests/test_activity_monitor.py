@@ -1,4 +1,4 @@
-"""Unit tests for perception/activity_monitor.py — helpers + event builders.
+"""Unit tests for sensus/activity_monitor.py — helpers + event builders.
 
 OS modules (pywin32/pynput/psutil) are injected as MagicMock into
 sys.modules BEFORE activity_monitor is imported, so the module is
@@ -28,12 +28,12 @@ def fake_win_modules(monkeypatch):
     for name, mod in fakes.items():
         monkeypatch.setitem(sys.modules, name, mod)
     # Force re-import in case a prior test loaded it.
-    sys.modules.pop("perception.activity_monitor", None)
+    sys.modules.pop("sensus.activity_monitor", None)
     yield fakes
 
 
 def _import_module():
-    import perception.activity_monitor as mod  # noqa: PLC0415
+    import sensus.activity_monitor as mod  # noqa: PLC0415
 
     return mod
 

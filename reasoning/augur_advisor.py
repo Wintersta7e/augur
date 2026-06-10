@@ -67,8 +67,8 @@ PUBLISH_SUBJECT = "augur.reasoning.advice"
 SUBJECT_SUPPRESSED = "augur.advisor.suppressed"
 SUBJECT_DELIVERY_FAILURE = "augur.advisor.delivery_failure"
 
-REDIS_KEY_LAST_MOVE = "augur:chess:last_move"
-REDIS_KEY_HISTORY = "augur:chess:move_history"
+REDIS_KEY_LAST_MOVE = "augur:sensus:chess:last_move"
+REDIS_KEY_HISTORY = "augur:sensus:chess:move_history"
 REDIS_KEY_ADVICE = "augur:reasoning:last_advice"
 
 SEVERITY_GATE = {"medium", "high"}

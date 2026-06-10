@@ -52,7 +52,7 @@ COMPONENT_COMMANDS: dict[str, list[str]] = {
 
 # SEC-02: allowlist for domain / entity / stream_id values received through
 # MCP tool arguments. Unsanitized values would land in NATS subjects
-# (f"augur.perception.{domain}") and Redis keys (f"augur:profile:{domain}:{entity}"),
+# (f"augur.sensus.{domain}") and Redis keys (f"augur:profile:{domain}:{entity}"),
 # where a ":" or "." or wildcard character can break downstream parsing or
 # reach unintended keyspace. Keep it narrow.
 _SAFE_LABEL_RE = re.compile(r"^[a-z0-9_]{1,64}$")
@@ -326,7 +326,7 @@ async def inject_event(
     context: dict[str, Any] | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create a PerceptionEvent and publish it to NATS augur.perception.{domain}.
+    """Create a PerceptionEvent and publish it to NATS augur.sensus.{domain}.
 
     Args:
         domain: Perception domain, e.g. "chess" or "typing".
@@ -363,7 +363,7 @@ async def inject_event(
         timestamp=datetime.now(timezone.utc).isoformat(),
         session_id=sid,
     )
-    subject = f"augur.perception.{domain}"
+    subject = f"augur.sensus.{domain}"
 
     # LEAK-03: try/finally guarantees the NATS connection is closed even
     # if nc.publish raises.
@@ -463,7 +463,7 @@ async def inject_sequence(
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     session_id=sid,
                 )
-                subject = f"augur.perception.{domain}"
+                subject = f"augur.sensus.{domain}"
                 await nc.publish(subject, event.to_bytes())
                 published.append({"index": i, "subject": subject, "entity": entity})
             except Exception as exc:

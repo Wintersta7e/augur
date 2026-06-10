@@ -63,7 +63,7 @@ async def test_session_end_flushes_graph_to_redis(
     chess_base = [_chess_pool[i % len(_chess_pool)] for i in range(_warm)]
     for v in chess_base:
         await nats_conn.publish(
-            "augur.perception.chess",
+            "augur.sensus.chess",
             _make_perception_event(
                 "chess",
                 "white",
@@ -82,7 +82,7 @@ async def test_session_end_flushes_graph_to_redis(
     typing_base = [_typing_pool[i % len(_typing_pool)] for i in range(_warm)]
     for v in typing_base:
         await nats_conn.publish(
-            "augur.perception.typing",
+            "augur.sensus.typing",
             _make_perception_event(
                 "typing",
                 "user",
@@ -101,7 +101,7 @@ async def test_session_end_flushes_graph_to_redis(
 
     # Outlier 1: chess anomaly
     await nats_conn.publish(
-        "augur.perception.chess",
+        "augur.sensus.chess",
         _make_perception_event(
             "chess",
             "white",
@@ -117,7 +117,7 @@ async def test_session_end_flushes_graph_to_redis(
 
     # Outlier 2: typing anomaly within window
     await nats_conn.publish(
-        "augur.perception.typing",
+        "augur.sensus.typing",
         _make_perception_event(
             "typing",
             "user",

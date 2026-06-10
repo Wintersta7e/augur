@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from tabula.config import AugurConfig
-from reasoning.reflection_engine import analyze_precision
+from disciplina.reflection_engine import analyze_precision
 
 _CFG = AugurConfig()
 SIGMA_ADJUST_STEP = _CFG.sigma_adjust_step

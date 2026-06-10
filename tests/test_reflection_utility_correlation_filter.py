@@ -13,7 +13,7 @@ before computing its score.
 from __future__ import annotations
 
 from tabula.config import AugurConfig
-from reasoning.reflection_engine import analyze_utility
+from disciplina.reflection_engine import analyze_utility
 
 CONFIG = AugurConfig()
 

@@ -19,7 +19,7 @@ from nexus.correlator import (
     _build_passthrough_payload,
     correlate,
 )
-from reasoning.reflection_engine import (
+from disciplina.reflection_engine import (
     analyze_correlation_tuning,
     analyze_utility,
 )

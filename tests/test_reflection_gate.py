@@ -14,7 +14,7 @@ import pytest
 
 from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
-from reasoning.reflection_engine import (
+from disciplina.reflection_engine import (
     GATE_CHRONIC_MIN_PRESENCE,
     GATE_DISMISSAL_MIN,
     analyze_gate,
@@ -509,7 +509,7 @@ class TestRunReflectionWiring:
     async def test_gate_is_sixth_analysis(self) -> None:
         from unittest.mock import AsyncMock
 
-        from reasoning.reflection_engine import run_reflection
+        from disciplina.reflection_engine import run_reflection
 
         pm = _pm()
         feedback = _feedback(
@@ -536,7 +536,7 @@ class TestRunReflectionWiring:
     async def test_gate_pass_independent_of_correlation_marker(self) -> None:
         from unittest.mock import AsyncMock
 
-        from reasoning.reflection_engine import run_reflection
+        from disciplina.reflection_engine import run_reflection
 
         pm = _pm()
         # Correlation already applied → correlation pass skips, gate must NOT.

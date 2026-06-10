@@ -13,7 +13,7 @@ import pytest
 
 from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
-from reasoning.reflection_engine import run_reflection
+from disciplina.reflection_engine import run_reflection
 
 pytestmark = pytest.mark.asyncio
 

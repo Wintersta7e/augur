@@ -46,7 +46,7 @@ COMPONENT_COMMANDS: dict[str, list[str]] = {
     "nexus": [sys.executable, "-m", "nexus.correlator"],
     "consilium": [sys.executable, "-m", "consilium.advisor"],
     "responsum": [sys.executable, "-m", "responsum.feedback_collector"],
-    "reflection": [sys.executable, "-m", "reasoning.reflection_engine"],
+    "disciplina": [sys.executable, "-m", "disciplina.reflection_engine"],
     "vox": [sys.executable, "-m", "vox.console_display"],
 }
 
@@ -895,7 +895,7 @@ def set_escalation_matrix(
 
 @mcp.tool()
 async def trigger_reflection(session_id: str | None = None) -> dict[str, Any]:
-    """Trigger the reflection engine by publishing to NATS augur.reflect.trigger.
+    """Trigger the reflection engine by publishing to NATS augur.disciplina.trigger.
 
     Args:
         session_id: Optional session to reflect on. Uses current session if None.
@@ -929,7 +929,7 @@ async def trigger_reflection(session_id: str | None = None) -> dict[str, Any]:
         return {"status": "error", "error": f"NATS connect failed: {exc}"}
 
     try:
-        await nc.publish("augur.reflect.trigger", payload)
+        await nc.publish("augur.disciplina.trigger", payload)
         return {"status": "triggered", "session_id": sid}
     except Exception as exc:
         return {"status": "error", "error": str(exc)}

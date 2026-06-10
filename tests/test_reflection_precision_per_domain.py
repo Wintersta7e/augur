@@ -1,7 +1,7 @@
 """Tests for per-domain analyze_precision refactor."""
 
 from tabula.config import AugurConfig
-from reasoning.reflection_engine import analyze_precision
+from disciplina.reflection_engine import analyze_precision
 
 
 def _cfg() -> AugurConfig:

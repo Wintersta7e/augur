@@ -51,7 +51,7 @@ BG_YELLOW = "\033[43m"
 SUBJECT_ANOMALY = "augur.vigil.anomaly"
 SUBJECT_ADVICE = "augur.consilium.advice"
 SUBJECT_CORRELATION = "augur.nexus.detected"
-SUBJECT_REFLECT = "augur.reflect.complete"
+SUBJECT_REFLECT = "augur.disciplina.complete"
 SUBJECT_SUPPRESSED = "augur.limen.suppressed"
 WRAP_WIDTH = 80
 

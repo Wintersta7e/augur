@@ -393,13 +393,13 @@ class PersistenceManager:
         so the key namespace is discoverable alongside other persistence
         concerns and TTL is applied consistently.
         """
-        key = f"augur:reflect:{session_id}"
+        key = f"augur:disciplina:{session_id}"
         self._r.set(key, json.dumps(report_dict), ex=SESSION_KEY_TTL_S)
         log.debug("Saved reflection report for session %s", session_id)
 
     def load_reflection(self, session_id: str) -> dict | None:
         """Return a session's reflection report or None if not set."""
-        key = f"augur:reflect:{session_id}"
+        key = f"augur:disciplina:{session_id}"
         raw = self._r.get(key)
         if raw is None:
             return None

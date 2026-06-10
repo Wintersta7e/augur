@@ -21,7 +21,7 @@ from nexus.correlator import (
     correlate,
     ensure_matrix_seeded,
 )
-from reasoning.reflection_engine import run_reflection
+from disciplina.reflection_engine import run_reflection
 
 pytestmark = pytest.mark.asyncio
 

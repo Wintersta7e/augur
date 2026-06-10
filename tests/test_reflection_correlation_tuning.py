@@ -11,7 +11,7 @@ import dataclasses
 
 from tabula.config import AugurConfig
 from nexus.correlator import DEFAULT_ESCALATION_MATRIX
-from reasoning.reflection_engine import analyze_correlation_tuning
+from disciplina.reflection_engine import analyze_correlation_tuning
 
 CONFIG = AugurConfig()
 

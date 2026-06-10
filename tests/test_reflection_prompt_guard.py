@@ -1,7 +1,7 @@
 """Prompt forbidden-pattern guard + realized-score-pair rollback (spec 1E)."""
 
 from tabula.config import AugurConfig
-from reasoning.reflection_engine import (
+from disciplina.reflection_engine import (
     _violates_forbidden_patterns,
     maybe_rollback_prompt,
 )

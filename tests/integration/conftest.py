@@ -137,7 +137,7 @@ async def pipeline(
         "nexus": [sys.executable, "-m", "nexus.correlator"],
         "consilium": [sys.executable, "-m", "consilium.advisor"],
         "responsum": [sys.executable, "-m", "responsum.feedback_collector"],
-        "reflection": [sys.executable, "-m", "reasoning.reflection_engine"],
+        "disciplina": [sys.executable, "-m", "disciplina.reflection_engine"],
         "vox": [sys.executable, "-m", "vox.console_display"],
     }
 

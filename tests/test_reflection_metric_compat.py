@@ -2,7 +2,7 @@
 rows; utility + correlation treat a finalized 0.0 as a valid negative outcome."""
 
 from tabula.config import AugurConfig
-from reasoning.reflection_engine import _mrt_ipw_readout, analyze_utility
+from disciplina.reflection_engine import _mrt_ipw_readout, analyze_utility
 
 
 def test_ipw_excludes_unmeasurable_old_version_and_rated():

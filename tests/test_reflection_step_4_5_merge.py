@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 
 from tabula.config import AugurConfig
-from reasoning.reflection_engine import run_reflection
+from disciplina.reflection_engine import run_reflection
 
 
 @pytest.mark.asyncio

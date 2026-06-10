@@ -48,7 +48,7 @@ from consilium.advisor import (
     SUBJECT_SUPPRESSED,
     process_message,
 )
-from reasoning.reflection_engine import analyze_gate
+from disciplina.reflection_engine import analyze_gate
 
 pytestmark = pytest.mark.asyncio
 

@@ -109,7 +109,7 @@ fi
 
 # 5. Reflection engine (triggers at end of session)
 echo -ne "  [5/6] Reflection engine ...  "
-$PYTHON "$PROJECT_DIR/reasoning/reflection_engine.py" \
+$PYTHON "$PROJECT_DIR/disciplina/reflection_engine.py" \
 	>"$LOG_DIR/reflection_engine.log" 2>&1 &
 PIDS+=($!)
 sleep 1

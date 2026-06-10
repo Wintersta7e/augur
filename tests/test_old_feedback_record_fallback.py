@@ -1,7 +1,7 @@
 """Tests for graceful handling of old feedback records lacking new fields."""
 
 from tabula.config import AugurConfig
-from reasoning.reflection_engine import (
+from disciplina.reflection_engine import (
     _attribution_weights,
     analyze_correlation_window_tuning,
     analyze_precision,

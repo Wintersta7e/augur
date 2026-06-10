@@ -30,7 +30,7 @@ class TestSaveReflection:
 
         mock_redis.set.assert_called_once()
         args, kwargs = mock_redis.set.call_args
-        assert args[0] == "augur:reflect:sess-1"
+        assert args[0] == "augur:disciplina:sess-1"
         assert json.loads(args[1]) == report
         assert kwargs.get("ex") == SESSION_KEY_TTL_S
 

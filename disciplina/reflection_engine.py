@@ -1,7 +1,7 @@
 """Session reflection engine — self-adjusts Augur parameters after each session.
 
 Triggers on augur.responsum.complete (end of feedback collection) or
-augur.reflect.trigger (manual). Runs four analyses:
+augur.disciplina.trigger (manual). Runs four analyses:
 
 1. Precision  — Were anomaly detections accurate? Adjusts sigma threshold.
 2. Utility    — Was the advice useful? May mutate LLM prompt via Ollama.
@@ -9,7 +9,7 @@ augur.reflect.trigger (manual). Runs four analyses:
 4. Correlation tuning — Per-rule EWMA confidence with hysteresis to
    tune the cross-domain escalation matrix.
 
-Publishes a reflection report to augur.reflect.complete and persists
+Publishes a reflection report to augur.disciplina.complete and persists
 it via PersistenceManager.save_reflection.
 """
 
@@ -49,8 +49,8 @@ log = logging.getLogger("reflection_engine")
 # Constants
 # ---------------------------------------------------------------------------
 SUBJECT_FEEDBACK_COMPLETE = "augur.responsum.complete"
-SUBJECT_REFLECT_TRIGGER = "augur.reflect.trigger"
-SUBJECT_REFLECT_COMPLETE = "augur.reflect.complete"
+SUBJECT_REFLECT_TRIGGER = "augur.disciplina.trigger"
+SUBJECT_REFLECT_COMPLETE = "augur.disciplina.complete"
 
 # Fallback domain used only when a session's feedback contains no usable
 # standalone advice events. Per-session domain is now derived from

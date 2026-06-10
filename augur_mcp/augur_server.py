@@ -48,6 +48,7 @@ COMPONENT_COMMANDS: dict[str, list[str]] = {
     "responsum": [sys.executable, "-m", "responsum.feedback_collector"],
     "disciplina": [sys.executable, "-m", "disciplina.reflection_engine"],
     "vox": [sys.executable, "-m", "vox.console_display"],
+    "praefectus": [sys.executable, "-m", "praefectus.monitor"],
 }
 
 # SEC-02: allowlist for domain / entity / stream_id values received through
@@ -528,6 +529,20 @@ def get_last_advice(domain: str | None = None) -> dict[str, Any]:
             return {"error": "not found"}
         if domain is not None and data.get("domain") != domain:
             return {"error": "not found", "requested_domain": domain}
+        return data
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def get_pipeline_health() -> dict[str, Any]:
+    """Read the Praefectus pipeline-health snapshot from Redis: per-faculty
+    liveness/activity/overall states, degraded reasons, and uptime."""
+    try:
+        with _persistence_ctx() as pm:
+            data = pm.load_health_snapshot()
+        if data is None:
+            return {"status": "warming_up", "faculties": {}}
         return data
     except Exception as exc:
         return {"error": str(exc)}

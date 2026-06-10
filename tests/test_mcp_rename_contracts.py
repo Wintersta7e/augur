@@ -29,6 +29,7 @@ def test_component_commands_keys_and_modules_renamed():
         "responsum",
         "disciplina",
         "vox",
+        "praefectus",
     }
     assert {c[-1] for c in cmds.values()} == {
         "vigil.anomaly_detector",
@@ -37,6 +38,7 @@ def test_component_commands_keys_and_modules_renamed():
         "responsum.feedback_collector",
         "disciplina.reflection_engine",
         "vox.console_display",
+        "praefectus.monitor",
     }
 
 

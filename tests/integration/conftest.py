@@ -130,7 +130,7 @@ async def pipeline(
     Parametrize with a list of component names, e.g.:
         @pytest.mark.parametrize("pipeline", [["vigil", "nexus", "consilium"]], indirect=True)
 
-    Available components: detector, correlator, advisor, feedback, reflection, display.
+    Available components: vigil, nexus, consilium, responsum, disciplina, vox.
     """
     component_commands: dict[str, list[str]] = {
         "vigil": [sys.executable, "-m", "vigil.anomaly_detector"],

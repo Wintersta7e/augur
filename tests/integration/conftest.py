@@ -139,6 +139,7 @@ async def pipeline(
         "responsum": [sys.executable, "-m", "responsum.feedback_collector"],
         "disciplina": [sys.executable, "-m", "disciplina.reflection_engine"],
         "vox": [sys.executable, "-m", "vox.console_display"],
+        "praefectus": [sys.executable, "-m", "praefectus.monitor"],
     }
 
     requested: list[str] = getattr(request, "param", [])

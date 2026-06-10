@@ -10,7 +10,7 @@ import pytest
 
 from perception.feedback_collector import PendingGateDecision
 from reasoning.advisor_gate import GateDecision, build_signature
-from reasoning.augur_advisor import publish_suppressed_event
+from consilium.advisor import publish_suppressed_event
 
 
 @pytest.mark.asyncio

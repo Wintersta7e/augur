@@ -106,8 +106,8 @@ def main() -> int:
     )
 
     print("\n=== Prompt versioning ===")
-    track("augur:prompts:test:current")
-    track("augur:prompts:test:history")
+    track("augur:consilium:prompts:test:current")
+    track("augur:consilium:prompts:test:history")
 
     check("load missing prompt returns None", pm.load_prompt("test") is None)
 

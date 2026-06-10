@@ -932,7 +932,7 @@ def _single_medium_payload() -> dict:
 
 
 def test_advice_event_includes_decision_id_mrt_eligible_p_fire() -> None:
-    from reasoning.augur_advisor import _build_advice_event
+    from consilium.advisor import _build_advice_event
 
     decision = GateDecision.fire(
         "no_arm", id="abc123", mrt_eligible=True, p_fire=0.1, probe=True
@@ -954,7 +954,7 @@ def test_advice_event_includes_decision_id_mrt_eligible_p_fire() -> None:
 
 def test_advice_event_decision_defaults_when_none() -> None:
     # Existing 3-arg callers (no decision) must keep working with safe defaults.
-    from reasoning.augur_advisor import _build_advice_event
+    from consilium.advisor import _build_advice_event
 
     advice = _build_advice_event(
         _single_medium_payload(),
@@ -968,7 +968,7 @@ def test_advice_event_decision_defaults_when_none() -> None:
 
 
 def test_advice_event_preserves_existing_fields_with_decision() -> None:
-    from reasoning.augur_advisor import _build_advice_event
+    from consilium.advisor import _build_advice_event
 
     decision = GateDecision.fire("no_arm", id="d1")
     advice = _build_advice_event(
@@ -985,7 +985,7 @@ def test_advice_event_preserves_existing_fields_with_decision() -> None:
 
 
 def test_advisor_suppression_subjects_exist() -> None:
-    from reasoning.augur_advisor import (
+    from consilium.advisor import (
         SUBJECT_DELIVERY_FAILURE,
         SUBJECT_SUPPRESSED,
     )

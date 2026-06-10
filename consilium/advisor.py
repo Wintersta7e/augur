@@ -38,7 +38,7 @@ from reasoning.advisor_gate import (
     build_signature,
 )
 from reasoning.advisor_gate_scheduler import MustFireScheduler
-from reasoning.app_descriptor import (
+from consilium.app_descriptor import (
     ACTIVITY_DOMAINS,
     ClassifierLane,
     classifier_model_available,
@@ -59,7 +59,7 @@ log = logging.getLogger("augur_advisor")
 # Constants
 # ---------------------------------------------------------------------------
 SUBSCRIBE_SUBJECT = "augur.nexus.detected"
-PUBLISH_SUBJECT = "augur.reasoning.advice"
+PUBLISH_SUBJECT = "augur.consilium.advice"
 
 # Gate visibility subjects (spec §8). Distinct subjects so the MRT control arm
 # (PendingGateDecision, subscribed only to SUBJECT_SUPPRESSED) never tracks an
@@ -69,7 +69,7 @@ SUBJECT_DELIVERY_FAILURE = "augur.advisor.delivery_failure"
 
 REDIS_KEY_LAST_MOVE = "augur:sensus:chess:last_move"
 REDIS_KEY_HISTORY = "augur:sensus:chess:move_history"
-REDIS_KEY_ADVICE = "augur:reasoning:last_advice"
+REDIS_KEY_ADVICE = "augur:consilium:last_advice"
 
 SEVERITY_GATE = {"medium", "high"}
 
@@ -523,7 +523,7 @@ def _build_advice_event(
     model_used: str,
     decision: GateDecision | None = None,
 ) -> dict:
-    """Build the advice event dict published on augur.reasoning.advice.
+    """Build the advice event dict published on augur.consilium.advice.
 
     Derives domain/entity/value/severity from the payload so the result is
     fully self-contained. The caller merges in ``latency_ms`` (only available
@@ -863,7 +863,7 @@ async def _publish_tier1_note(
     nc: nats.aio.client.Client,
     config: AugurConfig,
 ) -> None:
-    """Publish a templated Tier-1 note on ``augur.reasoning.advice`` (tier=1)."""
+    """Publish a templated Tier-1 note on ``augur.consilium.advice`` (tier=1)."""
     note = _build_advice_event(
         payload,
         advice_text=(

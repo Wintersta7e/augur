@@ -85,7 +85,7 @@ class TestSaveLastAdvice:
 
         mock_redis.set.assert_called_once()
         args, kwargs = mock_redis.set.call_args
-        assert args[0] == "augur:reasoning:last_advice"
+        assert args[0] == "augur:consilium:last_advice"
         assert json.loads(args[1]) == advice
         assert "ex" not in kwargs
 

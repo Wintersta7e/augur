@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 
-from reasoning.augur_advisor import (
+from consilium.advisor import (
     enrich_activity_descriptor,
     enrich_payload_descriptors,
 )

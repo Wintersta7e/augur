@@ -25,9 +25,9 @@ services:
       AUGUR_REDIS_URL: redis://redis:6379
     restart: unless-stopped
 
-  advisor:
+  consilium:
     build: .
-    command: python -m reasoning.augur_advisor
+    command: python -m consilium.advisor
     depends_on:
       redis:
         condition: service_healthy

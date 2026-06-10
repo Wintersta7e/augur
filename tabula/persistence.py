@@ -119,8 +119,8 @@ class PersistenceManager:
         prompt_text: str,
         score: float | None = None,
     ) -> None:
-        current_key = f"augur:prompts:{domain}:current"
-        history_key = f"augur:prompts:{domain}:history"
+        current_key = f"augur:consilium:prompts:{domain}:current"
+        history_key = f"augur:consilium:prompts:{domain}:history"
 
         # Archive current version before overwriting
         existing = self._r.get(current_key)
@@ -137,21 +137,21 @@ class PersistenceManager:
         log.debug("Saved prompt for domain %s (score=%s)", domain, score)
 
     def load_prompt(self, domain: str) -> str | None:
-        current_key = f"augur:prompts:{domain}:current"
+        current_key = f"augur:consilium:prompts:{domain}:current"
         raw = self._r.get(current_key)
         if raw is None:
             return None
         return json.loads(raw).get("prompt")
 
     def get_prompt_history(self, domain: str, limit: int = 10) -> list[dict]:
-        history_key = f"augur:prompts:{domain}:history"
+        history_key = f"augur:consilium:prompts:{domain}:history"
         raw_list = self._r.lrange(history_key, 0, limit - 1)
         return [json.loads(entry) for entry in raw_list]
 
     def rollback_prompt(self, domain: str) -> bool:
         """Restore previous prompt version. Returns True if rollback succeeded."""
-        current_key = f"augur:prompts:{domain}:current"
-        history_key = f"augur:prompts:{domain}:history"
+        current_key = f"augur:consilium:prompts:{domain}:current"
+        history_key = f"augur:consilium:prompts:{domain}:history"
 
         previous_raw = self._r.lpop(history_key)
         if previous_raw is None:
@@ -175,7 +175,7 @@ class PersistenceManager:
         1E §9) so the rollback check compares current-vs-previous realized scores
         rather than the stale motivating-utility recorded at mutation time.
         """
-        current_key = f"augur:prompts:{domain}:current"
+        current_key = f"augur:consilium:prompts:{domain}:current"
         raw = self._r.get(current_key)
         if raw is None:
             return
@@ -186,8 +186,8 @@ class PersistenceManager:
     def get_prompt_score_pair(self, domain: str) -> tuple[float | None, float | None]:
         """Return (current_score, most_recent_previous_score) for the domain's
         prompt — the realized-score pair the 1E rollback gate compares."""
-        current_key = f"augur:prompts:{domain}:current"
-        history_key = f"augur:prompts:{domain}:history"
+        current_key = f"augur:consilium:prompts:{domain}:current"
+        history_key = f"augur:consilium:prompts:{domain}:history"
         cur_raw = self._r.get(current_key)
         cur = json.loads(cur_raw).get("score") if cur_raw else None
         prev_list = self._r.lrange(history_key, 0, 0)
@@ -239,14 +239,14 @@ class PersistenceManager:
     def save_app_descriptor(
         self, entity: str, descriptor: str, *, overwrite: bool
     ) -> None:
-        """Store an app's descriptor in the augur:config:app_descriptors hash.
+        """Store an app's descriptor in the augur:consilium:app_descriptors hash.
 
         ``overwrite=True`` (OS FileDescription — authoritative) uses HSET and
         upgrades any earlier value. ``overwrite=False`` (LLM fallback) uses
         HSETNX so a late classification can never clobber OS truth or an
         earlier guess.
         """
-        key = "augur:config:app_descriptors"
+        key = "augur:consilium:app_descriptors"
         if (
             not self._r.hexists(key, entity)
             and self._r.hlen(key) >= MAX_APP_DESCRIPTORS
@@ -264,14 +264,14 @@ class PersistenceManager:
 
     def load_app_descriptor(self, entity: str) -> str | None:
         """Return one app's descriptor (decoded), or None if absent."""
-        raw = self._r.hget("augur:config:app_descriptors", entity)
+        raw = self._r.hget("augur:consilium:app_descriptors", entity)
         if raw is None:
             return None
         return raw.decode() if isinstance(raw, bytes) else raw
 
     def load_app_descriptors(self) -> dict[str, str]:
         """Return the full app->descriptor map with keys/values decoded to str."""
-        raw = self._r.hgetall("augur:config:app_descriptors")
+        raw = self._r.hgetall("augur:consilium:app_descriptors")
         out: dict[str, str] = {}
         for k, v in raw.items():
             key = k.decode() if isinstance(k, bytes) else k
@@ -420,11 +420,11 @@ class PersistenceManager:
 
     def save_last_advice(self, advice_dict: dict) -> None:
         """Persist the most recent LLM advice payload (no TTL — live state)."""
-        self._r.set("augur:reasoning:last_advice", json.dumps(advice_dict))
+        self._r.set("augur:consilium:last_advice", json.dumps(advice_dict))
 
     def load_last_advice(self) -> dict | None:
         """Return the most recent LLM advice payload or None if not set."""
-        raw = self._r.get("augur:reasoning:last_advice")
+        raw = self._r.get("augur:consilium:last_advice")
         if raw is None:
             return None
         return json.loads(raw)

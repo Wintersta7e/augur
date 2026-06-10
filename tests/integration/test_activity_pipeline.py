@@ -437,8 +437,8 @@ async def test_feedback_keying_separates_focus_and_intensity_tracking(
         "primary_domain": "activity_intensity",
         "involved_domains": ["activity_intensity"],
     }
-    await nc.publish("augur.reasoning.advice", json.dumps(advice_focus).encode())
-    await nc.publish("augur.reasoning.advice", json.dumps(advice_intensity).encode())
+    await nc.publish("augur.consilium.advice", json.dumps(advice_focus).encode())
+    await nc.publish("augur.consilium.advice", json.dumps(advice_intensity).encode())
     await nc.flush()
     assert await _wait_until(
         lambda: len(clean_redis.keys("augur:feedback:*") or []) > 0,
@@ -531,7 +531,7 @@ def test_get_active_session_helper_returns_id_for_active_fresh(clean_redis_sync)
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("pipeline", [["vigil", "nexus", "advisor"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil", "nexus", "consilium"]], indirect=True)
 @pytest.mark.asyncio
 async def test_activity_focus_advisor_returns_advice_via_ollama(
     pipeline, clean_redis, session_id
@@ -553,7 +553,7 @@ async def test_activity_focus_advisor_returns_advice_via_ollama(
     async def _capture(msg):
         received.append(json.loads(msg.data.decode()))
 
-    sub = await nc.subscribe("augur.reasoning.advice", cb=_capture)
+    sub = await nc.subscribe("augur.consilium.advice", cb=_capture)
     try:
         for i in range(max(6, config.min_observations + 3)):
             await _publish(

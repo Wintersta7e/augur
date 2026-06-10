@@ -6,7 +6,7 @@ Exercises the advisor gate (spec §11 "Integration") against the live
 Following the established ``test_matrix_tuning_loop.py`` pattern, the LLM
 (``query_ollama``) is injected as a deterministic stub and the interactive
 feedback subprocess is not started (its stdin prompt is not automatable); the
-gate's per-message control flow (``reasoning.augur_advisor.process_message``)
+gate's per-message control flow (``consilium.advisor.process_message``)
 is driven in-process so that every Redis write goes through a real
 ``PersistenceManager`` and every NATS publish traverses a real connection,
 verified by a real subscriber.
@@ -16,7 +16,7 @@ Scenarios (Task 12.1 / spec §11):
      ``augur.advisor.suppressed`` AND the console dedups it;
   2. an exempt high+correlated event fires end-to-end even when the
      reasoning_lock is held;
-  3. a Tier-1 note is published on ``augur.reasoning.advice`` (tier=1) and
+  3. a Tier-1 note is published on ``augur.consilium.advice`` (tier=1) and
      reaches the feedback collector;
   4. hot-reload — ``analyze_gate`` writes tuned params that a subsequent
      ``evaluate`` reads;
@@ -43,7 +43,7 @@ from vox.console_display import dedup_should_suppress, update_last_rendered
 from perception.feedback_collector import PendingAdvice, _resolve_primary_domain
 from reasoning.advisor_gate import Gate, GateDecision, build_signature
 from reasoning.advisor_gate_scheduler import MustFireScheduler
-from reasoning.augur_advisor import (
+from consilium.advisor import (
     PUBLISH_SUBJECT,
     SUBJECT_SUPPRESSED,
     process_message,
@@ -168,7 +168,7 @@ async def test_suppress_logs_silence_publishes_suppressed_and_console_dedups(
     assert silences[0]["state_key"] == state_key
 
     # No advice was published (suppress path returns before any fire).
-    advice = redis_client.get("augur:reasoning:last_advice")
+    advice = redis_client.get("augur:consilium:last_advice")
     assert advice is None
 
     # The suppressed event reached a real NATS subscriber.
@@ -268,7 +268,7 @@ async def test_exempt_fires_through_scheduler_with_lock_held(
     assert pm.load_channel_stats(sig.state_key) == {}
 
 
-# ── Scenario 3: Tier-1 note on augur.reasoning.advice (tier=1) reaches feedback
+# ── Scenario 3: Tier-1 note on augur.consilium.advice (tier=1) reaches feedback
 
 
 async def test_tier1_note_published_and_reaches_feedback(

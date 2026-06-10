@@ -18,7 +18,7 @@ from tests.integration.conftest import (
 @requires_ollama
 @pytest.mark.parametrize(
     "pipeline",
-    [["vigil", "advisor", "feedback", "reflection"]],
+    [["vigil", "consilium", "feedback", "reflection"]],
     indirect=True,
 )
 class TestReflection:

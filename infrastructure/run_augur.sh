@@ -83,7 +83,7 @@ fi
 
 # 3. Augur advisor (multi-domain LLM advisor — listens for correlation events)
 echo -ne "  [3/6] Augur advisor     ...  "
-$PYTHON "$PROJECT_DIR/reasoning/augur_advisor.py" \
+$PYTHON "$PROJECT_DIR/consilium/advisor.py" \
 	>"$LOG_DIR/augur_advisor.log" 2>&1 &
 PIDS+=($!)
 sleep 1

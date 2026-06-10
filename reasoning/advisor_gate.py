@@ -920,7 +920,7 @@ class Gate:
         Otherwise it is a **Tier-1** candidate (a one-off single+medium):
 
         * ``TIER1_MODE == "note"`` → ``DOWNGRADE(tier=1, "cost_tier_downgrade")``
-          — a templated note still published on ``augur.reasoning.advice`` with
+          — a templated note still published on ``augur.consilium.advice`` with
           ``tier=1`` so feedback/reflection observe it;
         * ``TIER1_MODE == "silent"`` → ``SUPPRESS("cost_tier_downgrade_silent")``
           — a gate non-delivery (logged per invariant A).

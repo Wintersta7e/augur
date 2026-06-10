@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 
-from reasoning.augur_advisor import (
+from consilium.advisor import (
     build_activity_focus_prompt,
     build_activity_intensity_prompt,
     build_correlation_prompt,

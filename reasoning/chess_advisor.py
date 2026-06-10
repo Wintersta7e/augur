@@ -32,11 +32,11 @@ log = logging.getLogger("chess_advisor")
 # ---------------------------------------------------------------------------
 NATS_URL = "nats://localhost:4222"
 SUBSCRIBE_SUBJECT = "augur.vigil.anomaly"
-PUBLISH_SUBJECT = "augur.reasoning.advice"
+PUBLISH_SUBJECT = "augur.consilium.advice"
 
 REDIS_KEY_LAST_MOVE = "augur:sensus:chess:last_move"
 REDIS_KEY_HISTORY = "augur:sensus:chess:move_history"
-REDIS_KEY_ADVICE = "augur:reasoning:last_advice"
+REDIS_KEY_ADVICE = "augur:consilium:last_advice"
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434")
 OLLAMA_MODEL = "qwen2.5:32b"

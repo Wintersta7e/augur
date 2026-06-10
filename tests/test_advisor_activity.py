@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from reasoning.augur_advisor import (
+from consilium.advisor import (
     DOMAIN_HANDLERS,
     build_activity_focus_prompt,
     build_activity_intensity_prompt,
@@ -242,7 +242,7 @@ def test_build_activity_focus_prompt_does_not_default_to_pathological_framing():
 
 def test_domain_handlers_and_describers_keys_match():
     """Each domain with a prompt builder must also have a describer (and vice versa)."""
-    from reasoning.augur_advisor import DOMAIN_HANDLERS, DOMAIN_DESCRIBERS
+    from consilium.advisor import DOMAIN_HANDLERS, DOMAIN_DESCRIBERS
 
     assert set(DOMAIN_HANDLERS.keys()) == set(DOMAIN_DESCRIBERS.keys()), (
         f"DOMAIN_HANDLERS keys {set(DOMAIN_HANDLERS.keys())} "

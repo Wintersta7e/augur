@@ -1,6 +1,6 @@
 """Integration-level tests for the gate-driven on_message control flow (spec §3).
 
-These exercise ``reasoning.augur_advisor.process_message`` — the per-message
+These exercise ``consilium.advisor.process_message`` — the per-message
 control flow extracted from ``run()`` — with the LLM (``query_ollama``) and NATS
 (``nc.publish``) mocked.  They mirror the spec §3 pseudocode + the §11 hard
 gates: suppress, fail-open, exempt/anti-starvation must-fire, Tier-1 downgrade,
@@ -19,7 +19,7 @@ import pytest
 
 from reasoning.advisor_gate import Gate, GateDecision
 from reasoning.advisor_gate_scheduler import MustFireScheduler
-from reasoning.augur_advisor import process_message
+from consilium.advisor import process_message
 from tests.conftest import (
     EXEMPT_PAYLOAD,
     SINGLE_MEDIUM,
@@ -138,7 +138,7 @@ async def test_suppress_records_one_silence_and_publishes_suppressed(
     assert len(silences) == 1
     assert silences[0]["reason"] == "habituated"
     # No advice published; exactly one suppressed event.
-    from reasoning.augur_advisor import PUBLISH_SUBJECT, SUBJECT_SUPPRESSED
+    from consilium.advisor import PUBLISH_SUBJECT, SUBJECT_SUPPRESSED
 
     subjects = _published_subjects(nc)
     assert PUBLISH_SUBJECT not in subjects
@@ -189,7 +189,7 @@ async def test_suppressed_event_carries_full_payload(
         config=cfg,
         lane=lane,
     )
-    from reasoning.augur_advisor import SUBJECT_SUPPRESSED
+    from consilium.advisor import SUBJECT_SUPPRESSED
 
     ev = _published_on(nc, SUBJECT_SUPPRESSED)[0]
     for k in (
@@ -245,7 +245,7 @@ async def test_failed_record_suppression_fires(
         config=cfg,
         lane=lane,
     )
-    from reasoning.augur_advisor import PUBLISH_SUBJECT, SUBJECT_SUPPRESSED
+    from consilium.advisor import PUBLISH_SUBJECT, SUBJECT_SUPPRESSED
 
     # No silence committed → no suppressed event; advice fired instead.
     assert _published_on(nc, SUBJECT_SUPPRESSED) == []
@@ -278,7 +278,7 @@ async def test_exempt_fires_when_lock_held(fake_pm, cfg, nc, http_client, lane) 
     await asyncio.sleep(0.01)  # let the exempt must-fire enqueue + block
     scheduler.release_ordinary()  # frees the slot → dispatch grants the must-fire
     await task
-    from reasoning.augur_advisor import PUBLISH_SUBJECT
+    from consilium.advisor import PUBLISH_SUBJECT
 
     # Exempt is a must-fire: it awaits the lock rather than busy-skipping.
     assert len(_published_on(nc, PUBLISH_SUBJECT)) == 1
@@ -318,7 +318,7 @@ async def test_anti_starvation_release_delivered_when_lock_held(
     await asyncio.sleep(0.01)  # let the anti-starvation must-fire enqueue + block
     scheduler.release_ordinary()  # frees the slot → dispatch grants the release
     await task
-    from reasoning.augur_advisor import PUBLISH_SUBJECT
+    from consilium.advisor import PUBLISH_SUBJECT
 
     advice = _published_on(nc, PUBLISH_SUBJECT)
     assert len(advice) == 1
@@ -346,7 +346,7 @@ async def test_evaluate_exception_fails_open(
         config=cfg,
         lane=lane,
     )
-    from reasoning.augur_advisor import PUBLISH_SUBJECT
+    from consilium.advisor import PUBLISH_SUBJECT
 
     assert len(_published_on(nc, PUBLISH_SUBJECT)) == 1
 
@@ -382,7 +382,7 @@ async def test_record_delivery_success_exception_still_publishes_preserving_id(
         config=cfg2,
         lane=lane,
     )
-    from reasoning.augur_advisor import PUBLISH_SUBJECT
+    from consilium.advisor import PUBLISH_SUBJECT
 
     advice = _published_on(nc, PUBLISH_SUBJECT)
     assert len(advice) == 1
@@ -412,7 +412,7 @@ async def test_scheduler_exception_emergency_delivers(
         config=cfg,
         lane=lane,
     )
-    from reasoning.augur_advisor import PUBLISH_SUBJECT
+    from consilium.advisor import PUBLISH_SUBJECT
 
     assert len(_published_on(nc, PUBLISH_SUBJECT)) == 1
 
@@ -441,7 +441,7 @@ async def test_busy_ordinary_publishes_delivery_failure(
         lane=lane,
     )
     scheduler._lock.release()
-    from reasoning.augur_advisor import (
+    from consilium.advisor import (
         PUBLISH_SUBJECT,
         SUBJECT_DELIVERY_FAILURE,
         SUBJECT_SUPPRESSED,
@@ -475,7 +475,7 @@ async def test_cap_fail_open_busy(fake_pm_at_cap, cfg, nc, http_client, lane) ->
         lane=lane,
     )
     scheduler._lock.release()
-    from reasoning.augur_advisor import PUBLISH_SUBJECT, SUBJECT_DELIVERY_FAILURE
+    from consilium.advisor import PUBLISH_SUBJECT, SUBJECT_DELIVERY_FAILURE
 
     assert _published_on(nc, PUBLISH_SUBJECT) == []
     df = _published_on(nc, SUBJECT_DELIVERY_FAILURE)
@@ -513,7 +513,7 @@ async def test_tier1_note_published_with_tier_1(
         config=cfg,
         lane=lane,
     )
-    from reasoning.augur_advisor import PUBLISH_SUBJECT
+    from consilium.advisor import PUBLISH_SUBJECT
 
     notes = _published_on(nc, PUBLISH_SUBJECT)
     assert len(notes) == 1
@@ -597,7 +597,7 @@ async def test_no_phantom_on_ollama_failure(
         lane=lane,
         query_ollama=failing_ollama,
     )
-    from reasoning.augur_advisor import PUBLISH_SUBJECT
+    from consilium.advisor import PUBLISH_SUBJECT
 
     # No advice, no emission (no phantom delivery).
     assert _published_on(nc, PUBLISH_SUBJECT) == []
@@ -641,7 +641,7 @@ async def test_descriptor_map_fills_on_silence(fake_pm, cfg, nc, http_client) ->
     # (empty descriptor map, no app_identity) was enqueued for classification.
     lane.enqueue.assert_called_once_with("someapp.exe")
     # Suppressed (no advice).
-    from reasoning.augur_advisor import PUBLISH_SUBJECT
+    from consilium.advisor import PUBLISH_SUBJECT
 
     assert _published_on(nc, PUBLISH_SUBJECT) == []
     assert len(fake_pm.load_silence_records(limit=10)) == 1
@@ -683,7 +683,7 @@ async def test_record_busy_skip_exception_fails_open_and_fires(
     await asyncio.sleep(0.01)  # let the fail-open must-fire enqueue + block
     scheduler.release_ordinary()  # frees the slot → dispatch grants the fail-open
     await task
-    from reasoning.augur_advisor import PUBLISH_SUBJECT, SUBJECT_SUPPRESSED
+    from consilium.advisor import PUBLISH_SUBJECT, SUBJECT_SUPPRESSED
 
     # The dropped ordinary fire is delivered (fail open), never silenced.
     assert len(_published_on(nc, PUBLISH_SUBJECT)) == 1
@@ -718,7 +718,7 @@ async def test_record_suppression_raises_fires(
         config=cfg,
         lane=lane,
     )
-    from reasoning.augur_advisor import PUBLISH_SUBJECT, SUBJECT_SUPPRESSED
+    from consilium.advisor import PUBLISH_SUBJECT, SUBJECT_SUPPRESSED
 
     # No suppressed event; advice fired instead (fail open at the call site).
     assert _published_on(nc, SUBJECT_SUPPRESSED) == []
@@ -750,7 +750,7 @@ async def test_ollama_connect_error_records_unreachable(
         lane=lane,
         query_ollama=failing,
     )
-    from reasoning.augur_advisor import PUBLISH_SUBJECT
+    from consilium.advisor import PUBLISH_SUBJECT
 
     assert _published_on(nc, PUBLISH_SUBJECT) == []
     failures = fake_pm.load_delivery_failures(limit=10)
@@ -779,7 +779,7 @@ async def test_ollama_timeout_records_timeout(
         lane=lane,
         query_ollama=failing,
     )
-    from reasoning.augur_advisor import PUBLISH_SUBJECT
+    from consilium.advisor import PUBLISH_SUBJECT
 
     assert _published_on(nc, PUBLISH_SUBJECT) == []
     failures = fake_pm.load_delivery_failures(limit=10)
@@ -817,7 +817,7 @@ async def test_anti_starvation_coalesced_when_in_flight(
         config=cfg,
         lane=lane,
     )
-    from reasoning.augur_advisor import PUBLISH_SUBJECT
+    from consilium.advisor import PUBLISH_SUBJECT
 
     # Coalesced → nothing published, no emission.
     assert _published_on(nc, PUBLISH_SUBJECT) == []
@@ -851,7 +851,7 @@ async def test_anti_starvation_recheck_skips_when_not_starved(
         config=cfg,
         lane=lane,
     )
-    from reasoning.augur_advisor import PUBLISH_SUBJECT
+    from consilium.advisor import PUBLISH_SUBJECT
 
     # Re-check returned not-starved → skipped, no advice, no emission.
     assert _published_on(nc, PUBLISH_SUBJECT) == []
@@ -878,7 +878,7 @@ async def test_ordinary_fire_publishes_and_records_emission(
         config=cfg2,
         lane=lane,
     )
-    from reasoning.augur_advisor import PUBLISH_SUBJECT
+    from consilium.advisor import PUBLISH_SUBJECT
 
     advice = _published_on(nc, PUBLISH_SUBJECT)
     assert len(advice) == 1

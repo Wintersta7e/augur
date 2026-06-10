@@ -50,7 +50,7 @@ log = logging.getLogger("feedback_collector")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SUBJECT_ADVICE = "augur.reasoning.advice"
+SUBJECT_ADVICE = "augur.consilium.advice"
 SUBJECT_PERCEPTION = "augur.sensus.>"
 SUBJECT_SESSION_END = "augur.session.end"
 SUBJECT_FEEDBACK_COMPLETE = "augur.feedback.complete"

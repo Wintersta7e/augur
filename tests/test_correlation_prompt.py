@@ -6,7 +6,7 @@ payload.correlation_found.
 
 from __future__ import annotations
 
-from reasoning.augur_advisor import (
+from consilium.advisor import (
     SEVERITY_GATE,
     SUBSCRIBE_SUBJECT,
     build_correlation_prompt,
@@ -165,7 +165,7 @@ class TestResolveAdvisorPath:
     """
 
     def test_correlation_found_true_routes_to_correlation(self) -> None:
-        from reasoning.augur_advisor import resolve_advisor_path
+        from consilium.advisor import resolve_advisor_path
 
         assert (
             resolve_advisor_path({"correlation_found": True, "primary_anomaly": {}})
@@ -173,7 +173,7 @@ class TestResolveAdvisorPath:
         )
 
     def test_correlation_found_false_routes_to_single(self) -> None:
-        from reasoning.augur_advisor import resolve_advisor_path
+        from consilium.advisor import resolve_advisor_path
 
         assert (
             resolve_advisor_path({"correlation_found": False, "primary_anomaly": {}})
@@ -181,6 +181,6 @@ class TestResolveAdvisorPath:
         )
 
     def test_missing_flag_defaults_to_single(self) -> None:
-        from reasoning.augur_advisor import resolve_advisor_path
+        from consilium.advisor import resolve_advisor_path
 
         assert resolve_advisor_path({"primary_anomaly": {}}) == "single"

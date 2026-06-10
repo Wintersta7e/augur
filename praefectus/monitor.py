@@ -65,6 +65,31 @@ async def tick(
     pm.save_health_snapshot(H.summarize(report))
 
 
+def record_message(
+    states, window, subject: str, raw: bytes, now: float, config
+) -> None:
+    """Dispatch one bus message into the registry/window: a heartbeat stamps
+    liveness, a faculty work-subject records activity. Pure (mutates states/window,
+    no I/O). Extracted from run()'s on_msg so the malformed-payload robustness is
+    directly unit-testable; well-formed {faculty, ts} payloads behave unchanged."""
+    kind, _ = H.classify_event(subject)
+    if kind == "heartbeat":
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return
+            ts = float(data.get("ts", now))
+        except (ValueError, TypeError):
+            return
+        H.record_heartbeat(states, data.get("faculty"), ts)
+    elif kind == "activity":
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            data = {}
+        H.record_activity(states, window, subject, data, now, config)
+
+
 async def run() -> None:
     config = AugurConfig.from_env()
     if not config.praefectus_enabled:
@@ -83,23 +108,7 @@ async def run() -> None:
     hb_task = start_heartbeat(nc, "praefectus", config.praefectus_heartbeat_interval_s)
 
     async def on_msg(msg) -> None:
-        kind, _ = H.classify_event(msg.subject)
-        now = time.time()
-        if kind == "heartbeat":
-            try:
-                data = json.loads(msg.data)
-                if not isinstance(data, dict):
-                    return
-                ts = float(data.get("ts", now))
-            except (ValueError, TypeError):
-                return
-            H.record_heartbeat(states, data.get("faculty"), ts)
-        elif kind == "activity":
-            try:
-                data = json.loads(msg.data)
-            except (ValueError, TypeError):
-                data = {}
-            H.record_activity(states, window, msg.subject, data, now, config)
+        record_message(states, window, msg.subject, msg.data, time.time(), config)
 
     sub = await nc.subscribe("augur.>", cb=on_msg)
     log.info("praefectus: subscribed augur.> (tick=%.1fs)", config.praefectus_tick_s)

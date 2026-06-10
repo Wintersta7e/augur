@@ -220,10 +220,15 @@ def test_record_activity_prunes_old_entries():
 
 
 def test_stall_signal_below_min_events_floor():
-    # T3a: 1 detected, 0 terminals — below min_events(2) floor → NOT degraded.
+    # T3a: the min_events floor is the SOLE gate here. With tolerance=0 the deficit
+    # clause alone WOULD fire on 1 detected/0 terminals (0 < 1-0), so a non-degraded
+    # verdict isolates the floor as the blocker; crossing to 2 detected then degrades.
     cfg = _Cfg()
-    w = H.ActivityWindow(detected_mh=[1.0])
-    assert H.stall_signal(w, 100.0, cfg).degraded is False
+    cfg.praefectus_stall_tolerance = 0
+    below = H.ActivityWindow(detected_mh=[1.0])  # 1 < min_events(2) → floor blocks
+    assert H.stall_signal(below, 100.0, cfg).degraded is False
+    at_floor = H.ActivityWindow(detected_mh=[1.0, 2.0])  # 2 ≥ floor, deficit 2>0
+    assert H.stall_signal(at_floor, 100.0, cfg).degraded is True
 
 
 def test_stall_signal_deficit_equals_tolerance_plus_one():

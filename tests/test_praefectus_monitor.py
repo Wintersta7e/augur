@@ -151,50 +151,36 @@ def test_run_early_exits_when_disabled_without_connecting(monkeypatch):
     assert asyncio.run(M.run()) is None
 
 
-def test_on_msg_tolerates_malformed_heartbeat_payloads():
-    # T5 (M11): the on_msg heartbeat branch is a closure inside run() and not
-    # directly importable, so this exercises the same H3-hardened json/dict/ts
-    # guard the closure uses against non-JSON and valid-but-non-dict payloads.
-    import asyncio
-
+def test_record_message_tolerates_malformed_payloads():
+    # T5 (M11): record_message IS the real dispatch body of run()'s on_msg, so
+    # this directly exercises the H3-hardened json/dict/ts guard (no inline
+    # replica) against non-JSON, valid-but-non-dict, and non-numeric-ts payloads.
     cfg = AugurConfig()
     states = H.initial_states(1000.0)
     window = H.ActivityWindow()
 
-    async def on_msg(msg) -> None:
-        kind, _ = H.classify_event(msg.subject)
-        now = 1000.0
-        if kind == "heartbeat":
-            try:
-                data = json.loads(msg.data)
-                if not isinstance(data, dict):
-                    return
-                ts = float(data.get("ts", now))
-            except (ValueError, TypeError):
-                return
-            H.record_heartbeat(states, data.get("faculty"), ts)
-        elif kind == "activity":
-            try:
-                data = json.loads(msg.data)
-            except (ValueError, TypeError):
-                data = {}
-            H.record_activity(states, window, msg.subject, data, now, cfg)
-
-    class _Msg:
-        def __init__(self, subject, data):
-            self.subject = subject
-            self.data = data
-
-    # non-JSON bytes and valid-JSON-non-dict (b"5") must not raise
-    asyncio.run(on_msg(_Msg(H.HEARTBEAT_SUBJECT, b"not json")))
-    asyncio.run(on_msg(_Msg(H.HEARTBEAT_SUBJECT, b"5")))
+    # non-JSON bytes, valid-JSON-non-dict (b"5"), and a non-numeric ts must not raise
+    M.record_message(states, window, H.HEARTBEAT_SUBJECT, b"not json", 1000.0, cfg)
+    M.record_message(states, window, H.HEARTBEAT_SUBJECT, b"5", 1000.0, cfg)
+    M.record_message(
+        states,
+        window,
+        H.HEARTBEAT_SUBJECT,
+        b'{"faculty": "vox", "ts": "nope"}',
+        1000.0,
+        cfg,
+    )
+    assert states["vox"].last_heartbeat is None  # all three were rejected
     # well-formed payload still records normally
-    asyncio.run(
-        on_msg(
-            _Msg(
-                H.HEARTBEAT_SUBJECT,
-                json.dumps({"faculty": "vox", "ts": 999.0}).encode(),
-            )
-        )
+    M.record_message(
+        states,
+        window,
+        H.HEARTBEAT_SUBJECT,
+        json.dumps({"faculty": "vox", "ts": 999.0}).encode(),
+        1000.0,
+        cfg,
     )
     assert states["vox"].last_heartbeat == 999.0
+    # malformed activity payload falls back to {} and still stamps last_event_ts
+    M.record_message(states, window, "augur.nexus.detected", b"not json", 1010.0, cfg)
+    assert states["nexus"].last_event_ts == 1010.0

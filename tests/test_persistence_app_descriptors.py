@@ -2,9 +2,9 @@
 
 from unittest.mock import MagicMock
 
-from blackboard.persistence import PersistenceManager
+from tabula.persistence import PersistenceManager
 
-KEY = "augur:config:app_descriptors"
+KEY = "augur:consilium:app_descriptors"
 
 
 def test_save_app_descriptor_overwrite_uses_hset():
@@ -74,7 +74,9 @@ def test_save_app_descriptor_allows_update_when_full():
     r.hlen.return_value = 2000
     pm = PersistenceManager(r)
     pm.save_app_descriptor("existing_app", "Y", overwrite=True)
-    r.hset.assert_called_once_with("augur:config:app_descriptors", "existing_app", "Y")
+    r.hset.assert_called_once_with(
+        "augur:consilium:app_descriptors", "existing_app", "Y"
+    )
 
 
 def test_save_app_descriptor_drops_new_entity_when_full_overwrite_true():

@@ -3,8 +3,8 @@
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-from blackboard.config import AugurConfig
-from reasoning.correlator import (
+from tabula.config import AugurConfig
+from nexus.correlator import (
     DEFAULT_ESCALATION_MATRIX,
     _build_correlation_payload,
     correlate,

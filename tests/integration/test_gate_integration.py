@@ -6,17 +6,17 @@ Exercises the advisor gate (spec §11 "Integration") against the live
 Following the established ``test_matrix_tuning_loop.py`` pattern, the LLM
 (``query_ollama``) is injected as a deterministic stub and the interactive
 feedback subprocess is not started (its stdin prompt is not automatable); the
-gate's per-message control flow (``reasoning.augur_advisor.process_message``)
+gate's per-message control flow (``consilium.advisor.process_message``)
 is driven in-process so that every Redis write goes through a real
 ``PersistenceManager`` and every NATS publish traverses a real connection,
 verified by a real subscriber.
 
 Scenarios (Task 12.1 / spec §11):
   1. a gate SUPPRESS writes the silence log AND publishes
-     ``augur.advisor.suppressed`` AND the console dedups it;
+     ``augur.limen.suppressed`` AND the console dedups it;
   2. an exempt high+correlated event fires end-to-end even when the
      reasoning_lock is held;
-  3. a Tier-1 note is published on ``augur.reasoning.advice`` (tier=1) and
+  3. a Tier-1 note is published on ``augur.consilium.advice`` (tier=1) and
      reaches the feedback collector;
   4. hot-reload — ``analyze_gate`` writes tuned params that a subsequent
      ``evaluate`` reads;
@@ -37,18 +37,18 @@ from typing import Any
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from blackboard.config import AugurConfig
-from blackboard.persistence import PersistenceManager
-from output.console_display import dedup_should_suppress, update_last_rendered
-from perception.feedback_collector import PendingAdvice, _resolve_primary_domain
-from reasoning.advisor_gate import Gate, GateDecision, build_signature
-from reasoning.advisor_gate_scheduler import MustFireScheduler
-from reasoning.augur_advisor import (
+from tabula.config import AugurConfig
+from tabula.persistence import PersistenceManager
+from vox.console_display import dedup_should_suppress, update_last_rendered
+from responsum.feedback_collector import PendingAdvice, _resolve_primary_domain
+from limen.gate import Gate, GateDecision, build_signature
+from limen.scheduler import MustFireScheduler
+from consilium.advisor import (
     PUBLISH_SUBJECT,
     SUBJECT_SUPPRESSED,
     process_message,
 )
-from reasoning.reflection_engine import analyze_gate
+from disciplina.reflection_engine import analyze_gate
 
 pytestmark = pytest.mark.asyncio
 
@@ -57,7 +57,7 @@ pytestmark = pytest.mark.asyncio
 NOW = 1_000_000.0
 
 # Channel-stats key the gate's cap probe checks (advisor_gate._CHANNEL_STATS_KEY).
-_CHANNEL_STATS_KEY = "augur:gate:channel_stats"
+_CHANNEL_STATS_KEY = "augur:limen:channel_stats"
 
 
 def _pm(redis_client: Any) -> PersistenceManager:
@@ -122,7 +122,7 @@ async def test_suppress_logs_silence_publishes_suppressed_and_console_dedups(
     redis_client, nats_conn
 ) -> None:
     """A central-tolerance SUPPRESS writes one silence record, publishes
-    ``augur.advisor.suppressed`` (received over real NATS), and the console
+    ``augur.limen.suppressed`` (received over real NATS), and the console
     contract dedups the originating anomaly via that payload."""
     pm = _pm(redis_client)
     config = AugurConfig()
@@ -168,7 +168,7 @@ async def test_suppress_logs_silence_publishes_suppressed_and_console_dedups(
     assert silences[0]["state_key"] == state_key
 
     # No advice was published (suppress path returns before any fire).
-    advice = redis_client.get("augur:reasoning:last_advice")
+    advice = redis_client.get("augur:consilium:last_advice")
     assert advice is None
 
     # The suppressed event reached a real NATS subscriber.
@@ -268,7 +268,7 @@ async def test_exempt_fires_through_scheduler_with_lock_held(
     assert pm.load_channel_stats(sig.state_key) == {}
 
 
-# ── Scenario 3: Tier-1 note on augur.reasoning.advice (tier=1) reaches feedback
+# ── Scenario 3: Tier-1 note on augur.consilium.advice (tier=1) reaches feedback
 
 
 async def test_tier1_note_published_and_reaches_feedback(
@@ -434,7 +434,7 @@ async def test_refuse_at_cap_fails_open_to_fire(
     """When the channel_stats hash is at MAX_GATE_STATE_KEYS, a new state_key
     that WOULD be suppressed cannot be tracked → the gate fails open to
     FIRE("cap_fail_open") rather than silence it indefinitely (invariant D)."""
-    import blackboard.persistence as P
+    import tabula.persistence as P
 
     # Shrink the cap so we can fill the hash cheaply with real Redis writes.
     monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 2)

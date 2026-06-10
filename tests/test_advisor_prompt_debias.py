@@ -1,6 +1,6 @@
 """Anti-valence debias of the typing + generic prompts (spec 1D)."""
 
-from reasoning.augur_advisor import build_generic_prompt, build_typing_prompt
+from consilium.advisor import build_generic_prompt, build_typing_prompt
 
 _ANOM = {
     "domain": "typing",

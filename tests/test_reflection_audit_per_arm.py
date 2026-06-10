@@ -1,7 +1,7 @@
 """Per-arm + per-domain reliability audit (spec §7)."""
 
-from blackboard.config import AugurConfig
-from reasoning.reflection_engine import _behavioral_audit_per_arm
+from tabula.config import AugurConfig
+from disciplina.reflection_engine import _behavioral_audit_per_arm
 
 
 def _row(

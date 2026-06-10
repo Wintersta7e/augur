@@ -10,8 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import redis
 
-from blackboard.contracts import PerceptionEvent
-from blackboard.persistence import PersistenceManager
+from tabula.contracts import PerceptionEvent
+from tabula.persistence import PersistenceManager
 
 # Use a test-specific key prefix to avoid polluting real data.
 # We clean up all keys at the end.
@@ -40,8 +40,8 @@ def main() -> int:
             failed += 1
 
     print("=== Baseline persistence ===")
-    track("augur:profile:test:white")
-    track("augur:profile:test:black")
+    track("augur:vigil:profile:test:white")
+    track("augur:vigil:profile:test:black")
 
     state = {"ewma_mean": 3.5, "ewma_var": 0.8, "move_count": 12}
     pm.save_baseline("test", "white", state)
@@ -51,7 +51,7 @@ def main() -> int:
     check("load missing returns None", pm.load_baseline("test", "black") is None)
 
     print("\n=== Event history ===")
-    track("augur:history:test")
+    track("augur:vigil:history:test")
 
     events = []
     for i in range(5):
@@ -86,9 +86,9 @@ def main() -> int:
     check("history limit works", len(limited) == 3, f"got {len(limited)}")
 
     print("\n=== Feedback storage ===")
-    track("augur:feedback:sess-001")
-    track("augur:feedback:sess-002")
-    track("augur:feedback:_index")
+    track("augur:responsum:sess-001")
+    track("augur:responsum:sess-002")
+    track("augur:responsum:_index")
 
     pm.save_feedback("sess-001", {"rating": 5, "comment": "great advice"})
     pm.save_feedback("sess-002", {"rating": 2, "comment": "not helpful"})
@@ -106,8 +106,8 @@ def main() -> int:
     )
 
     print("\n=== Prompt versioning ===")
-    track("augur:prompts:test:current")
-    track("augur:prompts:test:history")
+    track("augur:consilium:prompts:test:current")
+    track("augur:consilium:prompts:test:history")
 
     check("load missing prompt returns None", pm.load_prompt("test") is None)
 
@@ -151,7 +151,7 @@ def main() -> int:
     )
 
     print("\n=== Threshold config ===")
-    track("augur:config:thresholds:test")
+    track("augur:vigil:thresholds:test")
 
     thresholds = {"sigma": 2.0, "hst": 0.7, "min_moves": 3}
     pm.save_thresholds("test", thresholds)

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 
-from blackboard.session import get_active_session
+from tabula.session import get_active_session
 
 
 def _make_record(

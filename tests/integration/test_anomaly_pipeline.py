@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 from tests.integration.conftest import (
     inject_perception_event,
     wait_for_redis_key,
@@ -20,7 +20,7 @@ def _warm_baseline_size() -> int:
     return AugurConfig().min_observations + 5
 
 
-@pytest.mark.parametrize("pipeline", [["detector"]], indirect=True)
+@pytest.mark.parametrize("pipeline", [["vigil"]], indirect=True)
 class TestAnomalyPipeline:
     """Verify outlier detection via the live detector subprocess."""
 
@@ -63,11 +63,11 @@ class TestAnomalyPipeline:
         )
 
         found = await wait_for_redis_key(
-            redis_client, "augur:detection:last_anomaly", timeout=10.0
+            redis_client, "augur:vigil:last_anomaly", timeout=10.0
         )
         assert found, "No anomaly detected within timeout"
 
-        raw = redis_client.get("augur:detection:last_anomaly")
+        raw = redis_client.get("augur:vigil:last_anomaly")
         assert raw is not None
         anomaly = json.loads(raw)
         assert anomaly["domain"] == "anomtest"
@@ -94,7 +94,7 @@ class TestAnomalyPipeline:
             await asyncio.sleep(0.05)
         await asyncio.sleep(1.0)
 
-        redis_client.delete("augur:detection:last_anomaly")
+        redis_client.delete("augur:vigil:last_anomaly")
 
         await inject_perception_event(
             nats_conn,
@@ -108,7 +108,7 @@ class TestAnomalyPipeline:
         )
         await asyncio.sleep(2.0)
 
-        raw = redis_client.get("augur:detection:last_anomaly")
+        raw = redis_client.get("augur:vigil:last_anomaly")
         if raw is not None:
             anomaly = json.loads(raw)
             # If something was written, it must not be from our normtest/subject
@@ -141,7 +141,7 @@ class TestAnomalyPipeline:
             await asyncio.sleep(0.05)
         await asyncio.sleep(1.0)
 
-        redis_client.delete("augur:detection:last_anomaly")
+        redis_client.delete("augur:vigil:last_anomaly")
 
         await inject_perception_event(
             nats_conn,
@@ -155,11 +155,11 @@ class TestAnomalyPipeline:
         )
 
         found = await wait_for_redis_key(
-            redis_client, "augur:detection:last_anomaly", timeout=10.0
+            redis_client, "augur:vigil:last_anomaly", timeout=10.0
         )
         assert found, "No anomaly detected within timeout"
 
-        raw = redis_client.get("augur:detection:last_anomaly")
+        raw = redis_client.get("augur:vigil:last_anomaly")
         assert raw is not None
         anomaly = json.loads(raw)
         if anomaly.get("domain") == "fieldtest":

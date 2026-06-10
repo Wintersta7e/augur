@@ -1,8 +1,8 @@
 """Metric-compat fixes (spec §7): IPW excludes unmeasurable/old-version/rated
 rows; utility + correlation treat a finalized 0.0 as a valid negative outcome."""
 
-from blackboard.config import AugurConfig
-from reasoning.reflection_engine import _mrt_ipw_readout, analyze_utility
+from tabula.config import AugurConfig
+from disciplina.reflection_engine import _mrt_ipw_readout, analyze_utility
 
 
 def test_ipw_excludes_unmeasurable_old_version_and_rated():

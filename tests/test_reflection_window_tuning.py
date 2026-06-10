@@ -1,7 +1,7 @@
 """Tests for analyze_correlation_window_tuning."""
 
-from blackboard.config import AugurConfig
-from reasoning.reflection_engine import analyze_correlation_window_tuning
+from tabula.config import AugurConfig
+from disciplina.reflection_engine import analyze_correlation_window_tuning
 
 
 def _cfg() -> AugurConfig:

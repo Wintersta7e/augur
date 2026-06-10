@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from blackboard.config import AugurConfig
-from reasoning.reflection_engine import analyze_utility
+from tabula.config import AugurConfig
+from disciplina.reflection_engine import analyze_utility
 
 _CFG = AugurConfig()
 UTILITY_MUTATION_THRESHOLD = _CFG.utility_mutation_threshold

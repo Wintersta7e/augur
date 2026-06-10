@@ -20,8 +20,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from blackboard.config import AugurConfig  # noqa: E402
-from blackboard.contracts import PerceptionEvent  # noqa: E402
+from tabula.config import AugurConfig  # noqa: E402
+from tabula.contracts import PerceptionEvent  # noqa: E402
 
 _config = AugurConfig.from_env()
 
@@ -128,17 +128,17 @@ async def pipeline(
     """Start one or more pipeline components as asyncio subprocesses.
 
     Parametrize with a list of component names, e.g.:
-        @pytest.mark.parametrize("pipeline", [["detector", "correlator", "advisor"]], indirect=True)
+        @pytest.mark.parametrize("pipeline", [["vigil", "nexus", "consilium"]], indirect=True)
 
-    Available components: detector, correlator, advisor, feedback, reflection, display.
+    Available components: vigil, nexus, consilium, responsum, disciplina, vox.
     """
     component_commands: dict[str, list[str]] = {
-        "detector": [sys.executable, "-m", "detection.anomaly_detector"],
-        "correlator": [sys.executable, "-m", "reasoning.correlator"],
-        "advisor": [sys.executable, "-m", "reasoning.augur_advisor"],
-        "feedback": [sys.executable, "-m", "perception.feedback_collector"],
-        "reflection": [sys.executable, "-m", "reasoning.reflection_engine"],
-        "display": [sys.executable, "-m", "output.console_display"],
+        "vigil": [sys.executable, "-m", "vigil.anomaly_detector"],
+        "nexus": [sys.executable, "-m", "nexus.correlator"],
+        "consilium": [sys.executable, "-m", "consilium.advisor"],
+        "responsum": [sys.executable, "-m", "responsum.feedback_collector"],
+        "disciplina": [sys.executable, "-m", "disciplina.reflection_engine"],
+        "vox": [sys.executable, "-m", "vox.console_display"],
     }
 
     requested: list[str] = getattr(request, "param", [])
@@ -204,7 +204,7 @@ async def inject_perception_event(
         timestamp=datetime.now(timezone.utc).isoformat(),
         session_id=session_id,
     )
-    subject = f"augur.perception.{domain}"
+    subject = f"augur.sensus.{domain}"
     await nc.publish(subject, event.to_bytes())
     return event
 

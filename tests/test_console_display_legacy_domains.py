@@ -1,13 +1,13 @@
 """Regression tests: render_anomaly_line + render_advice for chess/typing.
 
-The render dispatch in output/console_display.py was once accidentally
+The render dispatch in vox/console_display.py was once accidentally
 keyed on file names (chess_board, typing_monitor) instead of the actual
 domain values (chess, typing). These tests lock the correct keys in place.
 """
 
 from __future__ import annotations
 
-from output.console_display import render_advice, render_anomaly_line
+from vox.console_display import render_advice, render_anomaly_line
 
 
 def test_render_anomaly_line_chess_uses_player_move_format():

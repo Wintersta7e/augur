@@ -11,9 +11,9 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from blackboard.config import AugurConfig
-from blackboard.persistence import PersistenceManager
-from reasoning.reflection_engine import run_reflection
+from tabula.config import AugurConfig
+from tabula.persistence import PersistenceManager
+from disciplina.reflection_engine import run_reflection
 
 pytestmark = pytest.mark.asyncio
 

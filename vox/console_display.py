@@ -17,7 +17,7 @@ from pathlib import Path
 import nats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from blackboard.config import AugurConfig  # noqa: E402
+from tabula.config import AugurConfig  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging (minimal — this module IS the display)
@@ -48,11 +48,11 @@ BG_YELLOW = "\033[43m"
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SUBJECT_ANOMALY = "augur.detection.anomaly"
-SUBJECT_ADVICE = "augur.reasoning.advice"
-SUBJECT_CORRELATION = "augur.correlation.detected"
-SUBJECT_REFLECT = "augur.reflect.complete"
-SUBJECT_SUPPRESSED = "augur.advisor.suppressed"
+SUBJECT_ANOMALY = "augur.vigil.anomaly"
+SUBJECT_ADVICE = "augur.consilium.advice"
+SUBJECT_CORRELATION = "augur.nexus.detected"
+SUBJECT_REFLECT = "augur.disciplina.complete"
+SUBJECT_SUPPRESSED = "augur.limen.suppressed"
 WRAP_WIDTH = 80
 
 # ---------------------------------------------------------------------------
@@ -140,7 +140,7 @@ def render_anomaly_line(data: dict) -> str:
 
 
 def render_correlation(data: dict) -> str:
-    """Block render for a correlation event from augur.correlation.detected.
+    """Block render for a correlation event from augur.nexus.detected.
 
     Correlated event: multi-domain MEDIUM/HIGH block with contributing signals.
     Pass-through event: single-domain block identifying it as standalone.
@@ -493,7 +493,7 @@ async def run() -> None:
         primary = data.get("primary_anomaly", {})
         if dedup_should_suppress(last_rendered, primary):
             # The primary already showed as a low-severity one-liner
-            # when it first arrived on augur.detection.anomaly — do not
+            # when it first arrived on augur.vigil.anomaly — do not
             # render it again as part of the correlation block.
             # The correlation block still prints (this flag only
             # suppresses the earlier one-liner's retention).

@@ -12,9 +12,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from blackboard.config import AugurConfig
-from blackboard.persistence import PersistenceManager
-from reasoning.correlator import (
+from tabula.config import AugurConfig
+from tabula.persistence import PersistenceManager
+from nexus.correlator import (
     correlate,
     ensure_matrix_seeded,
 )

@@ -14,14 +14,14 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from blackboard.config import AugurConfig
-from blackboard.persistence import PersistenceManager
-from reasoning.correlator import (
+from tabula.config import AugurConfig
+from tabula.persistence import PersistenceManager
+from nexus.correlator import (
     add_to_window,
     correlate,
     ensure_matrix_seeded,
 )
-from reasoning.reflection_engine import run_reflection
+from disciplina.reflection_engine import run_reflection
 
 pytestmark = pytest.mark.asyncio
 

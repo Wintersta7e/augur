@@ -3,7 +3,7 @@
 import json
 from unittest.mock import MagicMock
 
-from blackboard.persistence import PersistenceManager
+from tabula.persistence import PersistenceManager
 
 
 def test_save_rule_window_state_writes_redis():
@@ -13,7 +13,7 @@ def test_save_rule_window_state_writes_redis():
     pm.save_rule_window_state(state)
     redis_mock.set.assert_called_once()
     args, kwargs = redis_mock.set.call_args
-    assert args[0] == "augur:config:rule_window_state"
+    assert args[0] == "augur:nexus:rule_window_state"
     assert json.loads(args[1]) == state
 
 
@@ -75,7 +75,7 @@ def test_save_tuning_state_with_only_confidence():
 
     pipe_mock.set.assert_called_once()
     args = pipe_mock.set.call_args.args
-    assert args[0] == "augur:config:escalation_confidence"
+    assert args[0] == "augur:nexus:escalation_confidence"
 
 
 def test_save_tuning_state_with_neither_is_noop():

@@ -1,6 +1,6 @@
 """Multi-domain LLM advisor triggered by anomaly detection.
 
-Subscribes to NATS 'augur.detection.anomaly', routes to domain-specific
+Subscribes to NATS 'augur.vigil.anomaly', routes to domain-specific
 prompt builders, queries Ollama for advice, and publishes results.
 Only activates for medium/high severity anomalies.
 
@@ -27,18 +27,18 @@ import nats
 import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from blackboard.config import AugurConfig
-from blackboard.connections import connect_redis
-from blackboard.persistence import PersistenceManager
-from blackboard.session import get_active_session
-from reasoning.advisor_gate import (
+from tabula.config import AugurConfig
+from tabula.connections import connect_redis
+from tabula.persistence import PersistenceManager
+from tabula.session import get_active_session
+from limen.gate import (
     Gate,
     GateDecision,
     Signature,  # noqa: F401 — PEP-563 deferred annotation (annotations only)
     build_signature,
 )
-from reasoning.advisor_gate_scheduler import MustFireScheduler
-from reasoning.app_descriptor import (
+from limen.scheduler import MustFireScheduler
+from consilium.app_descriptor import (
     ACTIVITY_DOMAINS,
     ClassifierLane,
     classifier_model_available,
@@ -58,18 +58,18 @@ log = logging.getLogger("augur_advisor")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SUBSCRIBE_SUBJECT = "augur.correlation.detected"
-PUBLISH_SUBJECT = "augur.reasoning.advice"
+SUBSCRIBE_SUBJECT = "augur.nexus.detected"
+PUBLISH_SUBJECT = "augur.consilium.advice"
 
 # Gate visibility subjects (spec §8). Distinct subjects so the MRT control arm
 # (PendingGateDecision, subscribed only to SUBJECT_SUPPRESSED) never tracks an
 # infrastructure non-delivery.
-SUBJECT_SUPPRESSED = "augur.advisor.suppressed"
-SUBJECT_DELIVERY_FAILURE = "augur.advisor.delivery_failure"
+SUBJECT_SUPPRESSED = "augur.limen.suppressed"
+SUBJECT_DELIVERY_FAILURE = "augur.limen.delivery_failure"
 
-REDIS_KEY_LAST_MOVE = "augur:chess:last_move"
-REDIS_KEY_HISTORY = "augur:chess:move_history"
-REDIS_KEY_ADVICE = "augur:reasoning:last_advice"
+REDIS_KEY_LAST_MOVE = "augur:sensus:chess:last_move"
+REDIS_KEY_HISTORY = "augur:sensus:chess:move_history"
+REDIS_KEY_ADVICE = "augur:consilium:last_advice"
 
 SEVERITY_GATE = {"medium", "high"}
 
@@ -523,7 +523,7 @@ def _build_advice_event(
     model_used: str,
     decision: GateDecision | None = None,
 ) -> dict:
-    """Build the advice event dict published on augur.reasoning.advice.
+    """Build the advice event dict published on augur.consilium.advice.
 
     Derives domain/entity/value/severity from the payload so the result is
     fully self-contained. The caller merges in ``latency_ms`` (only available
@@ -683,7 +683,7 @@ async def publish_suppressed_event(
     payload: dict,
     redis_client: redis.Redis | None,
 ) -> None:
-    """Publish the full §8 suppressed payload on ``augur.advisor.suppressed``.
+    """Publish the full §8 suppressed payload on ``augur.limen.suppressed``.
 
     Carries everything ``PendingGateDecision`` + the console need so feedback
     never reconstructs from Redis: decision/state/primary domain+entity/value/
@@ -719,7 +719,7 @@ async def publish_delivery_failure_event(
     decision: GateDecision,
     payload: dict,
 ) -> None:
-    """Publish an infra non-delivery on ``augur.advisor.delivery_failure`` (§8).
+    """Publish an infra non-delivery on ``augur.limen.delivery_failure`` (§8).
 
     A distinct subject from ``.suppressed`` so ``PendingGateDecision`` (which
     subscribes only to ``.suppressed``) never tracks an infra drop.
@@ -863,7 +863,7 @@ async def _publish_tier1_note(
     nc: nats.aio.client.Client,
     config: AugurConfig,
 ) -> None:
-    """Publish a templated Tier-1 note on ``augur.reasoning.advice`` (tier=1)."""
+    """Publish a templated Tier-1 note on ``augur.consilium.advice`` (tier=1)."""
     note = _build_advice_event(
         payload,
         advice_text=(

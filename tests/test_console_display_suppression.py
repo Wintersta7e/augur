@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from output.console_display import (
+from vox.console_display import (
     dedup_should_suppress,
     render_suppression,
     update_last_rendered,
@@ -10,7 +10,7 @@ from output.console_display import (
 
 
 def _suppressed_payload() -> dict:
-    """A representative augur.advisor.suppressed payload (spec §8)."""
+    """A representative augur.limen.suppressed payload (spec §8)."""
     return {
         "decision_id": "d1",
         "state_key": "single:typing:user",

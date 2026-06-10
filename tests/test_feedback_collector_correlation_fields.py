@@ -10,7 +10,7 @@ engine can tune the escalation matrix based on per-rule feedback.
 from __future__ import annotations
 
 
-from perception.feedback_collector import PendingAdvice
+from responsum.feedback_collector import PendingAdvice
 
 
 def _base_kwargs() -> dict:

@@ -27,9 +27,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from blackboard.config import AugurConfig  # noqa: E402
-from blackboard.contracts import PerceptionEvent  # noqa: E402
-from blackboard.persistence import PersistenceManager  # noqa: E402
+from tabula.config import AugurConfig  # noqa: E402
+from tabula.contracts import PerceptionEvent  # noqa: E402
+from tabula.persistence import PersistenceManager  # noqa: E402
 
 log = logging.getLogger("augur.mcp")
 
@@ -42,17 +42,17 @@ _config = AugurConfig.from_env()
 _processes: dict[str, dict[str, Any]] = {}
 
 COMPONENT_COMMANDS: dict[str, list[str]] = {
-    "detector": [sys.executable, "-m", "detection.anomaly_detector"],
-    "correlator": [sys.executable, "-m", "reasoning.correlator"],
-    "advisor": [sys.executable, "-m", "reasoning.augur_advisor"],
-    "feedback": [sys.executable, "-m", "perception.feedback_collector"],
-    "reflection": [sys.executable, "-m", "reasoning.reflection_engine"],
-    "display": [sys.executable, "-m", "output.console_display"],
+    "vigil": [sys.executable, "-m", "vigil.anomaly_detector"],
+    "nexus": [sys.executable, "-m", "nexus.correlator"],
+    "consilium": [sys.executable, "-m", "consilium.advisor"],
+    "responsum": [sys.executable, "-m", "responsum.feedback_collector"],
+    "disciplina": [sys.executable, "-m", "disciplina.reflection_engine"],
+    "vox": [sys.executable, "-m", "vox.console_display"],
 }
 
 # SEC-02: allowlist for domain / entity / stream_id values received through
 # MCP tool arguments. Unsanitized values would land in NATS subjects
-# (f"augur.perception.{domain}") and Redis keys (f"augur:profile:{domain}:{entity}"),
+# (f"augur.sensus.{domain}") and Redis keys (f"augur:vigil:profile:{domain}:{entity}"),
 # where a ":" or "." or wildcard character can break downstream parsing or
 # reach unintended keyspace. Keep it narrow.
 _SAFE_LABEL_RE = re.compile(r"^[a-z0-9_]{1,64}$")
@@ -130,8 +130,8 @@ async def start_pipeline(components: list[str] | None = None) -> dict[str, Any]:
     """Launch Augur components as subprocesses.
 
     Args:
-        components: Names to start. Defaults to all five components
-            (detector, advisor, feedback, reflection, display).
+        components: Names to start. Defaults to all six components
+            (vigil, nexus, consilium, responsum, disciplina, vox).
 
     Returns:
         Per-component status dict with 'status', 'pid', and 'error' keys.
@@ -326,7 +326,7 @@ async def inject_event(
     context: dict[str, Any] | None = None,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create a PerceptionEvent and publish it to NATS augur.perception.{domain}.
+    """Create a PerceptionEvent and publish it to NATS augur.sensus.{domain}.
 
     Args:
         domain: Perception domain, e.g. "chess" or "typing".
@@ -363,7 +363,7 @@ async def inject_event(
         timestamp=datetime.now(timezone.utc).isoformat(),
         session_id=sid,
     )
-    subject = f"augur.perception.{domain}"
+    subject = f"augur.sensus.{domain}"
 
     # LEAK-03: try/finally guarantees the NATS connection is closed even
     # if nc.publish raises.
@@ -463,7 +463,7 @@ async def inject_sequence(
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     session_id=sid,
                 )
-                subject = f"augur.perception.{domain}"
+                subject = f"augur.sensus.{domain}"
                 await nc.publish(subject, event.to_bytes())
                 published.append({"index": i, "subject": subject, "entity": entity})
             except Exception as exc:
@@ -674,7 +674,7 @@ def list_correlation_graphs(limit: int = 50) -> dict[str, Any]:
 def dump_correlation_window() -> dict[str, Any]:
     """Return the current contents of the correlator's sliding window.
 
-    Reads the augur:correlation:window sorted set directly and returns
+    Reads the augur:nexus:window sorted set directly and returns
     one entry per member: {anomaly: dict, score: unix_timestamp}.
     Useful for verifying what the correlator currently sees as "recent"
     when debugging correlation misses.
@@ -682,7 +682,7 @@ def dump_correlation_window() -> dict[str, Any]:
     try:
         with _redis_ctx() as r:
             raw_members = r.zrevrangebyscore(
-                "augur:correlation:window", "+inf", "-inf", withscores=True
+                "augur:nexus:window", "+inf", "-inf", withscores=True
             )
         window: list[dict[str, Any]] = []
         for member, score in raw_members:
@@ -726,7 +726,7 @@ def get_gate_silences(limit: int = 100) -> dict[str, Any]:
     """Return recent gate suppression records and per-arm counts.
 
     Read-only.  Reads up to *limit* silence records from
-    ``augur:gate:silences`` (newest first) and derives a per-arm frequency
+    ``augur:limen:silences`` (newest first) and derives a per-arm frequency
     tally from the returned records.
 
     Args:
@@ -895,7 +895,7 @@ def set_escalation_matrix(
 
 @mcp.tool()
 async def trigger_reflection(session_id: str | None = None) -> dict[str, Any]:
-    """Trigger the reflection engine by publishing to NATS augur.reflect.trigger.
+    """Trigger the reflection engine by publishing to NATS augur.disciplina.trigger.
 
     Args:
         session_id: Optional session to reflect on. Uses current session if None.
@@ -929,7 +929,7 @@ async def trigger_reflection(session_id: str | None = None) -> dict[str, Any]:
         return {"status": "error", "error": f"NATS connect failed: {exc}"}
 
     try:
-        await nc.publish("augur.reflect.trigger", payload)
+        await nc.publish("augur.disciplina.trigger", payload)
         return {"status": "triggered", "session_id": sid}
     except Exception as exc:
         return {"status": "error", "error": str(exc)}

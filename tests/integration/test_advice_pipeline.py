@@ -15,9 +15,7 @@ from tests.integration.conftest import (
 
 
 @requires_ollama
-@pytest.mark.parametrize(
-    "pipeline", [["detector", "correlator", "advisor"]], indirect=True
-)
+@pytest.mark.parametrize("pipeline", [["vigil", "nexus", "consilium"]], indirect=True)
 class TestAdvicePipeline:
     """Verify that anomalies trigger advice generation via the LLM advisor."""
 
@@ -41,7 +39,7 @@ class TestAdvicePipeline:
             await asyncio.sleep(0.05)
         await asyncio.sleep(1.0)
 
-        redis_client.delete("augur:reasoning:last_advice")
+        redis_client.delete("augur:consilium:last_advice")
 
         await inject_perception_event(
             nats_conn,
@@ -55,11 +53,11 @@ class TestAdvicePipeline:
         )
 
         found = await wait_for_redis_key(
-            redis_client, "augur:reasoning:last_advice", timeout=130.0
+            redis_client, "augur:consilium:last_advice", timeout=130.0
         )
         assert found, "No advice generated within timeout"
 
-        raw = redis_client.get("augur:reasoning:last_advice")
+        raw = redis_client.get("augur:consilium:last_advice")
         assert raw is not None
         advice = json.loads(raw)
         assert "text" in advice or "advice" in advice
@@ -84,7 +82,7 @@ class TestAdvicePipeline:
             await asyncio.sleep(0.05)
         await asyncio.sleep(1.0)
 
-        redis_client.delete("augur:reasoning:last_advice")
+        redis_client.delete("augur:consilium:last_advice")
 
         await inject_perception_event(
             nats_conn,
@@ -98,11 +96,11 @@ class TestAdvicePipeline:
         )
 
         found = await wait_for_redis_key(
-            redis_client, "augur:reasoning:last_advice", timeout=130.0
+            redis_client, "augur:consilium:last_advice", timeout=130.0
         )
         assert found, "No advice generated within timeout"
 
-        raw = redis_client.get("augur:reasoning:last_advice")
+        raw = redis_client.get("augur:consilium:last_advice")
         assert raw is not None
         advice = json.loads(raw)
         assert advice.get("domain") == "chess"

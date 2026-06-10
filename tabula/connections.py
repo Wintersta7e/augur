@@ -3,7 +3,7 @@
 ARCH-11: Previously each component defined its own ``connect_redis``
 helper (or inlined ``redis.Redis(...)``), creating a drift risk where a
 change to Redis connection semantics (pooling, TLS, retry policy, etc.)
-would have to be applied to every copy individually. ``perception/chess_board.py``
+would have to be applied to every copy individually. ``sensus/chess_board.py``
 already had a hardcoded ``localhost`` copy that ignored ``AugurConfig``
 until the deep-review fix-loop migrated it; the duplication was actively
 drifting.
@@ -18,7 +18,7 @@ import logging
 
 import redis
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 
 log = logging.getLogger("augur.connections")
 

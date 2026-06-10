@@ -6,20 +6,20 @@ hash key so it does not require a full FLUSHALL.
 
 import pytest
 
-from blackboard.config import AugurConfig
-from blackboard.connections import connect_redis
-from blackboard.persistence import PersistenceManager
-from reasoning.app_descriptor import ClassifierLane
-from reasoning.augur_advisor import enrich_activity_descriptor
+from tabula.config import AugurConfig
+from tabula.connections import connect_redis
+from tabula.persistence import PersistenceManager
+from consilium.app_descriptor import ClassifierLane
+from consilium.advisor import enrich_activity_descriptor
 
 
 @pytest.fixture
 def pm():
     config = AugurConfig.from_env()
     client = connect_redis(config)
-    client.delete("augur:config:app_descriptors")
+    client.delete("augur:consilium:app_descriptors")
     yield PersistenceManager(client)
-    client.delete("augur:config:app_descriptors")
+    client.delete("augur:consilium:app_descriptors")
 
 
 def test_os_identity_cached_and_injected(pm):

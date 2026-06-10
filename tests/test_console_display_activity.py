@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from output.console_display import render_advice, render_anomaly_line
+from vox.console_display import render_advice, render_anomaly_line
 
 
 def test_render_anomaly_line_activity_focus():

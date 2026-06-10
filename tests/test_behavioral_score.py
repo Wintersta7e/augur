@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from perception.feedback_collector import PendingAdvice, POST_ADVICE_TRACK_MOVES
+from responsum.feedback_collector import PendingAdvice, POST_ADVICE_TRACK_MOVES
 
 
 def _make_pending(

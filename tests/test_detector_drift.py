@@ -1,6 +1,6 @@
 """River drift detector + deliberate baseline reset (spec 1C)."""
 
-from detection.anomaly_detector import EntityBaseline
+from vigil.anomaly_detector import EntityBaseline
 
 
 def _warm(bl, center, n, spread=2.0, alpha=0.3):

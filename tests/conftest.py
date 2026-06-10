@@ -15,8 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from blackboard.config import AugurConfig  # noqa: E402
-from blackboard.persistence import PersistenceManager  # noqa: E402
+from tabula.config import AugurConfig  # noqa: E402
+from tabula.persistence import PersistenceManager  # noqa: E402
 
 # ── Gate test constants (plain dicts — advisor_gate.py does not exist yet) ──
 
@@ -252,7 +252,7 @@ def cfg_disabled() -> AugurConfig:
 def fake_pm_at_cap(monkeypatch: pytest.MonkeyPatch) -> _InstrumentedPM:
     """PersistenceManager whose channel_stats hash is pre-filled to cap.
 
-    Monkeypatches ``blackboard.persistence.MAX_GATE_STATE_KEYS`` to 3 so the
+    Monkeypatches ``tabula.persistence.MAX_GATE_STATE_KEYS`` to 3 so the
     cap is easy to reach, then pre-fills the hash with 3 distinct keys.  Any
     subsequent attempt to track a *new* key must fail (cap-fail-open path).
 
@@ -260,7 +260,7 @@ def fake_pm_at_cap(monkeypatch: pytest.MonkeyPatch) -> _InstrumentedPM:
     1.1.  Until then this fixture skips the monkeypatch silently (the constant
     does not exist yet) so test collection remains unbroken.
     """
-    import blackboard.persistence as _P
+    import tabula.persistence as _P
 
     _CAP = 3
 
@@ -277,7 +277,7 @@ def fake_pm_at_cap(monkeypatch: pytest.MonkeyPatch) -> _InstrumentedPM:
 
     for i in range(_CAP):
         key = f"single:chess:user{i}"
-        pm._r.hset("augur:gate:channel_stats", key, json.dumps({"seen": i + 1}))
+        pm._r.hset("augur:limen:channel_stats", key, json.dumps({"seen": i + 1}))
 
     # The hset calls above go through execute_command and increment write_calls.
     # Reset to 0 so gate tests that assert "evaluate() is read-only

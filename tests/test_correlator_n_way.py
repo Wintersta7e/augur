@@ -1,6 +1,6 @@
 """Unit tests for N-way rule_key normalization and escalation lookup."""
 
-from reasoning.correlator import (
+from nexus.correlator import (
     DEFAULT_ESCALATION_MATRIX,
     lookup_escalation_n_way,
     normalize_rule_key_n_way,

@@ -130,8 +130,8 @@ async def start_pipeline(components: list[str] | None = None) -> dict[str, Any]:
     """Launch Augur components as subprocesses.
 
     Args:
-        components: Names to start. Defaults to all five components
-            (detector, advisor, feedback, reflection, display).
+        components: Names to start. Defaults to all six components
+            (vigil, nexus, consilium, responsum, disciplina, vox).
 
     Returns:
         Per-component status dict with 'status', 'pid', and 'error' keys.

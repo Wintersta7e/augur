@@ -159,3 +159,126 @@ def record_activity(
     window.advice = [t for t in window.advice if t >= cutoff]
     window.suppressed = [t for t in window.suppressed if t >= cutoff]
     window.delivery_failure = [t for t in window.delivery_failure if t >= cutoff]
+
+
+def liveness(state: FacultyHealth, now: float, started_at: float, cfg) -> str:
+    """'alive'|'stale'|'dead'|'absent'|'warming_up'|'unknown' from the heartbeat clock.
+    A never-seen required faculty is warming_up during the warmup grace, then unknown
+    until the horizon (started_at + warmup + dead_after), then dead (never_started).
+    Optional never-seen is absent (not an alert). Seen-then-late goes alive→stale→dead
+    (lost)."""
+    hb = state.last_heartbeat
+    if hb is None:
+        if not state.required:
+            return "absent"
+        if now <= started_at + cfg.praefectus_warmup_s:
+            return "warming_up"  # cold-start grace
+        if now <= started_at + cfg.praefectus_warmup_s + cfg.praefectus_dead_after_s:
+            return "unknown"  # past grace, not yet confirmed dead
+        return "dead"  # never_started
+    age = now - hb
+    if age <= cfg.praefectus_stale_after_s:
+        return "alive"
+    if age <= cfg.praefectus_dead_after_s:
+        return "stale"
+    return "dead"
+
+
+def stall_signal(window: ActivityWindow, now: float, cfg) -> StallVerdict:
+    """Windowed MEDIUM/HIGH nexus.detected vs {advice|suppressed|delivery_failure}
+    deficit + a delivery_failure spike → degraded, with reasons. Rate-based (not
+    per-event) so anti-starvation coalescing within tolerance does not false-trigger."""
+    cutoff = now - cfg.effective_stall_window_s
+    detected = [t for t in window.detected_mh if t >= cutoff]
+    terminals = (
+        [t for t in window.advice if t >= cutoff]
+        + [t for t in window.suppressed if t >= cutoff]
+        + [t for t in window.delivery_failure if t >= cutoff]
+    )
+    dfs = [t for t in window.delivery_failure if t >= cutoff]
+    reasons: list[str] = []
+    if (
+        len(detected) >= cfg.praefectus_stall_min_events
+        and len(terminals) < len(detected) - cfg.praefectus_stall_tolerance
+    ):
+        reasons.append("consilium_stall")
+    if len(dfs) >= cfg.praefectus_delivery_failure_spike:
+        reasons.append("delivery_failures")
+    return StallVerdict(degraded=bool(reasons), reasons=reasons)
+
+
+def _worse(a: str, b: str) -> str:
+    return a if _SEVERITY.get(a, 0) >= _SEVERITY.get(b, 0) else b
+
+
+def evaluate(
+    states: dict[str, FacultyHealth],
+    window: ActivityWindow,
+    now: float,
+    started_at: float,
+    cfg,
+) -> HealthReport:
+    """Recompute liveness_state/activity_state/overall_state per faculty and the
+    transition delta vs the previous tick (reasons stored on each FacultyHealth).
+    Alert reasons are dead (never_started/lost) + degraded; stale is reported in the
+    state but is intentionally NOT an alert reason (avoids heartbeat-flap noise)."""
+    verdict = stall_signal(window, now, cfg)
+    entered: list[tuple[str, str]] = []
+    cleared: list[tuple[str, str]] = []
+    for fac, st in states.items():
+        st.liveness_state = liveness(st, now, started_at, cfg)
+        if fac == "consilium":
+            st.activity_state = "degraded" if verdict.degraded else "ok"
+            activity_reasons = list(verdict.reasons) if verdict.degraded else []
+        else:
+            st.activity_state = "ok"
+            activity_reasons = []
+        st.overall_state = _worse(st.liveness_state, st.activity_state)
+
+        new_reasons: list[str] = []
+        if st.liveness_state == "dead":
+            new_reasons.append("never_started" if not st.seen else "lost")
+        new_reasons.extend(activity_reasons)
+
+        prev, cur = set(st.reasons), set(new_reasons)
+        entered.extend((fac, r) for r in (cur - prev))
+        cleared.extend((fac, r) for r in (prev - cur))
+        st.reasons = new_reasons
+
+    # Observability-only (never alerts): reflection lag on Disciplina — a
+    # responsum.complete with no disciplina.complete following within the window.
+    dst = states.get("disciplina")
+    rst = states.get("responsum")
+    if dst is not None and rst is not None:
+        r_ts = rst.last_event_ts
+        d_ts = dst.last_event_ts
+        lag = (
+            r_ts is not None
+            and (d_ts is None or d_ts < r_ts)
+            and (now - r_ts) > cfg.effective_reflection_window_s
+        )
+        dst.flags = ["reflection_lag"] if lag else []
+
+    return HealthReport(started_at, now, states, entered, cleared)
+
+
+def summarize(report: HealthReport) -> dict:
+    """The JSON the MCP tool + augur.praefectus.health payload return."""
+    return {
+        "started_at": report.started_at,
+        "ts": report.now,
+        "uptime_s": report.now - report.started_at,
+        "faculties": {
+            fac: {
+                "liveness": st.liveness_state,
+                "activity": st.activity_state,
+                "overall": st.overall_state,
+                "reasons": list(st.reasons),
+                "flags": list(st.flags),
+                "required": st.required,
+                "last_heartbeat": st.last_heartbeat,
+                "last_event_ts": st.last_event_ts,
+            }
+            for fac, st in report.faculties.items()
+        },
+    }

@@ -67,6 +67,121 @@ def test_record_activity_window_and_last_event():
     assert window.advice and window.suppressed and window.delivery_failure
 
 
+def test_liveness_alive_stale_dead():
+    cfg = _Cfg()
+    st = H.FacultyHealth("vigil", required=True, seen=True, last_heartbeat=1000.0)
+    assert H.liveness(st, 1010.0, 900.0, cfg) == "alive"  # age 10 <= 30
+    assert H.liveness(st, 1050.0, 900.0, cfg) == "stale"  # 30 < age 50 <= 90
+    assert H.liveness(st, 1200.0, 900.0, cfg) == "dead"  # age 200 > 90 (lost)
+
+
+def test_liveness_never_started_required():
+    cfg = _Cfg()
+    st = H.FacultyHealth("vox", required=True)  # never seen
+    started = 1000.0
+    assert H.liveness(st, 1010.0, started, cfg) == "warming_up"  # within warmup (1030)
+    assert (
+        H.liveness(st, 1100.0, started, cfg) == "unknown"
+    )  # past warmup, pre-dead horizon (1120)
+    assert (
+        H.liveness(st, 1200.0, started, cfg) == "dead"
+    )  # past horizon → never_started
+
+
+def test_liveness_absent_optional():
+    cfg = _Cfg()
+    st = H.FacultyHealth("sensus.chess", required=False)  # never seen, optional
+    assert H.liveness(st, 9999.0, 1000.0, cfg) == "absent"
+
+
+def test_stall_signal_deficit():
+    cfg = _Cfg()
+    w = H.ActivityWindow(detected_mh=[1.0, 2.0, 3.0])  # 3 MEDIUM/HIGH, 0 terminals
+    v = H.stall_signal(w, 100.0, cfg)
+    assert v.degraded and "consilium_stall" in v.reasons
+
+
+def test_stall_signal_no_false_trigger_on_coalescing():
+    cfg = _Cfg()
+    # 3 detected, 2 terminals — within tolerance(1) → NOT degraded
+    w = H.ActivityWindow(detected_mh=[1.0, 2.0, 3.0], advice=[1.5, 2.5])
+    assert H.stall_signal(w, 100.0, cfg).degraded is False
+
+
+def test_stall_signal_delivery_failure_spike():
+    cfg = _Cfg()
+    w = H.ActivityWindow(delivery_failure=[1.0, 2.0, 3.0])  # >= spike(3)
+    v = H.stall_signal(w, 100.0, cfg)
+    assert v.degraded and "delivery_failures" in v.reasons
+
+
+def test_evaluate_entered_then_cleared():
+    cfg = _Cfg()
+    states = H.initial_states(1000.0)
+    for f in H.REQUIRED_FACULTIES:  # all alive
+        H.record_heartbeat(states, f, 1000.0)
+    w = H.ActivityWindow(detected_mh=[1000.0, 1000.0, 1000.0])  # consilium stall
+    r1 = H.evaluate(states, w, 1000.0, 1000.0, cfg)
+    assert ("consilium", "consilium_stall") in r1.entered
+    # clear the stall → recovery
+    w2 = H.ActivityWindow()
+    r2 = H.evaluate(states, w2, 1001.0, 1000.0, cfg)
+    assert ("consilium", "consilium_stall") in r2.cleared
+
+
+def test_evaluate_never_started_dead_entered():
+    cfg = _Cfg()
+    states = H.initial_states(1000.0)  # nobody heartbeats
+    r = H.evaluate(states, H.ActivityWindow(), 1200.0, 1000.0, cfg)  # past horizon
+    assert ("vox", "never_started") in r.entered
+    assert states["vox"].overall_state == "dead"
+
+
+def test_summarize_shape():
+    cfg = _Cfg()
+    states = H.initial_states(1000.0)
+    H.record_heartbeat(states, "vigil", 1000.0)
+    r = H.evaluate(states, H.ActivityWindow(), 1005.0, 1000.0, cfg)
+    out = H.summarize(r)
+    assert out["faculties"]["vigil"]["liveness"] == "alive"
+    assert "uptime_s" in out and "ts" in out
+
+
+def test_reflection_lag_flag_observability_only():
+    cfg = _Cfg()
+    states = H.initial_states(1000.0)
+    for f in H.REQUIRED_FACULTIES:
+        H.record_heartbeat(states, f, 2000.0)
+    states["responsum"].last_event_ts = 1000.0  # completed long ago
+    states["disciplina"].last_event_ts = None  # no reflection followed
+    r = H.evaluate(
+        states, H.ActivityWindow(), 2000.0, 1000.0, cfg
+    )  # 1000s > 300 window
+    assert "reflection_lag" in states["disciplina"].flags
+    assert all(reason != "reflection_lag" for _, reason in r.entered)  # never an alert
+
+
+def test_no_reflection_lag_when_disciplina_followed():
+    cfg = _Cfg()
+    states = H.initial_states(1000.0)
+    for f in H.REQUIRED_FACULTIES:
+        H.record_heartbeat(states, f, 2000.0)
+    states["responsum"].last_event_ts = 1000.0
+    states["disciplina"].last_event_ts = 1100.0  # followed after responsum
+    H.evaluate(states, H.ActivityWindow(), 2000.0, 1000.0, cfg)
+    assert states["disciplina"].flags == []
+
+
+def test_no_masking_between_sensors():
+    cfg = _Cfg()
+    states = H.initial_states(1000.0)
+    H.record_heartbeat(states, "sensus.chess", 1000.0)
+    H.record_heartbeat(states, "sensus.typing", 2000.0)
+    # at now=2000: chess 1000s stale (dead), typing fresh (alive) — distinct ids, no masking
+    assert H.liveness(states["sensus.chess"], 2000.0, 1000.0, cfg) == "dead"
+    assert H.liveness(states["sensus.typing"], 2000.0, 1000.0, cfg) == "alive"
+
+
 class _Cfg:
     """Minimal config stand-in for the pure functions."""
 

@@ -162,6 +162,15 @@ class AugurConfig:
         "you appear stuck",
         "as an ai",
     )
+    # ── Lane 2 — Memoria memory spine (spec 2026-06-10) ─────────────────────
+    memory_store_enabled: bool = True
+    memory_prune_r: float = 0.05
+    memory_promote_s: int = 14
+    memory_s_growth_factor: float = 0.5
+    memory_s_min: float = 0.1
+    memory_s_max: int = 365
+    max_memory_items: int = 5000
+    memory_decay_form: str = "exponential"  # {"exponential", "powerlaw"}
 
     def __post_init__(self) -> None:
         """Validate bounds on tuning fields. Raises ValueError on out-of-range.
@@ -259,6 +268,30 @@ class AugurConfig:
             raise ValueError(
                 f"prompt_rollback_margin={self.prompt_rollback_margin} outside [0, 1]"
             )
+        # ── Lane 2 bounds (Memoria spec 2026-06-10) ─────────────────────────
+        if not (0.0 <= self.memory_prune_r <= 0.5):
+            raise ValueError(f"memory_prune_r={self.memory_prune_r} outside [0, 0.5]")
+        if not (2 <= self.memory_promote_s <= 1000):
+            raise ValueError(
+                f"memory_promote_s={self.memory_promote_s} outside [2, 1000]"
+            )
+        if not (0.0 <= self.memory_s_growth_factor <= 5.0):
+            raise ValueError(
+                f"memory_s_growth_factor={self.memory_s_growth_factor} outside [0, 5]"
+            )
+        if not (0.0 < self.memory_s_min <= 1.0):
+            raise ValueError(f"memory_s_min={self.memory_s_min} must be in (0, 1]")
+        if not (10 <= self.memory_s_max <= 100_000):
+            raise ValueError(f"memory_s_max={self.memory_s_max} outside [10, 100000]")
+        if not (100 <= self.max_memory_items <= 100_000):
+            raise ValueError(
+                f"max_memory_items={self.max_memory_items} outside [100, 100000]"
+            )
+        if self.memory_decay_form not in {"exponential", "powerlaw"}:
+            raise ValueError(
+                f"memory_decay_form={self.memory_decay_form!r} must be "
+                "'exponential' or 'powerlaw'"
+            )
 
     # ── Constructors ───────────────────────────────────────────────────────
 
@@ -323,6 +356,13 @@ def _coerce_drift_detector(v: str) -> str:
     raise ValueError(f"drift_detector={v!r} must be 'adwin' or 'pagehinkley'")
 
 
+def _coerce_memory_decay_form(v: str) -> str:
+    """Validate memory_decay_form value; raises ValueError for unknown values."""
+    if v in {"exponential", "powerlaw"}:
+        return v
+    raise ValueError(f"memory_decay_form={v!r} must be 'exponential' or 'powerlaw'")
+
+
 def _coerce_str_tuple(v: str) -> tuple[str, ...]:
     """Comma-split into a tuple of non-empty stripped strings.
 
@@ -356,3 +396,4 @@ _TYPE_COERCIONS["gate_tier1_mode"] = _coerce_gate_tier1_mode
 # drift_detector→str and prompt_forbidden_patterns→tuple (which char-splits).
 _TYPE_COERCIONS["drift_detector"] = _coerce_drift_detector
 _TYPE_COERCIONS["prompt_forbidden_patterns"] = _coerce_str_tuple
+_TYPE_COERCIONS["memory_decay_form"] = _coerce_memory_decay_form

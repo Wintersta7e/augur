@@ -235,6 +235,19 @@ class PersistenceManager:
             return None
         return json.loads(raw)
 
+    def save_health_snapshot(self, snapshot: dict) -> None:
+        """Store the Praefectus health snapshot (overwritten each tick; no TTL — live state)."""
+        key = "augur:praefectus:health"
+        self._r.set(key, json.dumps(snapshot))
+
+    def load_health_snapshot(self) -> dict | None:
+        """Return the last Praefectus health snapshot or None if not set."""
+        key = "augur:praefectus:health"
+        raw = self._r.get(key)
+        if raw is None:
+            return None
+        return json.loads(raw)
+
     # ── App descriptors (autonomous app->identity map) ────────────────────
 
     def save_app_descriptor(

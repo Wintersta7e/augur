@@ -18,6 +18,7 @@ import nats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tabula.config import AugurConfig  # noqa: E402
+from tabula.heartbeat import start_heartbeat  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging (minimal — this module IS the display)
@@ -53,6 +54,7 @@ SUBJECT_ADVICE = "augur.consilium.advice"
 SUBJECT_CORRELATION = "augur.nexus.detected"
 SUBJECT_REFLECT = "augur.disciplina.complete"
 SUBJECT_SUPPRESSED = "augur.limen.suppressed"
+SUBJECT_HEALTH = "augur.praefectus.health"
 WRAP_WIDTH = 80
 
 # ---------------------------------------------------------------------------
@@ -314,6 +316,19 @@ def render_suppression(data: dict) -> str:
     )
 
 
+def render_health(data: dict) -> str:
+    """One-line pipeline-health alert from Praefectus (dead / degraded / recovered)."""
+    fac = data.get("faculty", "?")
+    reason = data.get("reason", "?")
+    transition = data.get("transition", "?")
+    overall = data.get("overall", "?")
+    if transition == "recovered":
+        return f"{FG_GREEN}● health{FG_GRAY}  {fac} recovered from {reason} ({overall}){RESET}"
+    if transition == "dead":
+        return f"{FG_RED}{BOLD}✖ DEAD {FG_GRAY}  {fac} {reason} → {overall}{RESET}"
+    return f"{FG_YELLOW}▲ health{FG_GRAY}  {fac} {reason} → {overall}{RESET}"
+
+
 def render_reflection(data: dict) -> str:
     """End-of-session reflection summary block.
 
@@ -468,6 +483,11 @@ async def run() -> None:
     nc = await nats.connect(
         config.nats_url, connect_timeout=config.nats_connect_timeout
     )
+    hb_task = (
+        start_heartbeat(nc, "vox", config.praefectus_heartbeat_interval_s)
+        if config.praefectus_enabled
+        else None
+    )
 
     last_rendered: dict[str, tuple[str, str]] = {}
 
@@ -528,6 +548,14 @@ async def run() -> None:
 
         print(render_reflection(data), flush=True)
 
+    async def on_health(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = json.loads(msg.data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        print(render_health(data), flush=True)
+
     # LEAK-07: save subscription handles so unsubscribe() is called on
     # shutdown rather than relying on nc.close() to tear them down abruptly
     # mid-render.
@@ -536,6 +564,7 @@ async def run() -> None:
     sub_advice = await nc.subscribe(SUBJECT_ADVICE, cb=on_advice)
     sub_suppressed = await nc.subscribe(SUBJECT_SUPPRESSED, cb=on_suppressed)
     sub_reflect = await nc.subscribe(SUBJECT_REFLECT, cb=on_reflection)
+    sub_health = await nc.subscribe(SUBJECT_HEALTH, cb=on_health)
 
     try:
         while True:
@@ -543,12 +572,19 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        if hb_task is not None:
+            hb_task.cancel()
+            try:
+                await hb_task
+            except asyncio.CancelledError:
+                pass
         try:
             await sub_anomaly.unsubscribe()
             await sub_correlation.unsubscribe()
             await sub_advice.unsubscribe()
             await sub_suppressed.unsubscribe()
             await sub_reflect.unsubscribe()
+            await sub_health.unsubscribe()
         except Exception as exc:
             log.debug("Unsubscribe failed during shutdown: %s", exc)
         await nc.close()

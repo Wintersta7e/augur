@@ -30,13 +30,14 @@ carry Latin names (an identity/charter layer over the blackboard, not central
 orchestration): **Tabula** (the shared slate), **Sensus** (senses), **Vigil**
 (the watch), **Nexus** (binding/correlation), **Consilium** (counsel/LLM),
 **Limen** (the threshold — the stay-silent gate), **Responsum** (feedback),
-**Disciplina** (training/reflection), **Vox** (the voice).
+**Disciplina** (training/reflection), **Vox** (the voice), **Praefectus** (the
+marshal — faculty supervision/health).
 
 ## Status
 
 Active personal research project. The full pipeline — perception → detection →
 correlation → gated LLM advice → feedback → self-tuning — is implemented and
-covered by a large suite (**924 unit + 42 fast integration + 4 slow**) under
+covered by a large suite (**988 unit + 43 fast integration + 4 slow**) under
 strict ruff lints and green CI. Verified end-to-end with four perception domains
 against a local Ollama `qwen2.5:32b`. It's still rough in places and the Redis
 key / NATS subject contracts can shift between commits — treat it as a working
@@ -53,12 +54,16 @@ pipeline you can build and run, not a finished, packaged app.
   per-rule windows
 - Seven-pass session-end reflection (precision / utility / counterfactual /
   correlation / window / gate / memory)
-- A 23-tool FastMCP control server; Docker dual-mode (native dev or fully
+- **Praefectus** (supervision/health) — heartbeat liveness for every faculty, a
+  conservative pipeline-stall signal, an MCP health tool, and degradation alerts
+  surfaced through Vox
+- A 25-tool FastMCP control server; Docker dual-mode (native dev or fully
   containerized deploy)
 
 **Not done yet:** cross-session pattern mining + anticipation (Memoria is the
-substrate they consume), the higher pantheon tiers (Praefectus, Imperator,
-Conscientia), and packaged installers.
+substrate they consume), Praefectus *output arbitration* + lifecycle (the
+supervision/health increment is built; arbitration and restart are deferred), the
+higher pantheon tiers (Imperator, Conscientia), and packaged installers.
 
 ## Features
 
@@ -89,19 +94,22 @@ Conscientia), and packaged installers.
 ### Reasoning, feedback & self-improvement
 - **Local-LLM advice (Consilium)** over Ollama, with cross-domain prompts that
   reason about the *combination* of signals, not any one alone
-- **Feedback (Responsum)** — explicit + behavioral scoring with per-domain 1/N
-  attribution; **reflection (Disciplina)** runs seven analysis passes per session
-  and tunes thresholds, prompts, and the gate itself
+- **Feedback (Responsum)** — explicit (interactive, or headless via the
+  `augur.responsum.feedback` subject / MCP `submit_feedback`) + behavioral scoring
+  with per-domain 1/N attribution; **reflection (Disciplina)** runs seven analysis
+  passes per session and tunes thresholds, prompts, the escalation matrix, and the
+  gate itself
 
 ### Interfaces
 - **Vox** — an ANSI console renderer with domain-scoped dedup
-- **`augur_mcp`** — a 23-tool FastMCP server for lifecycle, event injection,
-  state inspection, and runtime tuning
+- **`augur_mcp`** — a 25-tool FastMCP server for lifecycle, event injection,
+  state inspection, runtime tuning, pipeline-health, and explicit advice feedback
 
 ### Planned / architected (not built)
-- Cross-session mining + rule induction (C2), detection → anticipation (C3), the
-  **Praefectus** (output marshal) and **Imperator + Conscientia** (mind +
-  conscience) tiers, and a vision sense (**Visus**)
+- Cross-session mining + rule induction (C2), detection → anticipation (C3),
+  Praefectus *output arbitration* + lifecycle (its supervision/health tier is
+  built), the **Imperator + Conscientia** (mind + conscience) tiers, and a vision
+  sense (**Visus**)
 
 ### Explicitly declined (not on the roadmap)
 - Multi-user / team mode • Cloud sync • Telemetry • Hosted/SaaS surface • Marketing
@@ -167,16 +175,19 @@ augur/
 ├── responsum/     # feedback collector → augur.responsum.complete
 ├── disciplina/    # seven-pass reflection engine → augur.disciplina.complete
 ├── memoria/       # pure FSRS/tier/sweep logic (no Redis) for the memory spine
+├── praefectus/    # faculty supervision/health monitor → augur.praefectus.health
 ├── vox/           # ANSI console renderer
-├── augur_mcp/     # FastMCP control server (23 tools)
+├── augur_mcp/     # FastMCP control server (25 tools)
 ├── infrastructure/# run_augur.sh launcher + connection/persistence smoke tests
-└── tests/         # 924 unit (mocked) + 46 integration (real Redis/NATS/Ollama)
+└── tests/         # 988 unit (mocked) + 47 integration (real Redis/NATS/Ollama)
 ```
 
 **Data flow:** `sensus.* → vigil.anomaly → nexus.detected → consilium (+ limen
 gate) → consilium.advice → responsum.complete → disciplina.complete → vox`. At
 session end, Nexus flushes its correlation graph to Redis and Disciplina runs the
-reflection passes (including the Memoria consolidation sweep).
+reflection passes (including the Memoria consolidation sweep). **Praefectus** rides
+the whole bus (`augur.>`) — every faculty heartbeats on `augur.system.heartbeat`
+and Praefectus publishes `augur.praefectus.health` liveness/degradation transitions.
 
 ## Design principles
 

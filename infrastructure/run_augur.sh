@@ -56,7 +56,7 @@ echo "  Starting Augur pipeline..."
 echo -e "${RESET}"
 
 # 1. Anomaly detector (must be first — listens for chess moves)
-echo -ne "  [1/6] Anomaly detector ...  "
+echo -ne "  [1/7] Anomaly detector ...  "
 $PYTHON "$PROJECT_DIR/vigil/anomaly_detector.py" \
 	>"$LOG_DIR/anomaly_detector.log" 2>&1 &
 PIDS+=($!)
@@ -69,7 +69,7 @@ else
 fi
 
 # 2. Correlator (cross-domain correlation — must be between detector and advisor)
-echo -ne "  [2/6] Correlator        ...  "
+echo -ne "  [2/7] Correlator        ...  "
 $PYTHON "$PROJECT_DIR/nexus/correlator.py" \
 	>"$LOG_DIR/correlator.log" 2>&1 &
 PIDS+=($!)
@@ -82,7 +82,7 @@ else
 fi
 
 # 3. Augur advisor (multi-domain LLM advisor — listens for correlation events)
-echo -ne "  [3/6] Augur advisor     ...  "
+echo -ne "  [3/7] Augur advisor     ...  "
 $PYTHON "$PROJECT_DIR/consilium/advisor.py" \
 	>"$LOG_DIR/augur_advisor.log" 2>&1 &
 PIDS+=($!)
@@ -95,7 +95,7 @@ else
 fi
 
 # 4. Feedback collector (listens for advice + perception events)
-echo -ne "  [4/6] Feedback collector...  "
+echo -ne "  [4/7] Feedback collector...  "
 $PYTHON "$PROJECT_DIR/responsum/feedback_collector.py" \
 	>"$LOG_DIR/feedback_collector.log" 2>&1 &
 PIDS+=($!)
@@ -108,7 +108,7 @@ else
 fi
 
 # 5. Reflection engine (triggers at end of session)
-echo -ne "  [5/6] Reflection engine ...  "
+echo -ne "  [5/7] Reflection engine ...  "
 $PYTHON "$PROJECT_DIR/disciplina/reflection_engine.py" \
 	>"$LOG_DIR/reflection_engine.log" 2>&1 &
 PIDS+=($!)
@@ -120,8 +120,20 @@ else
 	exit 1
 fi
 
-# 6. Console display (runs in foreground — output goes to terminal)
-echo -e "  [6/6] Console display   ...  ${GREEN}starting (foreground)${RESET}"
+# 6. Praefectus (faculty supervision / health monitor)
+echo -ne "  [6/7] Praefectus       ...  "
+$PYTHON "$PROJECT_DIR/praefectus/monitor.py" \
+	>"$LOG_DIR/praefectus.log" 2>&1 &
+PIDS+=($!)
+sleep 1
+if kill -0 "${PIDS[-1]}" 2>/dev/null; then
+	echo -e "${GREEN}started${RESET}  (PID ${PIDS[-1]})"
+else
+	echo -e "\033[91mFAILED${RESET}  — check $LOG_DIR/praefectus.log"
+fi
+
+# 7. Console display (runs in foreground — output goes to terminal)
+echo -e "  [7/7] Console display   ...  ${GREEN}starting (foreground)${RESET}"
 echo ""
 echo -e "${GREEN}${BOLD}  All components running.${RESET}"
 echo ""

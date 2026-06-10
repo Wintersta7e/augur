@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -94,6 +95,9 @@ class NatsPublisher:
         self._config = config
         self._nc: Optional[nats.NATS] = None
         self._loop = asyncio.new_event_loop()
+        self._pub_lock = threading.Lock()
+        self._hb_stop: Optional[threading.Event] = None
+        self._hb_thread: Optional[threading.Thread] = None
 
     # -- lifecycle -----------------------------------------------------------
     def connect(self) -> None:
@@ -109,14 +113,51 @@ class NatsPublisher:
         log.info("NATS connected (%s)", self._config.nats_url)
 
     def close(self) -> None:
-        if self._nc:
-            self._loop.run_until_complete(self._nc.close())
-            log.info("NATS closed")
-        self._loop.close()
+        # Hold the publish lock so close() cannot drive/close the loop while an
+        # in-flight heartbeat publish (which acquires the same lock) is still
+        # inside run_until_complete on it. stop_heartbeat()'s join can return
+        # with the beat thread still running; the lock makes close() wait for
+        # the beat to release before any loop operation, preventing concurrent
+        # loop access (RuntimeError).
+        with self._pub_lock:
+            if self._nc:
+                self._loop.run_until_complete(self._nc.close())
+                log.info("NATS closed")
+            if not self._loop.is_closed():
+                self._loop.close()
 
     # -- publish -------------------------------------------------------------
     def publish(self, subject: str, payload: dict) -> None:
-        self._loop.run_until_complete(self._async_publish(subject, payload))
+        with self._pub_lock:
+            self._loop.run_until_complete(self._async_publish(subject, payload))
+
+    # -- heartbeat (sync; runs on a daemon thread) ---------------------------
+    def start_heartbeat(self, faculty: str, interval_s: float) -> None:
+        from tabula.heartbeat import HEARTBEAT_SUBJECT
+
+        self._hb_stop = threading.Event()
+
+        def _beat() -> None:
+            while True:
+                try:
+                    self.publish(
+                        HEARTBEAT_SUBJECT, {"faculty": faculty, "ts": time.time()}
+                    )
+                except Exception as exc:  # noqa: BLE001 - heartbeat is best-effort
+                    log.debug("chess heartbeat publish failed: %s", exc)
+                if self._hb_stop.wait(interval_s):
+                    return
+
+        self._hb_thread = threading.Thread(
+            target=_beat, name="chess-heartbeat", daemon=True
+        )
+        self._hb_thread.start()
+
+    def stop_heartbeat(self) -> None:
+        if self._hb_stop is not None:
+            self._hb_stop.set()
+        if self._hb_thread is not None:
+            self._hb_thread.join(timeout=2.0)
 
     async def _async_publish(self, subject: str, payload: dict) -> None:
         if self._nc is None:
@@ -323,6 +364,9 @@ def main() -> None:
         log.error("Cannot connect to NATS: %s", exc)
         sys.exit(1)
 
+    if config.praefectus_enabled:
+        nats_pub.start_heartbeat("sensus.chess", config.praefectus_heartbeat_interval_s)
+
     # Session management
     session_mgr = SessionManager(redis_client)
     session_id = session_mgr.start()
@@ -484,6 +528,7 @@ def main() -> None:
         log.error("Failed to publish session end: %s", exc)
 
     # Cleanup
+    nats_pub.stop_heartbeat()  # no-op if never started
     nats_pub.close()
     pygame.quit()
 

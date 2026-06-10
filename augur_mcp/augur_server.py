@@ -542,7 +542,15 @@ def get_pipeline_health() -> dict[str, Any]:
         with _persistence_ctx() as pm:
             data = pm.load_health_snapshot()
         if data is None:
-            return {"status": "warming_up", "faculties": {}}
+            # Match the summarize() payload shape so consumers can read
+            # ts/started_at/uptime_s without a KeyError before the first snapshot.
+            return {
+                "status": "warming_up",
+                "started_at": 0.0,
+                "ts": 0.0,
+                "uptime_s": 0.0,
+                "faculties": {},
+            }
         return data
     except Exception as exc:
         return {"error": str(exc)}

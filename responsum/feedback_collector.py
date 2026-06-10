@@ -904,6 +904,10 @@ async def run() -> None:
     finally:
         if hb_task is not None:
             hb_task.cancel()
+            try:
+                await hb_task
+            except asyncio.CancelledError:
+                pass
         try:
             await sub_advice.unsubscribe()
             await sub_perception.unsubscribe()

@@ -113,10 +113,18 @@ class NatsPublisher:
         log.info("NATS connected (%s)", self._config.nats_url)
 
     def close(self) -> None:
-        if self._nc:
-            self._loop.run_until_complete(self._nc.close())
-            log.info("NATS closed")
-        self._loop.close()
+        # Hold the publish lock so close() cannot drive/close the loop while an
+        # in-flight heartbeat publish (which acquires the same lock) is still
+        # inside run_until_complete on it. stop_heartbeat()'s join can return
+        # with the beat thread still running; the lock makes close() wait for
+        # the beat to release before any loop operation, preventing concurrent
+        # loop access (RuntimeError).
+        with self._pub_lock:
+            if self._nc:
+                self._loop.run_until_complete(self._nc.close())
+                log.info("NATS closed")
+            if not self._loop.is_closed():
+                self._loop.close()
 
     # -- publish -------------------------------------------------------------
     def publish(self, subject: str, payload: dict) -> None:

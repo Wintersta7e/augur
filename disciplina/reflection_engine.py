@@ -1664,6 +1664,10 @@ async def run() -> None:
     finally:
         if hb_task is not None:
             hb_task.cancel()
+            try:
+                await hb_task
+            except asyncio.CancelledError:
+                pass
         # LEAK-06: close NATS first (stop delivering messages to callbacks)
         # before closing the HTTP client so an in-flight reflection cannot
         # see a mid-shutdown "client is closed" error from Ollama.

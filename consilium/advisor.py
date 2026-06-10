@@ -1187,6 +1187,10 @@ async def run() -> None:
     finally:
         if hb_task is not None:
             hb_task.cancel()
+            try:
+                await hb_task
+            except asyncio.CancelledError:
+                pass
         await sub.unsubscribe()
         await classifier_lane.shutdown()
         await http_client.aclose()

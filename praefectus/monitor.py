@@ -88,9 +88,12 @@ async def run() -> None:
         if kind == "heartbeat":
             try:
                 data = json.loads(msg.data)
+                if not isinstance(data, dict):
+                    return
+                ts = float(data.get("ts", now))
             except (ValueError, TypeError):
                 return
-            H.record_heartbeat(states, data.get("faculty"), float(data.get("ts", now)))
+            H.record_heartbeat(states, data.get("faculty"), ts)
         elif kind == "activity":
             try:
                 data = json.loads(msg.data)
@@ -106,6 +109,10 @@ async def run() -> None:
             await tick(nc, pm, states, window, time.time(), started_at, config)
     finally:
         hb_task.cancel()
+        try:
+            await hb_task
+        except asyncio.CancelledError:
+            pass
         try:
             await sub.unsubscribe()
         except Exception as exc:  # noqa: BLE001

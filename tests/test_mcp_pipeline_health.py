@@ -24,6 +24,11 @@ def test_get_pipeline_health_warming_up_when_empty():
     with mock.patch.object(srv, "_persistence_ctx", return_value=ctx):
         out = srv.get_pipeline_health()
     assert out["status"] == "warming_up"
+    # Shape parity with summarize(): consumers can read these without KeyError.
+    assert out["started_at"] == 0.0
+    assert out["ts"] == 0.0
+    assert out["uptime_s"] == 0.0
+    assert out["faculties"] == {}
 
 
 def test_praefectus_in_component_commands():

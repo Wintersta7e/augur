@@ -763,6 +763,10 @@ def main() -> None:  # pragma: no cover - CLI entrypoint
         finally:
             if hb_task is not None:
                 hb_task.cancel()
+                try:
+                    await hb_task
+                except asyncio.CancelledError:
+                    pass
             await nc.drain()
 
     asyncio.run(_run())

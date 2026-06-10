@@ -277,7 +277,7 @@ def fake_pm_at_cap(monkeypatch: pytest.MonkeyPatch) -> _InstrumentedPM:
 
     for i in range(_CAP):
         key = f"single:chess:user{i}"
-        pm._r.hset("augur:gate:channel_stats", key, json.dumps({"seen": i + 1}))
+        pm._r.hset("augur:limen:channel_stats", key, json.dumps({"seen": i + 1}))
 
     # The hset calls above go through execute_command and increment write_calls.
     # Reset to 0 so gate tests that assert "evaluate() is read-only

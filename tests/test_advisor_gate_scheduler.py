@@ -19,7 +19,7 @@ import asyncio
 
 import pytest
 
-from reasoning.advisor_gate_scheduler import MustFireScheduler
+from limen.scheduler import MustFireScheduler
 
 
 class FakeClock:

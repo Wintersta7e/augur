@@ -17,8 +17,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from reasoning.advisor_gate import Gate, GateDecision
-from reasoning.advisor_gate_scheduler import MustFireScheduler
+from limen.gate import Gate, GateDecision
+from limen.scheduler import MustFireScheduler
 from consilium.advisor import process_message
 from tests.conftest import (
     EXEMPT_PAYLOAD,

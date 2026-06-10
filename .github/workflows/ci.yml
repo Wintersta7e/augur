@@ -48,12 +48,12 @@ jobs:
         run: |
           mypy --ignore-missing-imports --no-strict-optional \
             --explicit-package-bases \
-            tabula/ vigil/ nexus/ consilium/ reasoning/ perception/ sensus/ vox/ augur_mcp/
+            tabula/ vigil/ nexus/ consilium/ limen/ reasoning/ perception/ sensus/ vox/ augur_mcp/
 
       - name: Run unit tests
         run: |
           pytest tests/ --ignore=tests/integration -v \
-            --cov=tabula --cov=vigil --cov=nexus --cov=consilium --cov=reasoning \
+            --cov=tabula --cov=vigil --cov=nexus --cov=consilium --cov=limen --cov=reasoning \
             --cov=perception --cov=sensus --cov=vox --cov=augur_mcp \
             --cov-report=xml --cov-report=term
 

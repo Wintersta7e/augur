@@ -32,7 +32,7 @@ _EPS = 1e-6
 # The Redis hash whose cap (MAX_GATE_STATE_KEYS) decides trackability: a new
 # state_key that cannot be created here is untrackable for anti-starvation, so a
 # would-suppress on it fails open to FIRE (cap_fail_open, invariant D / spec §6).
-_CHANNEL_STATS_KEY = "augur:gate:channel_stats"
+_CHANNEL_STATS_KEY = "augur:limen:channel_stats"
 
 # Arms a non-exempt HIGH skips — the learned/recurrence suppressors (spec §5
 # "Non-exempt severity==\"high\" bypass").  A standalone high punches through

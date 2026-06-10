@@ -198,11 +198,11 @@ class PersistenceManager:
 
     def mark_mrt_rating_session(self, session_id: str) -> None:
         """Record that a session issued >=1 withheld-rating prompt (set: dedups)."""
-        self._r.sadd("augur:gate:mrt_rating_sessions", session_id)
+        self._r.sadd("augur:limen:mrt_rating_sessions", session_id)
 
     def count_mrt_rating_sessions(self) -> int:
         """Number of distinct sessions that issued a withheld-rating prompt."""
-        return int(self._r.scard("augur:gate:mrt_rating_sessions"))
+        return int(self._r.scard("augur:limen:mrt_rating_sessions"))
 
     # -- Threshold config ----------------------------------------------------
 
@@ -475,12 +475,12 @@ class PersistenceManager:
     # persistence.py:297).
 
     def save_silence_record(self, record: dict) -> None:
-        """Append a gate suppression record to augur:gate:silences (capped).
+        """Append a gate suppression record to augur:limen:silences (capped).
 
         Schema: {ts, decision_id, state_key, domain, entity, severity, arm,
                  reason, metrics, mrt_eligible, p_withhold}
         """
-        key = "augur:gate:silences"
+        key = "augur:limen:silences"
         self._r.lpush(key, json.dumps(record))
         self._r.ltrim(key, 0, MAX_GATE_SILENCES - 1)
 
@@ -489,21 +489,21 @@ class PersistenceManager:
 
         Returns [] if the list is absent or any entry is corrupt.
         """
-        key = "augur:gate:silences"
+        key = "augur:limen:silences"
         raw_list = self._r.lrange(key, 0, limit - 1)
         try:
             return [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
-            log.warning("augur:gate:silences contained a corrupt entry; returning []")
+            log.warning("augur:limen:silences contained a corrupt entry; returning []")
             return []
 
     def save_emission(self, record: dict) -> None:
-        """Append a gate emission record to augur:gate:emissions (capped).
+        """Append a gate emission record to augur:limen:emissions (capped).
 
         Schema: {ts, decision_id, state_key, severity, tier, probe,
                  audit_only, withheld_reason, mrt_eligible, p_fire}
         """
-        key = "augur:gate:emissions"
+        key = "augur:limen:emissions"
         self._r.lpush(key, json.dumps(record))
         self._r.ltrim(key, 0, MAX_GATE_EMISSIONS - 1)
 
@@ -512,21 +512,21 @@ class PersistenceManager:
 
         Returns [] if the list is absent or any entry is corrupt.
         """
-        key = "augur:gate:emissions"
+        key = "augur:limen:emissions"
         raw_list = self._r.lrange(key, 0, limit - 1)
         try:
             return [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
-            log.warning("augur:gate:emissions contained a corrupt entry; returning []")
+            log.warning("augur:limen:emissions contained a corrupt entry; returning []")
             return []
 
     def save_observed(self, record: dict) -> None:
-        """Append a gate observed-value record to augur:gate:observed (capped).
+        """Append a gate observed-value record to augur:limen:observed (capped).
 
         Schema: {ts, state_key, value, severity}
         Written by both record_suppression and non-probe record_delivery_success.
         """
-        key = "augur:gate:observed"
+        key = "augur:limen:observed"
         self._r.lpush(key, json.dumps(record))
         self._r.ltrim(key, 0, MAX_GATE_OBSERVED - 1)
 
@@ -536,12 +536,12 @@ class PersistenceManager:
         Returns [] if absent or any entry is corrupt.  Filters by state_key
         after reading so the caller gets only the records relevant to one channel.
         """
-        key = "augur:gate:observed"
+        key = "augur:limen:observed"
         raw_list = self._r.lrange(key, 0, limit - 1)
         try:
             all_records = [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
-            log.warning("augur:gate:observed contained a corrupt entry; returning []")
+            log.warning("augur:limen:observed contained a corrupt entry; returning []")
             return []
         return [r for r in all_records if r.get("state_key") == state_key]
 
@@ -552,7 +552,7 @@ class PersistenceManager:
         now: str,
         decision_id: str,
     ) -> None:
-        """Append a delivery-failure record to augur:gate:delivery_failures (capped).
+        """Append a delivery-failure record to augur:limen:delivery_failures (capped).
 
         Schema: {ts, decision_id, state_key, domain, entity, reason}
         Used for infrastructure non-deliveries (busy-skip, Ollama failure, etc.).
@@ -566,7 +566,7 @@ class PersistenceManager:
             "entity": getattr(signature, "entity", None),
             "reason": reason,
         }
-        key = "augur:gate:delivery_failures"
+        key = "augur:limen:delivery_failures"
         self._r.lpush(key, json.dumps(record))
         self._r.ltrim(key, 0, MAX_GATE_DELIVERY_FAILURES - 1)
 
@@ -575,13 +575,13 @@ class PersistenceManager:
 
         Returns [] if the list is absent or any entry is corrupt.
         """
-        key = "augur:gate:delivery_failures"
+        key = "augur:limen:delivery_failures"
         raw_list = self._r.lrange(key, 0, limit - 1)
         try:
             return [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
             log.warning(
-                "augur:gate:delivery_failures contained a corrupt entry; returning []"
+                "augur:limen:delivery_failures contained a corrupt entry; returning []"
             )
             return []
 
@@ -630,71 +630,71 @@ class PersistenceManager:
 
     def save_habituation(self, state_key: str, entry: dict) -> bool:
         """Store per-channel habituation state. Returns False if refused at cap."""
-        return self._hash_save("augur:gate:habituation", state_key, entry)
+        return self._hash_save("augur:limen:habituation", state_key, entry)
 
     def load_habituation(self, state_key: str) -> dict:
         """Return habituation entry for state_key, or {} if missing/corrupt."""
-        return self._hash_load("augur:gate:habituation", state_key)
+        return self._hash_load("augur:limen:habituation", state_key)
 
     # -- habituation_floor (offline: floor, last_ts) — separate Redis key ----
 
     def save_habituation_floor(self, state_key: str, entry: dict) -> bool:
         """Store per-channel habituation floor. Returns False if refused at cap."""
-        return self._hash_save("augur:gate:habituation_floor", state_key, entry)
+        return self._hash_save("augur:limen:habituation_floor", state_key, entry)
 
     def load_habituation_floor(self, state_key: str) -> dict:
         """Return habituation floor for state_key, or {} if missing/corrupt."""
-        return self._hash_load("augur:gate:habituation_floor", state_key)
+        return self._hash_load("augur:limen:habituation_floor", state_key)
 
     # -- credibility (offline + conservative online: cred, n, last_fb_ts) ----
 
     def save_credibility(self, signal_class: str, entry: dict) -> bool:
         """Store per-class credibility state. Returns False if refused at cap."""
-        return self._hash_save("augur:gate:credibility", signal_class, entry)
+        return self._hash_save("augur:limen:credibility", signal_class, entry)
 
     def load_credibility(self, signal_class: str) -> dict:
         """Return credibility entry for signal_class, or {} if missing/corrupt."""
-        return self._hash_load("augur:gate:credibility", signal_class)
+        return self._hash_load("augur:limen:credibility", signal_class)
 
     # -- reservoir (online: count, last_ts) -----------------------------------
 
     def save_reservoir(self, state_key: str, entry: dict) -> bool:
         """Store per-channel reservoir state. Returns False if refused at cap."""
-        return self._hash_save("augur:gate:reservoir", state_key, entry)
+        return self._hash_save("augur:limen:reservoir", state_key, entry)
 
     def load_reservoir(self, state_key: str) -> dict:
         """Return reservoir entry for state_key, or {} if missing/corrupt."""
-        return self._hash_load("augur:gate:reservoir", state_key)
+        return self._hash_load("augur:limen:reservoir", state_key)
 
     # -- cost_tier_memory (online + offline: earned_tier2, helped, count, last_ts)
 
     def save_cost_tier_memory(self, state_key: str, entry: dict) -> bool:
         """Store per-channel cost-tier memory. Returns False if refused at cap."""
-        return self._hash_save("augur:gate:cost_tier_memory", state_key, entry)
+        return self._hash_save("augur:limen:cost_tier_memory", state_key, entry)
 
     def load_cost_tier_memory(self, state_key: str) -> dict:
         """Return cost-tier memory for state_key, or {} if missing/corrupt."""
-        return self._hash_load("augur:gate:cost_tier_memory", state_key)
+        return self._hash_load("augur:limen:cost_tier_memory", state_key)
 
     # -- channel_stats (online: seen, consecutive_suppressions, ...) ----------
 
     def save_channel_stats(self, state_key: str, entry: dict) -> bool:
         """Store per-channel tracking stats. Returns False if refused at cap."""
-        return self._hash_save("augur:gate:channel_stats", state_key, entry)
+        return self._hash_save("augur:limen:channel_stats", state_key, entry)
 
     def load_channel_stats(self, state_key: str) -> dict:
         """Return channel stats for state_key, or {} if missing/corrupt."""
-        return self._hash_load("augur:gate:channel_stats", state_key)
+        return self._hash_load("augur:limen:channel_stats", state_key)
 
     # -- advice_rate (string key: rate_ewma, last_ts) -------------------------
 
     def save_advice_rate(self, entry: dict) -> None:
         """Persist the global advice-rate EWMA state."""
-        self._r.set("augur:gate:advice_rate", json.dumps(entry))
+        self._r.set("augur:limen:advice_rate", json.dumps(entry))
 
     def load_advice_rate(self) -> dict:
         """Return advice-rate state, or {} if missing/corrupt."""
-        raw = self._r.get("augur:gate:advice_rate")
+        raw = self._r.get("augur:limen:advice_rate")
         if not raw:
             return {}
         try:
@@ -703,26 +703,26 @@ class PersistenceManager:
             data = json.loads(raw)
             return data if isinstance(data, dict) else {}
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
-            log.warning("augur:gate:advice_rate corrupt; returning {}")
+            log.warning("augur:limen:advice_rate corrupt; returning {}")
             return {}
 
     # -- self_tolerance set (offline: SADD/SREM/SISMEMBER/SMEMBERS) -----------
 
     def add_self_tolerance(self, state_key: str) -> None:
         """Add state_key to the self-tolerance set."""
-        self._r.sadd("augur:gate:self_tolerance", state_key)
+        self._r.sadd("augur:limen:self_tolerance", state_key)
 
     def remove_self_tolerance(self, state_key: str) -> None:
         """Remove state_key from the self-tolerance set."""
-        self._r.srem("augur:gate:self_tolerance", state_key)
+        self._r.srem("augur:limen:self_tolerance", state_key)
 
     def is_self_tolerant(self, state_key: str) -> bool:
         """Return True if state_key is in the self-tolerance set."""
-        return bool(self._r.sismember("augur:gate:self_tolerance", state_key))
+        return bool(self._r.sismember("augur:limen:self_tolerance", state_key))
 
     def load_self_tolerance(self) -> set[str]:
         """Return the full self-tolerance set (decoded to str)."""
-        raw = self._r.smembers("augur:gate:self_tolerance")
+        raw = self._r.smembers("augur:limen:self_tolerance")
         return {m.decode() if isinstance(m, bytes) else m for m in raw}
 
     # -- can_track_gate_state (read-only cap probe) ---------------------------
@@ -764,19 +764,19 @@ class PersistenceManager:
         pipe = self._r.pipeline()  # transaction=True by default
         if floors:
             for field, entry in floors.items():
-                pipe.hset("augur:gate:habituation_floor", field, json.dumps(entry))
+                pipe.hset("augur:limen:habituation_floor", field, json.dumps(entry))
         if credibility:
             for field, entry in credibility.items():
-                pipe.hset("augur:gate:credibility", field, json.dumps(entry))
+                pipe.hset("augur:limen:credibility", field, json.dumps(entry))
         if cost_tier:
             for field, entry in cost_tier.items():
-                pipe.hset("augur:gate:cost_tier_memory", field, json.dumps(entry))
+                pipe.hset("augur:limen:cost_tier_memory", field, json.dumps(entry))
         if tolerance_add:
             for state_key in tolerance_add:
-                pipe.sadd("augur:gate:self_tolerance", state_key)
+                pipe.sadd("augur:limen:self_tolerance", state_key)
         if tolerance_remove:
             for state_key in tolerance_remove:
-                pipe.srem("augur:gate:self_tolerance", state_key)
+                pipe.srem("augur:limen:self_tolerance", state_key)
         if advice_rate is not None:
-            pipe.set("augur:gate:advice_rate", json.dumps(advice_rate))
+            pipe.set("augur:limen:advice_rate", json.dumps(advice_rate))
         pipe.execute()

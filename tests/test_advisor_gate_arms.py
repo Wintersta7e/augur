@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from reasoning.advisor_gate import Gate, build_signature
+from limen.gate import Gate, build_signature
 from tests.conftest import EXEMPT_PAYLOAD, SINGLE_HIGH_TYPING, SINGLE_MEDIUM_TYPING
 
 

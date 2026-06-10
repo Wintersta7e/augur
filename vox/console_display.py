@@ -52,7 +52,7 @@ SUBJECT_ANOMALY = "augur.vigil.anomaly"
 SUBJECT_ADVICE = "augur.consilium.advice"
 SUBJECT_CORRELATION = "augur.nexus.detected"
 SUBJECT_REFLECT = "augur.reflect.complete"
-SUBJECT_SUPPRESSED = "augur.advisor.suppressed"
+SUBJECT_SUPPRESSED = "augur.limen.suppressed"
 WRAP_WIDTH = 80
 
 # ---------------------------------------------------------------------------

@@ -58,7 +58,7 @@ def test_silences_capped() -> None:
 
 def test_load_silences_corrupt_returns_empty() -> None:
     pm = _pm()
-    pm._r.lpush("augur:gate:silences", "{not json")
+    pm._r.lpush("augur:limen:silences", "{not json")
     assert pm.load_silence_records(limit=10) == []  # guarded
 
 
@@ -110,7 +110,7 @@ def test_emissions_capped() -> None:
 
 def test_load_emissions_corrupt_returns_empty() -> None:
     pm = _pm()
-    pm._r.lpush("augur:gate:emissions", "{bad")
+    pm._r.lpush("augur:limen:emissions", "{bad")
     assert pm.load_emissions(limit=10) == []
 
 
@@ -168,7 +168,7 @@ def test_observed_capped() -> None:
 
 def test_load_observed_corrupt_returns_empty() -> None:
     pm = _pm()
-    pm._r.lpush("augur:gate:observed", "{bad")
+    pm._r.lpush("augur:limen:observed", "{bad")
     assert pm.load_observed("k", limit=10) == []
 
 
@@ -212,7 +212,7 @@ def test_delivery_failures_capped() -> None:
 
 def test_load_delivery_failures_corrupt_returns_empty() -> None:
     pm = _pm()
-    pm._r.lpush("augur:gate:delivery_failures", "{bad")
+    pm._r.lpush("augur:limen:delivery_failures", "{bad")
     assert pm.load_delivery_failures(limit=10) == []
 
 
@@ -244,7 +244,7 @@ def test_channel_stats_refuse_at_cap(monkeypatch: object) -> None:
 
 def test_load_habituation_corrupt_field_returns_default() -> None:
     pm = _pm()
-    pm._r.hset("augur:gate:habituation", "k", "{bad")
+    pm._r.hset("augur:limen:habituation", "k", "{bad")
     assert pm.load_habituation("k") == {}  # guarded → unseen
 
 
@@ -384,31 +384,31 @@ def test_load_missing_returns_empty_dict() -> None:
 
 def test_habituation_floor_corrupt_returns_empty() -> None:
     pm = _pm()
-    pm._r.hset("augur:gate:habituation_floor", "k", "{bad")
+    pm._r.hset("augur:limen:habituation_floor", "k", "{bad")
     assert pm.load_habituation_floor("k") == {}
 
 
 def test_credibility_corrupt_returns_empty() -> None:
     pm = _pm()
-    pm._r.hset("augur:gate:credibility", "c", "{bad")
+    pm._r.hset("augur:limen:credibility", "c", "{bad")
     assert pm.load_credibility("c") == {}
 
 
 def test_reservoir_corrupt_returns_empty() -> None:
     pm = _pm()
-    pm._r.hset("augur:gate:reservoir", "k", "{bad")
+    pm._r.hset("augur:limen:reservoir", "k", "{bad")
     assert pm.load_reservoir("k") == {}
 
 
 def test_cost_tier_memory_corrupt_returns_empty() -> None:
     pm = _pm()
-    pm._r.hset("augur:gate:cost_tier_memory", "k", "{bad")
+    pm._r.hset("augur:limen:cost_tier_memory", "k", "{bad")
     assert pm.load_cost_tier_memory("k") == {}
 
 
 def test_channel_stats_corrupt_returns_empty() -> None:
     pm = _pm()
-    pm._r.hset("augur:gate:channel_stats", "k", "{bad")
+    pm._r.hset("augur:limen:channel_stats", "k", "{bad")
     assert pm.load_channel_stats("k") == {}
 
 
@@ -430,7 +430,7 @@ def test_advice_rate_missing_returns_empty() -> None:
 
 def test_advice_rate_corrupt_returns_empty() -> None:
     pm = _pm()
-    pm._r.set("augur:gate:advice_rate", "{bad")
+    pm._r.set("augur:limen:advice_rate", "{bad")
     assert pm.load_advice_rate() == {}
 
 
@@ -471,7 +471,7 @@ def test_load_self_tolerance_empty() -> None:
 def test_can_track_gate_state_empty_hash() -> None:
     pm = _pm()
     # No entries yet — new key can be tracked
-    assert pm.can_track_gate_state("augur:gate:channel_stats", "new:key") is True
+    assert pm.can_track_gate_state("augur:limen:channel_stats", "new:key") is True
 
 
 def test_can_track_gate_state_existing_at_cap(monkeypatch: object) -> None:
@@ -482,9 +482,9 @@ def test_can_track_gate_state_existing_at_cap(monkeypatch: object) -> None:
     pm.save_channel_stats("k1", {"seen": 1})
     pm.save_channel_stats("k2", {"seen": 1})
     # At cap — new key cannot be tracked
-    assert pm.can_track_gate_state("augur:gate:channel_stats", "k3") is False
+    assert pm.can_track_gate_state("augur:limen:channel_stats", "k3") is False
     # Existing key CAN still be tracked even at cap
-    assert pm.can_track_gate_state("augur:gate:channel_stats", "k1") is True
+    assert pm.can_track_gate_state("augur:limen:channel_stats", "k1") is True
 
 
 # ── Task 1.3: save_gate_tuning_state (atomic) + pass_name idempotency ────────
@@ -526,47 +526,47 @@ def test_mark_tuning_applied_default_pass_name_preserves_behavior() -> None:
     "seed, loader, expected",
     [
         (
-            lambda pm: pm._r.lpush("augur:gate:emissions", "{bad"),
+            lambda pm: pm._r.lpush("augur:limen:emissions", "{bad"),
             lambda pm: pm.load_emissions(limit=10),
             [],
         ),
         (
-            lambda pm: pm._r.lpush("augur:gate:observed", "{bad"),
+            lambda pm: pm._r.lpush("augur:limen:observed", "{bad"),
             lambda pm: pm.load_observed("k", limit=10),
             [],
         ),
         (
-            lambda pm: pm._r.lpush("augur:gate:delivery_failures", "{bad"),
+            lambda pm: pm._r.lpush("augur:limen:delivery_failures", "{bad"),
             lambda pm: pm.load_delivery_failures(limit=10),
             [],
         ),
         (
-            lambda pm: pm._r.hset("augur:gate:channel_stats", "k", "{bad"),
+            lambda pm: pm._r.hset("augur:limen:channel_stats", "k", "{bad"),
             lambda pm: pm.load_channel_stats("k"),
             {},
         ),
         (
-            lambda pm: pm._r.hset("augur:gate:reservoir", "k", "{bad"),
+            lambda pm: pm._r.hset("augur:limen:reservoir", "k", "{bad"),
             lambda pm: pm.load_reservoir("k"),
             {},
         ),
         (
-            lambda pm: pm._r.hset("augur:gate:credibility", "c", "{bad"),
+            lambda pm: pm._r.hset("augur:limen:credibility", "c", "{bad"),
             lambda pm: pm.load_credibility("c"),
             {},
         ),
         (
-            lambda pm: pm._r.hset("augur:gate:cost_tier_memory", "k", "{bad"),
+            lambda pm: pm._r.hset("augur:limen:cost_tier_memory", "k", "{bad"),
             lambda pm: pm.load_cost_tier_memory("k"),
             {},
         ),
         (
-            lambda pm: pm._r.hset("augur:gate:habituation_floor", "k", "{bad"),
+            lambda pm: pm._r.hset("augur:limen:habituation_floor", "k", "{bad"),
             lambda pm: pm.load_habituation_floor("k"),
             {},
         ),
         (
-            lambda pm: pm._r.set("augur:gate:advice_rate", "{bad"),
+            lambda pm: pm._r.set("augur:limen:advice_rate", "{bad"),
             lambda pm: pm.load_advice_rate(),
             {},
         ),

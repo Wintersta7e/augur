@@ -226,7 +226,7 @@ async def test_on_advice_gate_fields_default_when_absent(
 
 
 def _suppressed_payload(**overrides: Any) -> dict[str, Any]:
-    """A full §8 augur.advisor.suppressed payload (primary domain+entity)."""
+    """A full §8 augur.limen.suppressed payload (primary domain+entity)."""
     payload = {
         "decision_id": "dec-w001",
         "state_key": "single:chess:white:medium",
@@ -521,7 +521,7 @@ async def test_session_summary_counts_both(
 async def test_single_tracker_per_decision_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Two augur.advisor.suppressed messages for the same decision_id must
+    # Two augur.limen.suppressed messages for the same decision_id must
     # create exactly ONE PendingGateDecision tracker.
     async def feed(cap: dict, ctx: dict) -> None:
         await cap["on_suppressed"](_suppressed_msg(decision_id="dup-1"))

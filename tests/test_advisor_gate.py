@@ -1,4 +1,4 @@
-"""Unit tests for reasoning.advisor_gate — GateDecision + build_signature.
+"""Unit tests for limen.gate — GateDecision + build_signature.
 
 Task 2.1: GateDecision (frozen dataclass), the fire/suppress/downgrade
 constructors (id minted only when None), as_fire id-preservation, and
@@ -11,7 +11,7 @@ import dataclasses
 
 import pytest
 
-from reasoning.advisor_gate import GateDecision, build_signature
+from limen.gate import GateDecision, build_signature
 from tests.conftest import SINGLE_MEDIUM
 
 
@@ -283,7 +283,7 @@ from tests.conftest import (  # noqa: E402
 
 
 def test_exempt_always_fires(fake_pm, cfg) -> None:
-    from reasoning.advisor_gate import Gate
+    from limen.gate import Gate
 
     g = Gate()
     s = build_signature(EXEMPT_PAYLOAD)
@@ -293,7 +293,7 @@ def test_exempt_always_fires(fake_pm, cfg) -> None:
 
 
 def test_master_disabled_fires(fake_pm, cfg_disabled) -> None:
-    from reasoning.advisor_gate import Gate
+    from limen.gate import Gate
 
     g = Gate()
     s = build_signature(SINGLE_MEDIUM)
@@ -302,7 +302,7 @@ def test_master_disabled_fires(fake_pm, cfg_disabled) -> None:
 
 def test_evaluate_is_readonly(fake_pm, cfg) -> None:
     # property: evaluate performs no Redis writes
-    from reasoning.advisor_gate import Gate
+    from limen.gate import Gate
 
     g = Gate()
     s = build_signature(SINGLE_MEDIUM)
@@ -313,13 +313,13 @@ def test_evaluate_is_readonly(fake_pm, cfg) -> None:
 def test_evaluate_is_not_a_coroutine() -> None:
     import inspect
 
-    from reasoning.advisor_gate import Gate
+    from limen.gate import Gate
 
     assert inspect.iscoroutinefunction(Gate.evaluate) is False  # §11 no-await proxy
 
 
 def test_exempt_does_no_state_reads(fake_pm, cfg) -> None:
-    from reasoning.advisor_gate import Gate
+    from limen.gate import Gate
 
     g = Gate()
     s = build_signature(EXEMPT_PAYLOAD)
@@ -330,7 +330,7 @@ def test_exempt_does_no_state_reads(fake_pm, cfg) -> None:
 def test_no_arms_passes_all(fake_pm, cfg) -> None:
     from dataclasses import replace
 
-    from reasoning.advisor_gate import Gate
+    from limen.gate import Gate
 
     # A medium that trips no suppressor reaches the terminal passed_all_arms
     # fire.  The reservoir arm (Arm 5) holds a fresh single+medium until it has
@@ -352,7 +352,7 @@ def test_no_arms_passes_all(fake_pm, cfg) -> None:
 def test_cap_fail_open(fake_pm_at_cap, cfg) -> None:
     # A stub arm WOULD suppress a new state_key, but channel_stats is at
     # MAX_GATE_STATE_KEYS → the SUPPRESS converts to FIRE("cap_fail_open").
-    from reasoning.advisor_gate import Gate
+    from limen.gate import Gate
 
     def _always_suppress(gate, sig, state, config, now, rng):
         return GateDecision.suppress("would_suppress", deciding_arm="stub")
@@ -365,7 +365,7 @@ def test_cap_fail_open(fake_pm_at_cap, cfg) -> None:
 
 
 def test_cap_fail_open_preserves_decision_id(fake_pm_at_cap, cfg) -> None:
-    from reasoning.advisor_gate import Gate
+    from limen.gate import Gate
 
     captured: dict[str, GateDecision] = {}
 
@@ -383,7 +383,7 @@ def test_cap_fail_open_preserves_decision_id(fake_pm_at_cap, cfg) -> None:
 def test_suppress_passes_through_when_trackable(fake_pm, cfg) -> None:
     # When the channel IS trackable, a suppressing arm's SUPPRESS is returned
     # as-is (no cap conversion).
-    from reasoning.advisor_gate import Gate
+    from limen.gate import Gate
 
     def _always_suppress(gate, sig, state, config, now, rng):
         return GateDecision.suppress("would_suppress", deciding_arm="stub")
@@ -403,7 +403,7 @@ from tests.conftest import (  # noqa: E402
 
 
 def _gate() -> "object":
-    from reasoning.advisor_gate import Gate
+    from limen.gate import Gate
 
     return Gate()
 
@@ -745,10 +745,10 @@ def test_still_starved_safe_default_true_on_read_error(fake_pm, cfg) -> None:
 
 # The per-channel gate hashes that an ungateable event must NEVER touch.
 _PER_CHANNEL_HASHES = (
-    "augur:gate:habituation",
-    "augur:gate:reservoir",
-    "augur:gate:channel_stats",
-    "augur:gate:cost_tier_memory",
+    "augur:limen:habituation",
+    "augur:limen:reservoir",
+    "augur:limen:channel_stats",
+    "augur:limen:cost_tier_memory",
 )
 
 
@@ -856,7 +856,7 @@ def test_ungateable_delivery_writes_no_per_channel_keys(fake_pm, cfg, entity) ->
     for hash_key in _PER_CHANNEL_HASHES:
         assert fake_pm._redis.exists(hash_key) == 0, hash_key
     # No per-channel observed window for the bogus state_key.
-    assert fake_pm._redis.exists("augur:gate:observed") == 0
+    assert fake_pm._redis.exists("augur:limen:observed") == 0
 
 
 @_UNGATEABLE_ENTITIES
@@ -880,7 +880,7 @@ def test_ungateable_suppression_writes_only_silence(fake_pm, cfg, entity) -> Non
     # No per-channel hash key and no per-channel observed window created.
     for hash_key in _PER_CHANNEL_HASHES:
         assert fake_pm._redis.exists(hash_key) == 0, hash_key
-    assert fake_pm._redis.exists("augur:gate:observed") == 0
+    assert fake_pm._redis.exists("augur:limen:observed") == 0
 
 
 @_UNGATEABLE_ENTITIES
@@ -990,5 +990,5 @@ def test_advisor_suppression_subjects_exist() -> None:
         SUBJECT_SUPPRESSED,
     )
 
-    assert SUBJECT_SUPPRESSED == "augur.advisor.suppressed"
-    assert SUBJECT_DELIVERY_FAILURE == "augur.advisor.delivery_failure"
+    assert SUBJECT_SUPPRESSED == "augur.limen.suppressed"
+    assert SUBJECT_DELIVERY_FAILURE == "augur.limen.delivery_failure"

@@ -10,7 +10,7 @@ from vox.console_display import (
 
 
 def _suppressed_payload() -> dict:
-    """A representative augur.advisor.suppressed payload (spec §8)."""
+    """A representative augur.limen.suppressed payload (spec §8)."""
     return {
         "decision_id": "d1",
         "state_key": "single:typing:user",

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from perception.feedback_collector import PendingGateDecision
-from reasoning.advisor_gate import GateDecision, build_signature
+from limen.gate import GateDecision, build_signature
 from consilium.advisor import publish_suppressed_event
 
 

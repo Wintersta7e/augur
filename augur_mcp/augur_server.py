@@ -726,7 +726,7 @@ def get_gate_silences(limit: int = 100) -> dict[str, Any]:
     """Return recent gate suppression records and per-arm counts.
 
     Read-only.  Reads up to *limit* silence records from
-    ``augur:gate:silences`` (newest first) and derives a per-arm frequency
+    ``augur:limen:silences`` (newest first) and derives a per-arm frequency
     tally from the returned records.
 
     Args:

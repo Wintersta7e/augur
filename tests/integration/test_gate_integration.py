@@ -13,7 +13,7 @@ verified by a real subscriber.
 
 Scenarios (Task 12.1 / spec §11):
   1. a gate SUPPRESS writes the silence log AND publishes
-     ``augur.advisor.suppressed`` AND the console dedups it;
+     ``augur.limen.suppressed`` AND the console dedups it;
   2. an exempt high+correlated event fires end-to-end even when the
      reasoning_lock is held;
   3. a Tier-1 note is published on ``augur.consilium.advice`` (tier=1) and
@@ -41,8 +41,8 @@ from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
 from vox.console_display import dedup_should_suppress, update_last_rendered
 from perception.feedback_collector import PendingAdvice, _resolve_primary_domain
-from reasoning.advisor_gate import Gate, GateDecision, build_signature
-from reasoning.advisor_gate_scheduler import MustFireScheduler
+from limen.gate import Gate, GateDecision, build_signature
+from limen.scheduler import MustFireScheduler
 from consilium.advisor import (
     PUBLISH_SUBJECT,
     SUBJECT_SUPPRESSED,
@@ -57,7 +57,7 @@ pytestmark = pytest.mark.asyncio
 NOW = 1_000_000.0
 
 # Channel-stats key the gate's cap probe checks (advisor_gate._CHANNEL_STATS_KEY).
-_CHANNEL_STATS_KEY = "augur:gate:channel_stats"
+_CHANNEL_STATS_KEY = "augur:limen:channel_stats"
 
 
 def _pm(redis_client: Any) -> PersistenceManager:
@@ -122,7 +122,7 @@ async def test_suppress_logs_silence_publishes_suppressed_and_console_dedups(
     redis_client, nats_conn
 ) -> None:
     """A central-tolerance SUPPRESS writes one silence record, publishes
-    ``augur.advisor.suppressed`` (received over real NATS), and the console
+    ``augur.limen.suppressed`` (received over real NATS), and the console
     contract dedups the originating anomaly via that payload."""
     pm = _pm(redis_client)
     config = AugurConfig()

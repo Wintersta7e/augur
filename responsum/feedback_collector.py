@@ -828,12 +828,16 @@ async def run() -> None:
 
     # -- Session end handler -------------------------------------------------
     async def on_session_end(msg: nats.aio.client.Msg) -> None:
+        nonlocal current_session_id
         # A withheld-only session (gate decisions but no advice) must NOT be
         # dropped — its gate_decision_events carry the MRT control arm (spec §9).
         if not advice_events and not gate_decision_events:
             log.info(
                 "Session ended with no advice or gate decisions — nothing to finalize"
             )
+            # Rotate even on an empty session.end so the NEXT session derives a
+            # fresh id from Redis rather than reusing this one's memoized id.
+            current_session_id = None
             return
 
         # Force-finalize any pending tracking. Snapshot + clear BEFORE any await
@@ -848,6 +852,12 @@ async def run() -> None:
             await maybe_prompt_withheld_rating(pending, config, pm)
 
         save_current_feedback()
+        # Capture the id this session's feedback was saved under (advice-time
+        # saves + the save above all used this same pre-rotation id). The
+        # complete payload MUST carry exactly this id so Disciplina's
+        # pm.get_feedback(sid) finds this session's advice — do NOT re-derive
+        # at publish time.
+        sid = get_session_id()
         summary = build_session_summary()
 
         log.info(
@@ -866,7 +876,7 @@ async def run() -> None:
                 SUBJECT_FEEDBACK_COMPLETE,
                 json.dumps(
                     {
-                        "session_id": get_session_id(),
+                        "session_id": sid,
                         "summary": summary,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
@@ -875,6 +885,16 @@ async def run() -> None:
             log.info("Published feedback complete to %s", SUBJECT_FEEDBACK_COMPLETE)
         except Exception as exc:
             log.error("Failed to publish feedback complete: %s", exc)
+
+        # Rotate the session AFTER publishing: clear the per-session batches and
+        # drop the memoized id so the NEXT augur.session.end derives a fresh id
+        # from Redis. Each session then reaches Disciplina under a DISTINCT id,
+        # so correlation-tuning runs every session instead of being deduped to
+        # one per process.
+        advice_events.clear()
+        gate_decision_events.clear()
+        tracked_decision_ids.clear()
+        current_session_id = None
 
     # -- Subscribe -----------------------------------------------------------
     # R2-LEAK-01: save subscription handles so unsubscribe() is called on

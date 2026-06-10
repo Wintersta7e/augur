@@ -136,4 +136,4 @@ echo -e "${GRAY}  Press Ctrl+C to stop all components.${RESET}"
 echo ""
 
 # Run console display in foreground (blocks until Ctrl+C)
-$PYTHON "$PROJECT_DIR/output/console_display.py"
+$PYTHON "$PROJECT_DIR/vox/console_display.py"

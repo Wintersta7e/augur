@@ -39,7 +39,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
-from output.console_display import dedup_should_suppress, update_last_rendered
+from vox.console_display import dedup_should_suppress, update_last_rendered
 from perception.feedback_collector import PendingAdvice, _resolve_primary_domain
 from reasoning.advisor_gate import Gate, GateDecision, build_signature
 from reasoning.advisor_gate_scheduler import MustFireScheduler

@@ -47,7 +47,7 @@ COMPONENT_COMMANDS: dict[str, list[str]] = {
     "advisor": [sys.executable, "-m", "reasoning.augur_advisor"],
     "feedback": [sys.executable, "-m", "perception.feedback_collector"],
     "reflection": [sys.executable, "-m", "reasoning.reflection_engine"],
-    "display": [sys.executable, "-m", "output.console_display"],
+    "vox": [sys.executable, "-m", "vox.console_display"],
 }
 
 # SEC-02: allowlist for domain / entity / stream_id values received through

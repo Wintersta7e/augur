@@ -68,9 +68,9 @@ services:
       AUGUR_OLLAMA_URL: http://host.docker.internal:11434
     restart: unless-stopped
 
-  display:
+  vox:
     build: .
-    command: python -m output.console_display
+    command: python -m vox.console_display
     depends_on:
       redis:
         condition: service_healthy

@@ -138,7 +138,7 @@ async def pipeline(
         "advisor": [sys.executable, "-m", "reasoning.augur_advisor"],
         "feedback": [sys.executable, "-m", "perception.feedback_collector"],
         "reflection": [sys.executable, "-m", "reasoning.reflection_engine"],
-        "display": [sys.executable, "-m", "output.console_display"],
+        "vox": [sys.executable, "-m", "vox.console_display"],
     }
 
     requested: list[str] = getattr(request, "param", [])

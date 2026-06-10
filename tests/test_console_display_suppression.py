@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from output.console_display import (
+from vox.console_display import (
     dedup_should_suppress,
     render_suppression,
     update_last_rendered,

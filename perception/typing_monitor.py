@@ -24,11 +24,11 @@ import nats
 import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from blackboard.config import AugurConfig
-from blackboard.connections import connect_redis
-from blackboard.contracts import PerceptionEvent
-from blackboard.persistence import PersistenceManager
-from blackboard.session import SessionManager
+from tabula.config import AugurConfig
+from tabula.connections import connect_redis
+from tabula.contracts import PerceptionEvent
+from tabula.persistence import PersistenceManager
+from tabula.session import SessionManager
 
 # ---------------------------------------------------------------------------
 # Logging

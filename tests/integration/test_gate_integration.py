@@ -37,8 +37,8 @@ from typing import Any
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from blackboard.config import AugurConfig
-from blackboard.persistence import PersistenceManager
+from tabula.config import AugurConfig
+from tabula.persistence import PersistenceManager
 from output.console_display import dedup_should_suppress, update_last_rendered
 from perception.feedback_collector import PendingAdvice, _resolve_primary_domain
 from reasoning.advisor_gate import Gate, GateDecision, build_signature
@@ -434,7 +434,7 @@ async def test_refuse_at_cap_fails_open_to_fire(
     """When the channel_stats hash is at MAX_GATE_STATE_KEYS, a new state_key
     that WOULD be suppressed cannot be tracked → the gate fails open to
     FIRE("cap_fail_open") rather than silence it indefinitely (invariant D)."""
-    import blackboard.persistence as P
+    import tabula.persistence as P
 
     # Shrink the cap so we can fill the hash cheaply with real Redis writes.
     monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 2)

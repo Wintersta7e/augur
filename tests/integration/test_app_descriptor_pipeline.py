@@ -6,9 +6,9 @@ hash key so it does not require a full FLUSHALL.
 
 import pytest
 
-from blackboard.config import AugurConfig
-from blackboard.connections import connect_redis
-from blackboard.persistence import PersistenceManager
+from tabula.config import AugurConfig
+from tabula.connections import connect_redis
+from tabula.persistence import PersistenceManager
 from reasoning.app_descriptor import ClassifierLane
 from reasoning.augur_advisor import enrich_activity_descriptor
 

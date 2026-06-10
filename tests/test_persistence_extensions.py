@@ -13,7 +13,7 @@ import json
 from unittest.mock import MagicMock
 
 
-from blackboard.persistence import (
+from tabula.persistence import (
     SESSION_KEY_TTL_S,
     TUNING_APPLIED_TTL_S,
     PersistenceManager,

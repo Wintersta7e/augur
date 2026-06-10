@@ -48,12 +48,12 @@ jobs:
         run: |
           mypy --ignore-missing-imports --no-strict-optional \
             --explicit-package-bases \
-            blackboard/ detection/ reasoning/ perception/ output/ augur_mcp/
+            tabula/ detection/ reasoning/ perception/ output/ augur_mcp/
 
       - name: Run unit tests
         run: |
           pytest tests/ --ignore=tests/integration -v \
-            --cov=blackboard --cov=detection --cov=reasoning \
+            --cov=tabula --cov=detection --cov=reasoning \
             --cov=perception --cov=output --cov=augur_mcp \
             --cov-report=xml --cov-report=term
 

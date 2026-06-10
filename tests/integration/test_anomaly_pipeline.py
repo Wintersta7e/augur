@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 from tests.integration.conftest import (
     inject_perception_event,
     wait_for_redis_key,

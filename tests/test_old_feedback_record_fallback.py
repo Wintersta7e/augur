@@ -1,6 +1,6 @@
 """Tests for graceful handling of old feedback records lacking new fields."""
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 from reasoning.reflection_engine import (
     _attribution_weights,
     analyze_correlation_window_tuning,

@@ -10,7 +10,7 @@ import json
 from unittest.mock import MagicMock
 
 
-from blackboard.persistence import PersistenceManager
+from tabula.persistence import PersistenceManager
 
 GRAPH_KEY_PREFIX = "augur:correlation:graph:"
 GRAPH_INDEX_KEY = "augur:correlation:graph:_index"

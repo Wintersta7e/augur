@@ -25,9 +25,9 @@ from networkx.readwrite import json_graph
 import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from blackboard.config import AugurConfig
-from blackboard.connections import connect_redis
-from blackboard.persistence import PersistenceManager
+from tabula.config import AugurConfig
+from tabula.connections import connect_redis
+from tabula.persistence import PersistenceManager
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -464,7 +464,7 @@ def flush_graph_to_redis(
     )
 
 
-# Redis connection comes from blackboard.connections.connect_redis
+# Redis connection comes from tabula.connections.connect_redis
 # (imported above) — previously duplicated inline here.
 
 

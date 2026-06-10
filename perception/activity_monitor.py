@@ -28,8 +28,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from blackboard.contracts import PerceptionEvent
-from blackboard.session import get_active_session
+from tabula.contracts import PerceptionEvent
+from tabula.session import get_active_session
 
 log = logging.getLogger("activity_monitor")
 
@@ -704,8 +704,8 @@ def main() -> None:  # pragma: no cover - CLI entrypoint
         sys.exit(2)
 
     # Lazy imports for runtime-only paths (keeps tests importable).
-    from blackboard.config import AugurConfig
-    from blackboard.connections import connect_redis
+    from tabula.config import AugurConfig
+    from tabula.connections import connect_redis
     import nats
 
     logging.basicConfig(

@@ -56,7 +56,7 @@ async def test_session_end_flushes_graph_to_redis(
     # Warm chess baseline. Must be long enough that the detector's
     # min_observations gate flips to trained — pad to (gate + 5) so the test
     # adapts to future config bumps without rewriting fixed-length arrays.
-    from blackboard.config import AugurConfig  # local import — test-only
+    from tabula.config import AugurConfig  # local import — test-only
 
     _warm = AugurConfig().min_observations + 5
     _chess_pool = [5.2, 6.8, 7.4, 5.9, 8.1, 6.3, 7.0, 5.5, 6.7, 7.8]

@@ -581,7 +581,7 @@ async def test_activity_monitor_run_emits_focus_and_intensity_events(monkeypatch
 
 def test_focus_event_round_trips_through_perception_event_schema():
     """Schema compatibility: _FocusState.on_focus_change → PerceptionEvent → bytes → from_json."""
-    from blackboard.contracts import PerceptionEvent
+    from tabula.contracts import PerceptionEvent
 
     mod = _import_module()
     state = mod._FocusState(
@@ -603,7 +603,7 @@ def test_focus_event_round_trips_through_perception_event_schema():
 
 
 def test_intensity_event_round_trips_through_perception_event_schema():
-    from blackboard.contracts import PerceptionEvent
+    from tabula.contracts import PerceptionEvent
 
     mod = _import_module()
     w = mod._IntensityWindow(

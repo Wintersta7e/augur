@@ -1,4 +1,4 @@
-"""Tests for blackboard/config.py — AugurConfig centralized configuration."""
+"""Tests for tabula/config.py — AugurConfig centralized configuration."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from blackboard.config import AugurConfig  # noqa: E402
+from tabula.config import AugurConfig  # noqa: E402
 
 
 class TestDefaults:

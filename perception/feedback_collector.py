@@ -22,10 +22,10 @@ import nats
 import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from blackboard.config import AugurConfig
-from blackboard.connections import connect_redis
-from blackboard.contracts import PerceptionEvent
-from blackboard.persistence import PersistenceManager
+from tabula.config import AugurConfig
+from tabula.connections import connect_redis
+from tabula.contracts import PerceptionEvent
+from tabula.persistence import PersistenceManager
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +498,7 @@ async def run() -> None:
     tracked_decision_ids: set[str] = set()
 
     def get_session_id() -> str:
-        # Intentionally laxer than blackboard.session.get_active_session:
+        # Intentionally laxer than tabula.session.get_active_session:
         # accepts ended sessions (so late-arriving feedback for a just-ended
         # session is still attributed correctly) and falls back to a fresh
         # uuid rather than dropping feedback on a session-record race.

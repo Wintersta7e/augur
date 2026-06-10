@@ -14,12 +14,12 @@ import re
 import httpx
 import redis
 
-from blackboard.config import AugurConfig
-from blackboard.persistence import PersistenceManager  # noqa: F401
+from tabula.config import AugurConfig
+from tabula.persistence import PersistenceManager  # noqa: F401
 
 log = logging.getLogger("augur.app_descriptor")
 
-# Must stay in sync with the activity-domain subset of blackboard.contracts.Domain.
+# Must stay in sync with the activity-domain subset of tabula.contracts.Domain.
 ACTIVITY_DOMAINS = frozenset({"activity_focus", "activity_intensity"})
 _SENTINEL_RE = re.compile(r"^<[^>]+>$")
 _SAFE_ENTITY_RE = re.compile(r"[\w.\- ]{1,64}", re.ASCII)

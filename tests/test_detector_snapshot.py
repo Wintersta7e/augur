@@ -7,7 +7,7 @@ pins the property the on_event fix relies on; the emitted-payload assertion is
 in tests/integration/test_measurement_integration.py.
 """
 
-from blackboard.contracts import PerceptionEvent
+from tabula.contracts import PerceptionEvent
 from detection.anomaly_detector import EntityBaseline, build_anomaly_payload
 
 

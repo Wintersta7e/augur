@@ -3,7 +3,7 @@ pair (1E)."""
 
 import fakeredis
 
-from blackboard.persistence import PersistenceManager
+from tabula.persistence import PersistenceManager
 
 
 def _pm() -> PersistenceManager:

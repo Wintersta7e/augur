@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import redis
 
-from blackboard.contracts import PerceptionEvent
+from tabula.contracts import PerceptionEvent
 
 log = logging.getLogger("persistence")
 

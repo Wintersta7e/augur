@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from blackboard.session import SessionManager
+from tabula.session import SessionManager
 from tests.integration.conftest import (
     inject_perception_event,
     requires_ollama,

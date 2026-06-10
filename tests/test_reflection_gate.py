@@ -12,8 +12,8 @@ from __future__ import annotations
 import fakeredis
 import pytest
 
-from blackboard.config import AugurConfig
-from blackboard.persistence import PersistenceManager
+from tabula.config import AugurConfig
+from tabula.persistence import PersistenceManager
 from reasoning.reflection_engine import (
     GATE_CHRONIC_MIN_PRESENCE,
     GATE_DISMISSAL_MIN,

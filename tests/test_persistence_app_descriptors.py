@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 
-from blackboard.persistence import PersistenceManager
+from tabula.persistence import PersistenceManager
 
 KEY = "augur:config:app_descriptors"
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 from reasoning.reflection_engine import analyze_precision
 
 _CFG = AugurConfig()

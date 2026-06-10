@@ -10,8 +10,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import redis
 
-from blackboard.contracts import PerceptionEvent
-from blackboard.persistence import PersistenceManager
+from tabula.contracts import PerceptionEvent
+from tabula.persistence import PersistenceManager
 
 # Use a test-specific key prefix to avoid polluting real data.
 # We clean up all keys at the end.

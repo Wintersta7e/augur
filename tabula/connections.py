@@ -18,7 +18,7 @@ import logging
 
 import redis
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 
 log = logging.getLogger("augur.connections")
 

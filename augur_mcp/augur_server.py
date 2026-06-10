@@ -27,9 +27,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from blackboard.config import AugurConfig  # noqa: E402
-from blackboard.contracts import PerceptionEvent  # noqa: E402
-from blackboard.persistence import PersistenceManager  # noqa: E402
+from tabula.config import AugurConfig  # noqa: E402
+from tabula.contracts import PerceptionEvent  # noqa: E402
+from tabula.persistence import PersistenceManager  # noqa: E402
 
 log = logging.getLogger("augur.mcp")
 

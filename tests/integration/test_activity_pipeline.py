@@ -18,9 +18,9 @@ import uuid
 import pytest
 import redis
 
-from blackboard.config import AugurConfig
-from blackboard.connections import connect_redis
-from blackboard.contracts import PerceptionEvent
+from tabula.config import AugurConfig
+from tabula.connections import connect_redis
+from tabula.contracts import PerceptionEvent
 
 
 async def _publish(nc, subject: str, event: PerceptionEvent) -> None:
@@ -488,7 +488,7 @@ def test_get_active_session_helper_returns_none_for_ended_session(clean_redis_sy
     """Direct check of the validity helper using real Redis."""
     from datetime import datetime, timezone
 
-    from blackboard.session import get_active_session
+    from tabula.session import get_active_session
 
     clean_redis_sync.set(
         "augur:session:current",
@@ -506,7 +506,7 @@ def test_get_active_session_helper_returns_none_for_ended_session(clean_redis_sy
 def test_get_active_session_helper_returns_id_for_active_fresh(clean_redis_sync):
     from datetime import datetime, timezone
 
-    from blackboard.session import get_active_session
+    from tabula.session import get_active_session
 
     clean_redis_sync.set(
         "augur:session:current",

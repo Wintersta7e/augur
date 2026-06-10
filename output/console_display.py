@@ -17,7 +17,7 @@ from pathlib import Path
 import nats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from blackboard.config import AugurConfig  # noqa: E402
+from tabula.config import AugurConfig  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging (minimal — this module IS the display)

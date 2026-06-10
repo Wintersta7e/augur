@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 
-from blackboard.session import SessionManager
+from tabula.session import SessionManager
 
 
 class TestSessionLifecycle:

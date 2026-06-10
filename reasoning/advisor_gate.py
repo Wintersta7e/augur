@@ -292,7 +292,7 @@ class Gate:
         # so the Gate holds a config.  Defaults to AugurConfig() for the unit
         # tests / standalone construction; the advisor injects its live config.
         if config is None:
-            from blackboard.config import AugurConfig
+            from tabula.config import AugurConfig
 
             config = AugurConfig()
         self._config = config

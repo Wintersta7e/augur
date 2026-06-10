@@ -14,7 +14,7 @@ def _call_validate(rules, rule_windows=None, version="1.0"):
     if err:
         return err
     if rule_windows is not None:
-        from blackboard.config import AugurConfig
+        from tabula.config import AugurConfig
 
         return _validate_escalation_matrix_rule_windows(
             rule_windows, AugurConfig.from_env()

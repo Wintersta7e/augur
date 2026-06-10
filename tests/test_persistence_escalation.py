@@ -10,7 +10,7 @@ import json
 from unittest.mock import MagicMock
 
 
-from blackboard.persistence import PersistenceManager
+from tabula.persistence import PersistenceManager
 
 MATRIX_KEY = "augur:config:escalation_matrix"
 

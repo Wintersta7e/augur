@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 from reasoning.reflection_engine import run_reflection
 
 

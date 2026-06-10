@@ -5,7 +5,7 @@ from __future__ import annotations
 import fakeredis
 import pytest
 
-from blackboard.persistence import PersistenceManager, MAX_GATE_SILENCES
+from tabula.persistence import PersistenceManager, MAX_GATE_SILENCES
 
 
 def _pm() -> PersistenceManager:
@@ -87,7 +87,7 @@ def test_emission_roundtrip() -> None:
 
 
 def test_emissions_capped() -> None:
-    from blackboard.persistence import MAX_GATE_EMISSIONS
+    from tabula.persistence import MAX_GATE_EMISSIONS
 
     pm = _pm()
     for i in range(MAX_GATE_EMISSIONS + 50):
@@ -156,7 +156,7 @@ def test_observed_filtered_by_state_key() -> None:
 
 
 def test_observed_capped() -> None:
-    from blackboard.persistence import MAX_GATE_OBSERVED
+    from tabula.persistence import MAX_GATE_OBSERVED
 
     pm = _pm()
     for i in range(MAX_GATE_OBSERVED + 50):
@@ -196,7 +196,7 @@ def test_delivery_failure_roundtrip() -> None:
 
 
 def test_delivery_failures_capped() -> None:
-    from blackboard.persistence import MAX_GATE_DELIVERY_FAILURES
+    from tabula.persistence import MAX_GATE_DELIVERY_FAILURES
 
     pm = _pm()
 
@@ -230,7 +230,7 @@ def test_habituation_per_field_no_clobber() -> None:
 
 
 def test_channel_stats_refuse_at_cap(monkeypatch: object) -> None:
-    import blackboard.persistence as P
+    import tabula.persistence as P
 
     monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 2)
     pm = _pm()
@@ -252,7 +252,7 @@ def test_load_habituation_corrupt_field_returns_default() -> None:
 
 
 def test_habituation_refuse_at_cap(monkeypatch: object) -> None:
-    import blackboard.persistence as P
+    import tabula.persistence as P
 
     monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 1)
     pm = _pm()
@@ -268,7 +268,7 @@ def test_habituation_refuse_at_cap(monkeypatch: object) -> None:
 
 
 def test_habituation_floor_refuse_at_cap(monkeypatch: object) -> None:
-    import blackboard.persistence as P
+    import tabula.persistence as P
 
     monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 1)
     pm = _pm()
@@ -277,7 +277,7 @@ def test_habituation_floor_refuse_at_cap(monkeypatch: object) -> None:
 
 
 def test_credibility_refuse_at_cap(monkeypatch: object) -> None:
-    import blackboard.persistence as P
+    import tabula.persistence as P
 
     monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 1)
     pm = _pm()
@@ -286,7 +286,7 @@ def test_credibility_refuse_at_cap(monkeypatch: object) -> None:
 
 
 def test_reservoir_refuse_at_cap(monkeypatch: object) -> None:
-    import blackboard.persistence as P
+    import tabula.persistence as P
 
     monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 1)
     pm = _pm()
@@ -295,7 +295,7 @@ def test_reservoir_refuse_at_cap(monkeypatch: object) -> None:
 
 
 def test_cost_tier_memory_refuse_at_cap(monkeypatch: object) -> None:
-    import blackboard.persistence as P
+    import tabula.persistence as P
 
     monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 1)
     pm = _pm()
@@ -475,7 +475,7 @@ def test_can_track_gate_state_empty_hash() -> None:
 
 
 def test_can_track_gate_state_existing_at_cap(monkeypatch: object) -> None:
-    import blackboard.persistence as P
+    import tabula.persistence as P
 
     monkeypatch.setattr(P, "MAX_GATE_STATE_KEYS", 2)
     pm = _pm()

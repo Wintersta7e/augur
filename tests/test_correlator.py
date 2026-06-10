@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import networkx as nx
 import pytest
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 from reasoning.correlator import (
     DEFAULT_ESCALATION_MATRIX,
     SEVERITY_ORDER,

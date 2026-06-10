@@ -7,7 +7,7 @@ when perception events for their domain arrive.
 
 from __future__ import annotations
 
-from blackboard.contracts import PerceptionEvent
+from tabula.contracts import PerceptionEvent
 
 
 def test_active_tracking_handles_overlapping_entities_across_domains():

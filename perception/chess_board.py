@@ -16,10 +16,10 @@ import pygame
 import redis
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
-from blackboard.config import AugurConfig
-from blackboard.connections import connect_redis
-from blackboard.contracts import PerceptionEvent
-from blackboard.session import SessionManager
+from tabula.config import AugurConfig
+from tabula.connections import connect_redis
+from tabula.contracts import PerceptionEvent
+from tabula.session import SessionManager
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -71,7 +71,7 @@ NATS_SUBJECT = "augur.perception.chess"
 # ---------------------------------------------------------------------------
 #
 # ARCH-11: the local connect_redis wrapper was deleted; callers now use
-# the shared helper from blackboard.connections (imported above).
+# the shared helper from tabula.connections (imported above).
 
 
 def publish_move_redis(r: redis.Redis, payload: dict) -> None:

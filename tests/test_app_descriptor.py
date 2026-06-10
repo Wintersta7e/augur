@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 from reasoning.app_descriptor import (
     ClassifierLane,
     classifier_model_available,

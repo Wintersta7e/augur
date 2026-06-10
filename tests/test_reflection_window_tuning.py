@@ -1,6 +1,6 @@
 """Tests for analyze_correlation_window_tuning."""
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 from reasoning.reflection_engine import analyze_correlation_window_tuning
 
 

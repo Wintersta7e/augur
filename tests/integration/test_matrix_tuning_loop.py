@@ -18,8 +18,8 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from blackboard.config import AugurConfig
-from blackboard.persistence import PersistenceManager
+from tabula.config import AugurConfig
+from tabula.persistence import PersistenceManager
 from reasoning.correlator import DEFAULT_ESCALATION_MATRIX, ensure_matrix_seeded
 from reasoning.reflection_engine import run_reflection
 

@@ -2,7 +2,7 @@
 
 import pytest
 
-from blackboard.config import AugurConfig
+from tabula.config import AugurConfig
 from perception import feedback_collector as fc
 from perception.feedback_collector import (
     PendingAdvice,

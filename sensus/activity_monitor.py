@@ -527,8 +527,17 @@ class ActivityMonitor:
                         self._identity_cache.pop(next(iter(self._identity_cache)))
                     self._identity_cache[exe_path] = _resolve_file_description(exe_path)
                 identity = self._identity_cache[exe_path]
-            except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
-                pass
+            except (
+                psutil.AccessDenied,
+                psutil.NoSuchProcess,
+                psutil.ZombieProcess,
+            ) as exc:
+                # Best-effort: identity stays None when the process is gone or
+                # inaccessible; the caller falls back to the executable name.
+                log.debug(
+                    "activity_monitor: identity lookup skipped (%s)",
+                    type(exc).__name__,
+                )
             self._last_identity_pid = pid
             self._last_identity_exe = exe
             self._last_identity = identity

@@ -1,6 +1,5 @@
 """1B calibration-era withheld-rating selection + prompt helper (spec §5.3)."""
 
-
 import pytest
 
 from blackboard.config import AugurConfig

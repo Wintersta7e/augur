@@ -133,6 +133,43 @@ def test_apply_marker_failure_keeps_applied_status(monkeypatch):
     assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "MEDIUM"
 
 
+def test_apply_prompt_idempotent_after_marker_failure(monkeypatch):
+    # If the idempotency marker write fails after a committed prompt apply, a
+    # re-apply of IDENTICAL text must not call save_prompt again (which would
+    # re-archive the now-current prompt and corrupt the rollback anchor).
+    pm = _pm()
+    txt = "Consider developing minor pieces before the queen, calmly."
+    pm.save_prompt("typing", "An existing prompt long enough to anchor a rollback.")
+    p = _safe(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="typing",
+            action={"domain": "typing", "text": txt},
+            rationale="r",
+        )
+    )
+
+    def _boom(*a, **k):
+        raise RuntimeError("redis down")
+
+    # First apply commits the new text but the marker write fails (swallowed).
+    monkeypatch.setattr(pm, "mark_proposal_applied", _boom)
+    assert (
+        A.apply_proposal(pm, dict(p), cfg=_Cfg(), session_id="s1")["status"]
+        == "applied"
+    )
+    assert pm.load_prompt("typing") == txt
+    assert pm.is_proposal_applied(p["dedupe_key"]) is False  # marker never set
+
+    # Re-apply identical text: idempotent, and save_prompt must NOT run again.
+    monkeypatch.setattr(pm, "mark_proposal_applied", lambda *a, **k: None)
+    saves = []
+    monkeypatch.setattr(pm, "save_prompt", lambda *a, **k: saves.append(a))
+    out = A.apply_proposal(pm, dict(p), cfg=_Cfg(), session_id="s2")
+    assert out["status"] == "applied"
+    assert saves == []  # no re-save -> rollback history preserved
+
+
 @pytest.mark.parametrize("kind", sorted(P._KIND_KLASS) + ["unknown_kind"])
 def test_invariant_apply_disabled_never_applies(kind):
     # Watch-first: with apply disabled, NO kind ever reaches 'applied' and the

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+
 from consilium.prompt_safety import is_prompt_acceptable
 from nexus import matrix_ops
 from imperator import proposals as P
+
+log = logging.getLogger("imperator.apply")
 
 
 def apply_proposal(pm, p: dict, *, cfg, session_id: str | None) -> dict:
@@ -46,10 +50,16 @@ def apply_proposal(pm, p: dict, *, cfg, session_id: str | None) -> dict:
         elif p["kind"] == "prompt_strategy":
             action = p.get("action") or {}
             domain, text = action.get("domain", p["target"]), action.get("text", "")
-            if not is_prompt_acceptable(text, cfg) or pm.load_prompt(domain) is None:
+            current = pm.load_prompt(domain)
+            if not is_prompt_acceptable(text, cfg) or current is None:
                 p["status"] = "logged"
                 return p
-            pm.save_prompt(domain, text)
+            # Idempotent: only re-save (save_prompt archives the prior into rollback
+            # history) when the text actually changes. A re-apply of identical text
+            # after a swallowed marker failure must NOT re-archive and corrupt the
+            # rollback anchor.
+            if current != text:
+                pm.save_prompt(domain, text)
         else:
             p["status"] = "logged"
             return p
@@ -66,5 +76,10 @@ def apply_proposal(pm, p: dict, *, cfg, session_id: str | None) -> dict:
             p["dedupe_key"], ttl_s=int(cfg.imperator_ii_dedupe_staleness_s)
         )
     except Exception:
-        pass
+        log.warning(
+            "imperator apply: idempotency marker write failed for %s; a re-apply "
+            "is a clean no-op (apply is idempotent), but the marker will be retried",
+            p["dedupe_key"],
+            exc_info=True,
+        )
     return p

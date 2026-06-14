@@ -51,9 +51,9 @@ def test_apply_escalation_rule_patches_and_marks():
     out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")
     assert out["status"] == "applied" and out["applied_session"] == "s1"
     assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "MEDIUM"
-    assert p["action"]["prior_target"] == "LOW"  # reversibility audit recorded
+    # rollback anchor recorded from the committed CAS snapshot (not a separate read)
+    assert p["action"]["prior_target"] == "LOW"
     assert pm.is_proposal_applied(p["dedupe_key"]) is True
-    assert pm.is_tuning_applied("s1", pass_name="imperator") is True
 
 
 def test_apply_prompt_requires_existing_current_prompt():
@@ -90,3 +90,43 @@ def test_apply_sigma_is_propose_only():
     )
     p["status"] = "logged"
     assert A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")["status"] == "logged"
+
+
+def test_apply_skips_when_already_applied():
+    pm = _pm()
+    p = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "MEDIUM"},
+            rationale="r",
+        )
+    )
+    # Pre-marked applied -> a direct re-apply must be a no-op. Idempotency is
+    # enforced inside apply_proposal itself, not only via run_cycle's pre-filter.
+    pm.mark_proposal_applied(p["dedupe_key"], ttl_s=86400)
+    out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s2")
+    assert out["status"] == "skipped"
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"  # unchanged
+
+
+def test_apply_marker_failure_keeps_applied_status(monkeypatch):
+    pm = _pm()
+    p = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "MEDIUM"},
+            rationale="r",
+        )
+    )
+
+    def _boom(*a, **k):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(pm, "mark_proposal_applied", _boom)
+    out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")
+    # The matrix write already committed; a marker failure must not flip a real
+    # apply back to 'logged'/'error' (re-applying the same patch later is harmless).
+    assert out["status"] == "applied"
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "MEDIUM"

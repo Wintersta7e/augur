@@ -57,6 +57,35 @@ def test_parser_accepts_gated_kinds():
     assert len(out) == 1 and out[0]["kind"] == "code"
 
 
+def test_parser_extracts_array_with_trailing_prose():
+    # A valid array followed by prose containing a bracket must still parse;
+    # a greedy regex would over-capture to the trailing ']' and fail.
+    txt = (
+        '[{"kind":"escalation_rule","target":"LOW+LOW","action":{"target":"MEDIUM"},"rank":1}]'
+        "\n\nNote: see item [1] above for the rationale."
+    )
+    out = reasoner.parse_proposals(txt, now=0.0, max_n=5)
+    assert [p["target"] for p in out] == ["LOW+LOW"]
+
+
+def test_parser_caps_valid_survivors_not_raw_candidates():
+    # Two malformed items precede two valid ones; max_n=2 must yield the two
+    # VALID proposals, not stop after consuming two raw (invalid) candidates.
+    items = (
+        '[{"bad":1},{"also":"bad"},'
+        '{"kind":"escalation_rule","target":"A+B","action":{"target":"LOW"},"rank":1},'
+        '{"kind":"escalation_rule","target":"C+D","action":{"target":"HIGH"},"rank":2}]'
+    )
+    out = reasoner.parse_proposals(items, now=0.0, max_n=2)
+    assert [p["target"] for p in out] == ["A+B", "C+D"]
+
+
+def test_parser_drops_prompt_strategy_with_non_string_text():
+    # Non-string action.text would crash prompt-safety string ops downstream.
+    bad = '[{"kind":"prompt_strategy","target":"typing","action":{"text":{"oops":1}},"rank":1}]'
+    assert reasoner.parse_proposals(bad, now=0.0, max_n=5) == []
+
+
 def test_generate_garbage_empty():
     async def stub(prompt, client, config):
         return "no json", 1.0

@@ -15,7 +15,14 @@ def violates_forbidden_patterns(prompt_text: str, config: AugurConfig) -> bool:
 
 
 def is_prompt_acceptable(prompt_text: str, config: AugurConfig) -> bool:
-    """Non-empty, >= min_prompt_len, and free of forbidden patterns."""
-    if not prompt_text or len(prompt_text.strip()) < config.min_prompt_len:
+    """A non-empty STRING, >= min_prompt_len, free of forbidden patterns.
+
+    Guards against a non-string (e.g. a malformed LLM action.text) so callers
+    can't crash on .strip()/.lower() — a non-string is simply unacceptable.
+    """
+    if (
+        not isinstance(prompt_text, str)
+        or len(prompt_text.strip()) < config.min_prompt_len
+    ):
         return False
     return not violates_forbidden_patterns(prompt_text, config)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from typing import Any, Callable
 
@@ -79,16 +78,47 @@ async def query_imperator_ollama(
     return text, (time.monotonic() - t0) * 1000.0
 
 
-def parse_proposals(text: str, now: float, max_n: int) -> list[dict]:
-    m = re.search(r"\[.*\]", text, re.DOTALL)
-    if not m:
-        return []
+def _extract_json_array(text: str) -> list | None:
+    """First top-level JSON array in text, ignoring trailing prose.
+
+    Tries to parse the whole (clean) output first, else raw_decode from the
+    first '[' so a valid array followed by prose containing brackets still
+    parses (a greedy regex would over-capture to a later ']' and fail).
+    """
     try:
-        items = json.loads(m.group(0))
+        val = json.loads(text.strip())
+        return val if isinstance(val, list) else None
     except json.JSONDecodeError:
+        pass
+    start = text.find("[")
+    if start == -1:
+        return None
+    try:
+        val, _ = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError:
+        return None
+    return val if isinstance(val, list) else None
+
+
+def _valid_action(kind: str, action: dict) -> bool:
+    """Kind-specific action shape check (LLM actions are otherwise free-form)."""
+    if kind == "prompt_strategy":
+        return isinstance(action.get("text"), str) and bool(action.get("text"))
+    if kind == "escalation_rule":
+        return isinstance(action.get("target"), str) or "window" in action
+    return (
+        True  # code/structural/sigma/... carry free-form actions (never auto-applied)
+    )
+
+
+def parse_proposals(text: str, now: float, max_n: int) -> list[dict]:
+    items = _extract_json_array(text)
+    if items is None:
         return []
     out: list[dict] = []
-    for it in items[:max_n] if isinstance(items, list) else []:
+    for it in items:
+        if len(out) >= max_n:  # cap on VALID survivors, not raw candidates
+            break
         if not isinstance(it, dict):
             continue
         kind, target, action = it.get("kind"), it.get("target"), it.get("action")
@@ -97,6 +127,7 @@ def parse_proposals(text: str, now: float, max_n: int) -> list[dict]:
             or not isinstance(target, str)
             or not target
             or not isinstance(action, dict)
+            or not _valid_action(kind, action)
         ):
             continue
         try:

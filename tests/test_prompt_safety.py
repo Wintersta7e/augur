@@ -17,3 +17,10 @@ def test_acceptable():
     assert is_prompt_acceptable("short", CFG) is False
     assert is_prompt_acceptable("", CFG) is False
     assert is_prompt_acceptable("As an AI " + "x" * 50, CFG) is False
+
+
+def test_non_string_is_unacceptable():
+    # A non-string (e.g. a malformed LLM action.text) must be rejected, not crash.
+    assert is_prompt_acceptable(None, CFG) is False
+    assert is_prompt_acceptable({"oops": 1}, CFG) is False
+    assert is_prompt_acceptable(123, CFG) is False

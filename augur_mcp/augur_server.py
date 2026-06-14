@@ -49,6 +49,7 @@ COMPONENT_COMMANDS: dict[str, list[str]] = {
     "disciplina": [sys.executable, "-m", "disciplina.reflection_engine"],
     "vox": [sys.executable, "-m", "vox.console_display"],
     "praefectus": [sys.executable, "-m", "praefectus.monitor"],
+    "imperator": [sys.executable, "-m", "imperator.awareness"],
 }
 
 # SEC-02: allowlist for domain / entity / stream_id values received through
@@ -552,6 +553,37 @@ def get_pipeline_health() -> dict[str, Any]:
                 "faculties": {},
             }
         return data
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def get_auspices() -> dict[str, Any]:
+    """Imperator's outward read of the user's current situation.
+
+    Returns the auspices snapshot dict (each field {value, fresh, as_of}), or
+    {"status": "warming_up"} if Imperator has not produced one yet.
+    """
+    try:
+        with _persistence_ctx() as pm:
+            data = pm.load_auspices()
+            return data if data is not None else {"status": "warming_up"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def get_self_model() -> dict[str, Any]:
+    """Imperator's inward read of Augur's own state.
+
+    Returns the self-model snapshot dict (precision/utility/mrt/suppression_rate/
+    dismissal_rate/advice_volume/pipeline_health/coverage/blind_spots/competence),
+    or {"status": "warming_up"} if none yet.
+    """
+    try:
+        with _persistence_ctx() as pm:
+            data = pm.load_self_model()
+            return data if data is not None else {"status": "warming_up"}
     except Exception as exc:
         return {"error": str(exc)}
 

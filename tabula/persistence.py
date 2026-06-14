@@ -68,6 +68,38 @@ class PersistenceManager:
             return None
         return json.loads(raw)
 
+    def scan_baseline_maturity(self, *, trained_obs: int = 15) -> dict:
+        """Tally Vigil baselines by training maturity via SCAN (never KEYS).
+
+        Returns {total, trained, untrained, by_domain:{domain:{total,trained}}}.
+        Trained = observation_count >= trained_obs. Key: augur:vigil:profile:{domain}:{entity}.
+        """
+        total = trained = 0
+        by_domain: dict[str, dict[str, int]] = {}
+        for key in self._r.scan_iter(match="augur:vigil:profile:*", count=500):
+            raw = self._r.get(key)
+            if raw is None:
+                continue
+            try:
+                obs = int(json.loads(raw).get("observation_count", 0))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+            key_s = key.decode() if isinstance(key, bytes) else key
+            parts = key_s.split(":")  # augur:vigil:profile:{domain}:{entity}
+            domain = parts[3] if len(parts) >= 5 else "unknown"
+            d = by_domain.setdefault(domain, {"total": 0, "trained": 0})
+            total += 1
+            d["total"] += 1
+            if obs >= trained_obs:
+                trained += 1
+                d["trained"] += 1
+        return {
+            "total": total,
+            "trained": trained,
+            "untrained": total - trained,
+            "by_domain": by_domain,
+        }
+
     # -- Event history -------------------------------------------------------
 
     def append_event(self, event: PerceptionEvent) -> None:
@@ -443,6 +475,24 @@ class PersistenceManager:
             return None
         return json.loads(raw)
 
+    def save_auspices(self, snapshot: dict) -> None:
+        """Overwrite the live auspices snapshot (no TTL)."""
+        self._r.set("augur:imperator:auspices", json.dumps(snapshot))
+
+    def load_auspices(self) -> dict | None:
+        """Return the auspices snapshot, or None if absent."""
+        raw = self._r.get("augur:imperator:auspices")
+        return None if raw is None else json.loads(raw)
+
+    def save_self_model(self, snapshot: dict) -> None:
+        """Overwrite the live self-model snapshot (no TTL)."""
+        self._r.set("augur:imperator:self_model", json.dumps(snapshot))
+
+    def load_self_model(self) -> dict | None:
+        """Return the self-model snapshot, or None if absent."""
+        raw = self._r.get("augur:imperator:self_model")
+        return None if raw is None else json.loads(raw)
+
     # -- Current session --------------------------------------------------
 
     def load_current_session(self) -> dict | None:
@@ -699,6 +749,18 @@ class PersistenceManager:
     def load_channel_stats(self, state_key: str) -> dict:
         """Return channel stats for state_key, or {} if missing/corrupt."""
         return self._hash_load("augur:limen:channel_stats", state_key)
+
+    def load_all_channel_stats(self) -> dict:
+        """HGETALL augur:limen:channel_stats → {state_key: stats_dict}. {} if absent."""
+        raw = self._r.hgetall("augur:limen:channel_stats")
+        out: dict[str, dict] = {}
+        for fld, val in raw.items():
+            try:
+                fld_s = fld.decode() if isinstance(fld, bytes) else fld
+                out[fld_s] = json.loads(val)
+            except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                continue
+        return out
 
     # -- advice_rate (string key: rate_ewma, last_ts) -------------------------
 

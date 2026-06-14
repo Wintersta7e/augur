@@ -1,0 +1,79 @@
+from imperator import proposals as P
+
+
+class _Cfg:
+    min_prompt_len = 20
+    prompt_forbidden_patterns = ("as an ai", "take a break")
+
+
+def test_dedupe_key_stable_across_action_changes():
+    a = P.make_proposal(
+        kind="escalation_rule",
+        target="LOW+LOW",
+        action={"target": "MEDIUM"},
+        rationale="r",
+    )
+    b = P.make_proposal(
+        kind="escalation_rule",
+        target="LOW+LOW",
+        action={"target": "LOW"},
+        rationale="r",
+    )
+    assert a["dedupe_key"] == b["dedupe_key"] and a["proposal_id"] != b["proposal_id"]
+
+
+def test_normalize_klass_overrides_llm_claim():
+    p = P.make_proposal(
+        kind="code", target="x.py", action={}, rationale="r", klass="safe"
+    )
+    P.normalize_klass(p)
+    assert p["klass"] == "gated"
+    p2 = P.make_proposal(
+        kind="sigma", target="typing", action={}, rationale="r", klass="safe"
+    )
+    P.normalize_klass(p2)
+    assert p2["klass"] == "safe"
+
+
+def test_gate_forces_gated_to_logged():
+    p = P.normalize_klass(
+        P.make_proposal(kind="code", target="x.py", action={}, rationale="r")
+    )
+    out = P.gate(p, cfg=_Cfg(), recent_self_tuning={}, applied_keys=set())
+    assert out["klass"] == "gated" and out["status"] == "logged"
+
+
+def test_gate_skips_already_applied_only():
+    p = P.normalize_klass(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "MEDIUM"},
+            rationale="r",
+        )
+    )
+    assert (
+        P.gate(
+            dict(p), cfg=_Cfg(), recent_self_tuning={}, applied_keys={p["dedupe_key"]}
+        )["status"]
+        == "skipped"
+    )
+    assert (
+        P.gate(dict(p), cfg=_Cfg(), recent_self_tuning={}, applied_keys=set())["status"]
+        != "skipped"
+    )
+
+
+def test_gate_rejects_unsafe_prompt():
+    p = P.normalize_klass(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="typing",
+            action={"text": "short"},
+            rationale="r",
+        )
+    )
+    assert (
+        P.gate(p, cfg=_Cfg(), recent_self_tuning={}, applied_keys=set())["status"]
+        == "logged"
+    )

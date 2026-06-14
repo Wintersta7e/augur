@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import pytest
 
-from vigil.anomaly_detector import EntityBaseline
+from tabula.config import AugurConfig
+from vigil.anomaly_detector import (
+    EntityBaseline,
+    evict_idle_baselines,
+)
 
 
 class TestEWMAUpdate:
@@ -143,3 +147,88 @@ class TestSerialization:
             bl.update(v, alpha=0.3)
         state = bl.to_state_dict()
         assert "hst" not in state
+
+
+class TestIdleEviction:
+    """R4: bounded per-entity memory — idle in-memory models get reclaimed.
+
+    Vigil allocates a River model per distinct (domain, entity) on first
+    sighting. Without reclamation a churning entity namespace pins ~1.7 MB
+    per model up to MAX_BASELINE_ENTITIES (~17 GB at the cap). Idle-TTL
+    eviction drops models not seen within ``baseline_entity_idle_evict_s``
+    while leaving active ones — and the low-cardinality steady state —
+    untouched.
+    """
+
+    def _mk(self, n: int) -> dict[tuple[str, str], EntityBaseline]:
+        return {("d", f"e{i}"): EntityBaseline() for i in range(n)}
+
+    def test_idle_evicted_active_persists(self) -> None:
+        baselines = self._mk(2)
+        idle_key, active_key = ("d", "e0"), ("d", "e1")
+        # active_key stamped recently; idle_key stamped long ago (idle=3700 > ttl).
+        last_seen = {idle_key: 0.0, active_key: 3650.0}
+        evicted = evict_idle_baselines(
+            baselines, last_seen, now=3700.0, idle_ttl_s=3600.0
+        )
+        assert evicted == [idle_key]
+        assert idle_key not in baselines
+        assert idle_key not in last_seen  # bookkeeping map pruned in lockstep
+        assert active_key in baselines  # active model preserved
+        assert last_seen[active_key] == 3650.0
+
+    def test_exactly_at_ttl_boundary_not_evicted(self) -> None:
+        """Idle == TTL is retained; eviction is strictly-greater-than."""
+        baselines = self._mk(1)
+        key = ("d", "e0")
+        last_seen = {key: 0.0}
+        evicted = evict_idle_baselines(
+            baselines, last_seen, now=3600.0, idle_ttl_s=3600.0
+        )
+        assert evicted == []
+        assert key in baselines
+
+    def test_low_cardinality_steady_state_untouched(self) -> None:
+        """A handful of entities all seen recently → nobody is evicted
+        (the normal case must behave identically to before)."""
+        baselines = self._mk(3)
+        last_seen = {k: 3699.0 for k in baselines}
+        before = dict(baselines)
+        evicted = evict_idle_baselines(
+            baselines, last_seen, now=3700.0, idle_ttl_s=3600.0
+        )
+        assert evicted == []
+        assert baselines == before
+
+    def test_missing_last_seen_is_evicted(self) -> None:
+        """A baseline with no last_seen stamp (e.g. Redis-restored before its
+        first event) is treated as maximally idle and reclaimed, never leaked."""
+        baselines = self._mk(1)
+        key = ("d", "e0")
+        evicted = evict_idle_baselines(baselines, {}, now=10_000.0, idle_ttl_s=3600.0)
+        assert evicted == [key]
+        assert key not in baselines
+
+    def test_disabled_when_ttl_non_positive(self) -> None:
+        """idle_ttl_s <= 0 disables eviction entirely (opt-out)."""
+        baselines = self._mk(2)
+        last_seen = {k: 0.0 for k in baselines}
+        evicted = evict_idle_baselines(baselines, last_seen, now=1e9, idle_ttl_s=0.0)
+        assert evicted == []
+        assert len(baselines) == 2
+
+
+class TestIdleEvictConfig:
+    """The idle-evict TTL knob exists, has a generous default, and validates."""
+
+    def test_default_is_generous(self) -> None:
+        cfg = AugurConfig()
+        assert cfg.baseline_entity_idle_evict_s == 3600.0
+
+    def test_zero_is_allowed_as_disable_sentinel(self) -> None:
+        # 0.0 must construct (it is the documented "never evict" opt-out).
+        AugurConfig(baseline_entity_idle_evict_s=0.0)
+
+    def test_negative_rejected(self) -> None:
+        with pytest.raises(ValueError, match="baseline_entity_idle_evict_s"):
+            AugurConfig(baseline_entity_idle_evict_s=-1.0)

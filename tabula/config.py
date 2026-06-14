@@ -57,6 +57,11 @@ class AugurConfig:
     hst_threshold: float = 0.7
     severity_medium_sigma: float = 2.5
     severity_high_sigma: float = 4.0
+    # Idle reclamation for per-entity in-memory baselines (each owns a River
+    # HST model). Evict a (domain, entity) model not seen for this many seconds
+    # so a high-churn entity namespace can't pin memory up to
+    # MAX_BASELINE_ENTITIES. 0 disables eviction (never reclaim).
+    baseline_entity_idle_evict_s: float = 3600.0
 
     # ── Advisor ────────────────────────────────────────────────────────────
     advisor_lock_timeout: int = 180
@@ -260,6 +265,11 @@ class AugurConfig:
         if self.gate_tier1_mode not in {"note", "silent"}:
             raise ValueError(
                 f"gate_tier1_mode={self.gate_tier1_mode!r} must be 'note' or 'silent'"
+            )
+        if self.baseline_entity_idle_evict_s < 0.0:
+            raise ValueError(
+                f"baseline_entity_idle_evict_s={self.baseline_entity_idle_evict_s} "
+                "must be >= 0 (0 disables idle eviction)"
             )
         # ── Lane 1 bounds (spec 2026-06-09) ─────────────────────────────────
         if not (2 <= self.post_decision_window <= 50):

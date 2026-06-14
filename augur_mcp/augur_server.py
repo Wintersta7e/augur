@@ -27,6 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from nexus import matrix_ops  # noqa: E402
 from tabula.config import AugurConfig  # noqa: E402
 from tabula.contracts import PerceptionEvent  # noqa: E402
 from tabula.persistence import PersistenceManager  # noqa: E402
@@ -808,87 +809,16 @@ def get_gate_silences(limit: int = 100) -> dict[str, Any]:
         return {"error": str(exc)}
 
 
-_VALID_SEVERITIES = {"LOW", "MEDIUM", "HIGH"}
-
-# SEC-04: caps on matrix size. Without these, a caller could pass
-# thousands of rules or very long keys, amplifying memory and Redis-read
-# latency (the correlator re-reads the matrix on every anomaly event).
-# Bumped from 20 → 40 to accommodate 6 pairwise + 10 3-way defaults
-# plus room for future expansion.
-MAX_ESCALATION_RULES = 40
-MAX_ESCALATION_RULE_KEY_LEN = 32
-MAX_ESCALATION_VERSION_LEN = 32
-MAX_RULE_WINDOWS = 40
-
-
-def _validate_escalation_rules(rules: dict[str, str]) -> str | None:
-    """Return an error message if rules fail shape validation, else None."""
-    if not isinstance(rules, dict):
-        return "rules must be a dict"
-    if len(rules) > MAX_ESCALATION_RULES:
-        return f"too many rules: {len(rules)} (max {MAX_ESCALATION_RULES})"
-    for key, value in rules.items():
-        if not isinstance(key, str) or "+" not in key:
-            return f"invalid rule key (expected 'A+B'): {key!r}"
-        if len(key) > MAX_ESCALATION_RULE_KEY_LEN:
-            return (
-                f"rule key too long: {len(key)} chars "
-                f"(max {MAX_ESCALATION_RULE_KEY_LEN})"
-            )
-        parts = key.split("+")
-        if not all(p in _VALID_SEVERITIES for p in parts):
-            return (
-                f"invalid severity in rule key {key!r}: "
-                f"each part must be one of {sorted(_VALID_SEVERITIES)}"
-            )
-        if not isinstance(value, str) or value not in _VALID_SEVERITIES:
-            return (
-                f"invalid rule value for {key!r}: "
-                f"must be one of {sorted(_VALID_SEVERITIES)}, got {value!r}"
-            )
-    return None
-
-
-def _validate_escalation_matrix_rule_windows(
-    rule_windows: dict | None,
-    config: AugurConfig,
-) -> str | None:
-    """Validate optional rule_windows dict in the matrix.
-
-    Pairwise-only this phase (one '+'). Values must be numeric within
-    [correlation_window_min_s, correlation_window_max_s]. Returns None
-    if valid; an error string otherwise.
-    """
-    if rule_windows is None:
-        return None
-    if not isinstance(rule_windows, dict):
-        return "rule_windows must be a dict"
-    if len(rule_windows) > MAX_RULE_WINDOWS:
-        return f"too many rule_windows: {len(rule_windows)} (max {MAX_RULE_WINDOWS})"
-    for key, value in rule_windows.items():
-        if not isinstance(key, str):
-            return f"invalid rule_windows key type: {type(key).__name__}"
-        if len(key) > MAX_ESCALATION_RULE_KEY_LEN:
-            return (
-                f"rule_windows key '{key}' exceeds {MAX_ESCALATION_RULE_KEY_LEN} chars"
-            )
-        if key.count("+") != 1:
-            return (
-                f"rule_windows key '{key}' must be pairwise (one '+'); "
-                f"N-way windows are not yet supported."
-            )
-        if not isinstance(value, (int, float)):
-            return f"rule_windows value for '{key}' must be numeric"
-        if not (
-            config.correlation_window_min_s
-            <= float(value)
-            <= config.correlation_window_max_s
-        ):
-            return (
-                f"rule_windows[{key}]={value} outside "
-                f"[{config.correlation_window_min_s}, {config.correlation_window_max_s}]"
-            )
-    return None
+# Re-exported from nexus.matrix_ops so existing imports in tests keep working.
+_VALID_SEVERITIES = matrix_ops._VALID_SEVERITIES
+MAX_ESCALATION_RULES = matrix_ops.MAX_ESCALATION_RULES
+MAX_ESCALATION_RULE_KEY_LEN = matrix_ops.MAX_ESCALATION_RULE_KEY_LEN
+MAX_ESCALATION_VERSION_LEN = matrix_ops.MAX_ESCALATION_VERSION_LEN
+MAX_RULE_WINDOWS = matrix_ops.MAX_RULE_WINDOWS
+_validate_escalation_rules = matrix_ops._validate_escalation_rules
+_validate_escalation_matrix_rule_windows = (
+    matrix_ops._validate_escalation_matrix_rule_windows
+)
 
 
 @mcp.tool()
@@ -903,44 +833,14 @@ def set_escalation_matrix(
     matrix are preserved (so callers updating only ``rules`` don't erase
     tuned windows).
     """
-    # R2-SEC-01: the version string is written to Redis as part of the
-    # matrix JSON and the correlator re-reads the matrix on every anomaly
-    # event. An unbounded version string would amplify the per-event
-    # Redis read+deserialize cost. Cap it.
-    if not isinstance(version, str):
-        return {"error": f"version must be a string, got {type(version).__name__}"}
-    if len(version) > MAX_ESCALATION_VERSION_LEN:
-        return {
-            "error": (
-                f"version string too long: {len(version)} chars "
-                f"(max {MAX_ESCALATION_VERSION_LEN})"
-            )
-        }
-
-    err = _validate_escalation_rules(rules)
-    if err is not None:
-        return {"error": err}
-
-    config = AugurConfig.from_env()
-    err = _validate_escalation_matrix_rule_windows(rule_windows, config)
-    if err is not None:
-        return {"error": err}
-
-    matrix: dict = {"version": version, "rules": rules}
-    try:
-        with _persistence_ctx() as pm:
-            if rule_windows is None:
-                # Preserve existing rule_windows; don't erase tuned windows
-                # when the caller only wants to update rules.
-                existing = pm.load_escalation_matrix() or {}
-                if "rule_windows" in existing:
-                    matrix["rule_windows"] = existing["rule_windows"]
-            else:
-                matrix["rule_windows"] = rule_windows
-            pm.save_escalation_matrix(matrix)
-        return {"status": "saved", "matrix": matrix}
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        return matrix_ops.apply_matrix_update(
+            pm,
+            rules=rules,
+            rule_windows=rule_windows,
+            version=version,
+            mode="replace",
+        )
 
 
 # ===========================================================================

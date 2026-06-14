@@ -1,6 +1,14 @@
 """Tests for set_escalation_matrix validation of rule_windows."""
 
+import fakeredis
 from unittest.mock import patch
+
+from tabula.persistence import PersistenceManager
+
+
+def _make_pm():
+    """Return a PersistenceManager backed by an in-memory FakeStrictRedis."""
+    return PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
 
 
 def _call_validate(rules, rule_windows=None, version="1.0"):
@@ -100,20 +108,19 @@ def test_rule_windows_empty_dict_accepted():
 def test_set_escalation_matrix_preserves_existing_rule_windows():
     """Caller omitting rule_windows in set_escalation_matrix must not erase
     a previously-tuned rule_windows entry on the live matrix."""
-    from unittest.mock import MagicMock
-
     from augur_mcp.augur_server import set_escalation_matrix
 
-    fake_pm = MagicMock()
-    fake_pm.load_escalation_matrix.return_value = {
-        "version": "1.0",
-        "rules": {"LOW+LOW": "MEDIUM"},
-        "rule_windows": {"LOW+LOW": 25.0},
-    }
+    pm = _make_pm()
+    # Seed an existing matrix that includes rule_windows.
+    pm.save_escalation_matrix(
+        {
+            "version": "1.0",
+            "rules": {"LOW+LOW": "MEDIUM"},
+            "rule_windows": {"LOW+LOW": 25.0},
+        }
+    )
 
-    with patch("augur_mcp.augur_server._persistence_ctx") as ctx:
-        ctx.return_value.__enter__.return_value = fake_pm
-        ctx.return_value.__exit__.return_value = None
+    with patch("augur_mcp.augur_server._new_redis", return_value=pm._r):
         result = set_escalation_matrix(
             rules={"LOW+LOW": "HIGH"},  # rule changed
             version="1.0",
@@ -121,28 +128,28 @@ def test_set_escalation_matrix_preserves_existing_rule_windows():
         )
 
     assert result.get("status") == "saved"
-    saved = fake_pm.save_escalation_matrix.call_args.args[0]
-    assert saved["rules"] == {"LOW+LOW": "HIGH"}
+    assert result["matrix"]["rules"] == {"LOW+LOW": "HIGH"}
     # rule_windows preserved from existing matrix
-    assert saved["rule_windows"] == {"LOW+LOW": 25.0}
+    assert result["matrix"]["rule_windows"] == {"LOW+LOW": 25.0}
+    # Confirm what's actually stored in Redis matches.
+    stored = pm.load_escalation_matrix()
+    assert stored["rule_windows"] == {"LOW+LOW": 25.0}
 
 
 def test_set_escalation_matrix_explicit_empty_rule_windows_clears():
-    """Caller explicitly passing rule_windows={} should clear them."""
-    from unittest.mock import MagicMock
-
+    """Caller explicitly passing rule_windows={} should write an empty dict."""
     from augur_mcp.augur_server import set_escalation_matrix
 
-    fake_pm = MagicMock()
-    fake_pm.load_escalation_matrix.return_value = {
-        "version": "1.0",
-        "rules": {"LOW+LOW": "MEDIUM"},
-        "rule_windows": {"LOW+LOW": 25.0},
-    }
+    pm = _make_pm()
+    pm.save_escalation_matrix(
+        {
+            "version": "1.0",
+            "rules": {"LOW+LOW": "MEDIUM"},
+            "rule_windows": {"LOW+LOW": 25.0},
+        }
+    )
 
-    with patch("augur_mcp.augur_server._persistence_ctx") as ctx:
-        ctx.return_value.__enter__.return_value = fake_pm
-        ctx.return_value.__exit__.return_value = None
+    with patch("augur_mcp.augur_server._new_redis", return_value=pm._r):
         result = set_escalation_matrix(
             rules={"LOW+LOW": "MEDIUM"},
             version="1.0",
@@ -150,5 +157,6 @@ def test_set_escalation_matrix_explicit_empty_rule_windows_clears():
         )
 
     assert result.get("status") == "saved"
-    saved = fake_pm.save_escalation_matrix.call_args.args[0]
-    assert saved["rule_windows"] == {}
+    assert result["matrix"].get("rule_windows") == {}
+    stored = pm.load_escalation_matrix()
+    assert stored.get("rule_windows") == {}

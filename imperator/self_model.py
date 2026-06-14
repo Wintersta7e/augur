@@ -52,6 +52,13 @@ def compute_self_model(inputs: dict, now: float, prev: dict, cfg) -> dict:
     coverage = inputs.get("coverage") or {}
     coverage_no_data = bool(inputs.get("coverage_no_data"))
     blind = inputs.get("blind_spots") or []
+    # The competence headline is only a current reading when at least one of the
+    # genuine report/feedback signals it summarizes is present. coverage,
+    # blind_spots and health_score always carry defaults, so they don't signal
+    # that a real reflection/feedback report was folded in; without one,
+    # competence is a warmup figure and must not be advertised fresh (the
+    # reasoner only reads fresh cells).
+    competence_fresh = report_fresh or present("utility") or present("dismissal_rate")
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -92,7 +99,7 @@ def compute_self_model(inputs: dict, now: float, prev: dict, cfg) -> dict:
                 len(blind),
                 coverage_no_data,
             ),
-            True,
+            competence_fresh,
             now,
         ),
     }

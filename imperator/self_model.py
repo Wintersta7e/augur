@@ -57,6 +57,10 @@ def compute_self_model(inputs: dict, now: float, prev: dict, cfg) -> dict:
         "schema_version": SCHEMA_VERSION,
         "generated_at": now,
         "session_id": inputs.get("session_id"),
+        # Epoch of the reflection folded into this snapshot (0.0 if none). The
+        # Imperator-II freshness gate compares this against the triggering
+        # reflection's epoch — a content check, not wall-clock generated_at.
+        "reflection_ts": inputs.get("reflection_ts") or 0.0,
         "precision": field(inputs.get("precision"), report_fresh, now),
         "utility": field(inputs.get("utility"), present("utility"), now),
         "mrt": field(inputs.get("mrt"), present("mrt"), now),

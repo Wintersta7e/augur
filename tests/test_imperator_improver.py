@@ -114,6 +114,28 @@ def test_run_and_route_silent_on_success():
     assert published == []
 
 
+def test_await_fresh_gates_on_reflection_ts_not_generated_at():
+    pm = PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
+    # Generated AFTER the trigger (high generated_at) but folding an OLDER
+    # reflection (reflection_ts < epoch) must NOT count as fresh — the old
+    # wall-clock gate would have wrongly passed here.
+    pm.save_self_model(
+        {"schema_version": 1, "generated_at": 10_000.0, "reflection_ts": 100.0}
+    )
+    assert (
+        asyncio.run(improver._await_fresh(pm, 500.0, timeout_s=0.05, tick_s=0.02))
+        is False
+    )
+    # A folded reflection at least as new as the trigger IS fresh.
+    pm.save_self_model(
+        {"schema_version": 1, "generated_at": 10_001.0, "reflection_ts": 500.0}
+    )
+    assert (
+        asyncio.run(improver._await_fresh(pm, 500.0, timeout_s=0.05, tick_s=0.02))
+        is True
+    )
+
+
 class _Cfg:
     imperator_ii_apply_enabled = False
     imperator_ii_max_proposals_per_cycle = 5

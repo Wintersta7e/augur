@@ -72,10 +72,14 @@ async def run_cycle(pm, cfg, *, now, session_id, generate_fn, client, publish):
 
 
 async def _await_fresh(pm, epoch, timeout_s, tick_s=0.5):
+    """Wait until the self-model has FOLDED a reflection at least as new as the
+    triggering one. Gates on the folded reflection's timestamp (a content check),
+    not wall-clock generated_at — which could advance on an Imperator-I tick that
+    did NOT fold the triggering reflection (feedback lag / session aged out)."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         sm = pm.load_self_model()
-        if sm and sm.get("generated_at", 0.0) >= epoch:
+        if sm and sm.get("reflection_ts", 0.0) >= epoch:
             return True
         await asyncio.sleep(tick_s)
     return False

@@ -63,3 +63,14 @@ def test_compute_self_model_carries_directional_and_blind_spots():
 def test_compute_self_model_warming_up_when_no_report():
     snap = compute_self_model({"session_id": None}, now=1.0, prev={}, cfg=None)
     assert snap["precision"] == {"value": None, "fresh": False, "as_of": 1.0}
+
+
+def test_compute_self_model_surfaces_reflection_ts():
+    # The folded reflection's epoch is exposed for II's freshness content-check.
+    snap = compute_self_model(
+        _inputs(reflection_ts=1234.5), now=10.0, prev={}, cfg=None
+    )
+    assert snap["reflection_ts"] == 1234.5
+    # Absent -> 0.0, so a warming-up self-model is never spuriously "fresh".
+    snap2 = compute_self_model({"session_id": None}, now=1.0, prev={}, cfg=None)
+    assert snap2["reflection_ts"] == 0.0

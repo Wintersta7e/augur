@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from imperator._readmodel import clamp, field
+
 SCHEMA_VERSION = 1
 _W_PRECISION, _W_UTILITY, _W_DISMISS, _W_COVERAGE, _W_HEALTH = (
     0.30,
@@ -11,14 +13,6 @@ _W_PRECISION, _W_UTILITY, _W_DISMISS, _W_COVERAGE, _W_HEALTH = (
     0.10,
 )
 _BLIND_PENALTY = 0.05
-
-
-def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
-    return max(lo, min(hi, x))
-
-
-def field(value, fresh: bool, now: float) -> dict:
-    return {"value": value, "fresh": fresh, "as_of": now}
 
 
 def competence(
@@ -34,7 +28,7 @@ def competence(
     """Inward headline. Higher = better; the inverse = room to grow."""
     utility_adj = 0.5 if utility_no_data else (utility or 0.0)
     coverage_adj = 0.5 if coverage_no_data else (coverage_depth or 0.0)
-    return _clamp(
+    return clamp(
         _W_PRECISION * (precision or 0.0)
         + _W_UTILITY * utility_adj
         + _W_DISMISS * (1.0 - (dismissal_rate or 0.0))
@@ -44,7 +38,7 @@ def competence(
     )
 
 
-def compute_self_model(inputs: dict, now: float, prev: dict, cfg) -> dict:
+def compute_self_model(inputs: dict, now: float) -> dict:
     def present(key):
         return key in inputs and inputs[key] is not None
 

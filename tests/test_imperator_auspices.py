@@ -37,7 +37,7 @@ def test_salience_quiescent_floor():
 
 
 def test_compute_auspices_shape_and_freshness():
-    snap = compute_auspices(_inputs(), now=100.0, prev={}, cfg=None)
+    snap = compute_auspices(_inputs(), now=100.0)
     assert snap["schema_version"] == 1
     assert snap["generated_at"] == 100.0
     assert snap["session_id"] == "s1"
@@ -50,7 +50,7 @@ def test_compute_auspices_shape_and_freshness():
 
 
 def test_compute_auspices_missing_inputs_not_fresh():
-    snap = compute_auspices({"session_id": None}, now=5.0, prev={}, cfg=None)
+    snap = compute_auspices({"session_id": None}, now=5.0)
     assert snap["activity"] == {"value": None, "fresh": False, "as_of": 5.0}
     assert snap["salience"]["value"] == 0.0
 
@@ -59,7 +59,7 @@ def test_salience_not_fresh_during_warmup():
     # No stream signals yet: salience computes to the quiescent floor, but must
     # NOT advertise itself fresh — else the reasoner reads a warmup 0.0 as a
     # current "all calm" attention reading (it only trusts fresh cells).
-    snap = compute_auspices({"session_id": None}, now=5.0, prev={}, cfg=None)
+    snap = compute_auspices({"session_id": None}, now=5.0)
     assert snap["salience"]["fresh"] is False
 
 
@@ -70,14 +70,12 @@ def test_salience_fresh_when_any_attention_signal_present():
         ("escalation_tier", "MEDIUM"),
         ("intensity_ewma", 90.0),
     ):
-        snap = compute_auspices(
-            {"session_id": "s1", key: val}, now=6.0, prev={}, cfg=None
-        )
+        snap = compute_auspices({"session_id": "s1", key: val}, now=6.0)
         assert snap["salience"]["fresh"] is True, key
 
 
 def test_salience_fresh_with_full_inputs():
-    snap = compute_auspices(_inputs(), now=100.0, prev={}, cfg=None)
+    snap = compute_auspices(_inputs(), now=100.0)
     assert snap["salience"]["fresh"] is True
 
 

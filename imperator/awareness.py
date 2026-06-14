@@ -107,10 +107,8 @@ def materially_changed(prev: dict, new: dict) -> bool:
 async def tick(nc, pm, state, now, cfg, last):
     decay_stream(state, now, cfg)
     inputs = sources.gather(pm, dict(state), now, cfg)
-    ausp = auspices_mod.compute_auspices(inputs, now, last.get("auspices", {}), cfg)
-    selfm = self_model_mod.compute_self_model(
-        inputs, now, last.get("self_model", {}), cfg
-    )
+    ausp = auspices_mod.compute_auspices(inputs, now)
+    selfm = self_model_mod.compute_self_model(inputs, now)
     pm.save_auspices(ausp)
     pm.save_self_model(selfm)
     if materially_changed(last.get("auspices", {}), ausp):

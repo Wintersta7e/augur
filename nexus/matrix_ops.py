@@ -119,7 +119,9 @@ def apply_matrix_update(
         version: Version string. If None in patch mode, preserves the existing
             version. If None in replace mode, defaults to "1.0".
         mode: "replace" (full overwrite) or "patch" (merge into current).
-        _retries: Number of WATCH/CAS retry attempts on contention.
+        _retries: Number of WATCH/CAS RE-tries on contention, bounding the
+            attempts AFTER the initial write (so the writer always makes at
+            least one attempt; _retries=0 means a single, un-retried attempt).
 
     Returns:
         On success: {"status": "saved", "matrix": {...}, "prior_rules": {key: old|None},
@@ -136,7 +138,10 @@ def apply_matrix_update(
         return {"error": "version invalid or too long"}
     config = AugurConfig.from_env()
     client = pm._r
-    for _ in range(_retries):
+    # +1 so _retries bounds RE-tries only: at least one write is always attempted,
+    # even when _retries == 0 (otherwise the loop body never runs and we return a
+    # false 'contention' error without ever touching Redis).
+    for _ in range(_retries + 1):
         try:
             with client.pipeline() as pipe:
                 pipe.watch(_MATRIX_KEY)

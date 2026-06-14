@@ -93,3 +93,16 @@ services:
       AUGUR_NATS_URL: nats://nats:4222
       AUGUR_REDIS_URL: redis://redis:6379
     restart: unless-stopped
+
+  imperator:
+    build: .
+    command: python -m imperator.awareness
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      AUGUR_REDIS_URL: redis://redis:6379
+      AUGUR_NATS_URL: nats://nats:4222
+    restart: unless-stopped

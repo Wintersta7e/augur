@@ -11,6 +11,7 @@ ASYNC = {
     "vox.console_display": "vox",
     "sensus.typing_monitor": "sensus.typing",
     "sensus.activity_monitor": "sensus.activity",
+    "imperator.awareness": "imperator",
 }
 
 

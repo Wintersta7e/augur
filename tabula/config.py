@@ -185,6 +185,12 @@ class AugurConfig:
     praefectus_reflection_window_s: float = (
         0.0  # 0 = auto → effective_reflection_window_s
     )
+    # ── Imperator I: Awareness read-models (spec 2026-06-14) ─────────────────
+    imperator_enabled: bool = True
+    imperator_tick_s: float = 5.0
+    imperator_salience_window_s: float = 300.0
+    imperator_rate_window_s: float = 900.0
+    imperator_baseline_trained_obs: int = 15
 
     def __post_init__(self) -> None:
         """Validate bounds on tuning fields. Raises ValueError on out-of-range.
@@ -360,6 +366,23 @@ class AugurConfig:
             raise ValueError(
                 f"praefectus_reflection_window_s={self.praefectus_reflection_window_s} must be 0 (auto) "
                 f"or in [2*ollama_timeout={2 * self.ollama_timeout}, 3600]"
+            )
+        # ── Imperator bounds ──
+        if not (0.5 <= self.imperator_tick_s <= 60.0):
+            raise ValueError(
+                f"imperator_tick_s={self.imperator_tick_s} outside [0.5, 60]"
+            )
+        if not (10.0 <= self.imperator_salience_window_s <= 3600.0):
+            raise ValueError(
+                f"imperator_salience_window_s={self.imperator_salience_window_s} outside [10, 3600]"
+            )
+        if not (10.0 <= self.imperator_rate_window_s <= 7200.0):
+            raise ValueError(
+                f"imperator_rate_window_s={self.imperator_rate_window_s} outside [10, 7200]"
+            )
+        if not (1 <= self.imperator_baseline_trained_obs <= 1000):
+            raise ValueError(
+                f"imperator_baseline_trained_obs={self.imperator_baseline_trained_obs} outside [1, 1000]"
             )
 
     # ── Constructors ───────────────────────────────────────────────────────

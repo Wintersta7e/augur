@@ -101,8 +101,18 @@ def _matches_recent(p: dict, recent: dict) -> bool:
     `recent` is the reflection's `adjustments` block — coarse booleans + per-domain
     sigma, no rule-key granularity — so escalation/window proposals defer when the
     matrix/windows were tuned this session, and prompt proposals defer when a prompt
-    was mutated or the target domain's sigma moved. Structured field checks, not a
-    substring scan of the serialized blob (which both over- and under-matched).
+    was mutated *for their own domain* or the target domain's sigma moved. Structured
+    field checks, not a substring scan of the serialized blob (which both over- and
+    under-matched).
+
+    Domain-scoping of `prompt_mutated`: the flag is a bare session-wide boolean with
+    no domain, but the reflection only ever mutates the prompt for its single derived
+    session domain — and that domain always has a `sigma_values` entry (it is drawn
+    from the same advice events that populate the per-domain sigma map). So a prompt
+    proposal defers only when its OWN target domain is one the reflection actually
+    touched this session (a `sigma_values` member). A blanket defer on `prompt_mutated`
+    alone wrongly held back prompt proposals for *unrelated* domains — domains the
+    reflection never looked at, which therefore have no fresh change to thrash.
     """
     if not recent:
         return False
@@ -112,8 +122,13 @@ def _matches_recent(p: dict, recent: dict) -> bool:
             return bool(recent.get("windows_tuned"))
         return bool(recent.get("matrix_mutated"))
     if kind == "prompt_strategy":
-        if recent.get("prompt_mutated"):
-            return True
         domain = (p.get("action") or {}).get("domain", p.get("target"))
+        # Scope to the proposal's OWN domain: defer only when the reflection
+        # actually touched this domain this session (a `sigma_values` member).
+        # The reflection mutates the prompt for exactly its single derived session
+        # domain, which is always such a member, so a touched domain captures both
+        # "sigma moved here" and "prompt was mutated here". This is the fix: a
+        # session-wide `prompt_mutated` no longer defers *unrelated* domains that
+        # the reflection never looked at — they have no fresh change to thrash.
         return domain in (recent.get("sigma_values") or {})
     return False

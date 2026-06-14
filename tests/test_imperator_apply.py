@@ -111,7 +111,11 @@ def test_apply_skips_when_already_applied():
     assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"  # unchanged
 
 
-def test_apply_marker_failure_keeps_applied_status(monkeypatch):
+def test_apply_marker_failure_does_not_apply(monkeypatch):
+    # The applied-marker is the ONLY thing arming the per-(kind,target) anti-thrash
+    # gate. If it can't be written, apply must fail CLOSED: the primary write must
+    # NOT commit and the status must NOT be 'applied' (so the gate is never left
+    # open after a committed change). Marking precedes the matrix write.
     pm = _pm()
     p = _safe(
         P.make_proposal(
@@ -127,19 +131,21 @@ def test_apply_marker_failure_keeps_applied_status(monkeypatch):
 
     monkeypatch.setattr(pm, "mark_proposal_applied", _boom)
     out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")
-    # The matrix write already committed; a marker failure must not flip a real
-    # apply back to 'logged'/'error' (re-applying the same patch later is harmless).
-    assert out["status"] == "applied"
-    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "MEDIUM"
+    assert out["status"] != "applied"
+    # Fail-closed: no committed matrix change, no rollback anchor recorded.
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"
+    assert "prior_target" not in p["action"]
+    assert pm.is_proposal_applied(p["dedupe_key"]) is False
 
 
-def test_apply_prompt_idempotent_after_marker_failure(monkeypatch):
-    # If the idempotency marker write fails after a committed prompt apply, a
-    # re-apply of IDENTICAL text must not call save_prompt again (which would
-    # re-archive the now-current prompt and corrupt the rollback anchor).
+def test_apply_prompt_marker_failure_does_not_save(monkeypatch):
+    # If the marker can't be written, the prompt save must NOT run, so the prior
+    # prompt is never archived (rollback anchor preserved) and the gate stays
+    # closed. A clean retry next window applies the change properly.
     pm = _pm()
     txt = "Consider developing minor pieces before the queen, calmly."
-    pm.save_prompt("typing", "An existing prompt long enough to anchor a rollback.")
+    anchor = "An existing prompt long enough to anchor a rollback."
+    pm.save_prompt("typing", anchor)
     p = _safe(
         P.make_proposal(
             kind="prompt_strategy",
@@ -152,22 +158,145 @@ def test_apply_prompt_idempotent_after_marker_failure(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("redis down")
 
-    # First apply commits the new text but the marker write fails (swallowed).
+    saves = []
     monkeypatch.setattr(pm, "mark_proposal_applied", _boom)
-    assert (
-        A.apply_proposal(pm, dict(p), cfg=_Cfg(), session_id="s1")["status"]
-        == "applied"
+    # Spy on save_prompt while still delegating to the real implementation.
+    real_save = pm.save_prompt
+    monkeypatch.setattr(
+        pm,
+        "save_prompt",
+        lambda *a, **k: (saves.append(a), real_save(*a, **k))[1],
     )
-    assert pm.load_prompt("typing") == txt
+    out = A.apply_proposal(pm, dict(p), cfg=_Cfg(), session_id="s1")
+    assert out["status"] != "applied"
+    assert saves == []  # save_prompt never ran -> rollback history intact
+    assert pm.load_prompt("typing") == anchor  # prompt unchanged
     assert pm.is_proposal_applied(p["dedupe_key"]) is False  # marker never set
 
-    # Re-apply identical text: idempotent, and save_prompt must NOT run again.
+    # Marker subsystem recovers: the SAME proposal now applies cleanly (idempotent
+    # path was never half-committed, so no anchor corruption).
     monkeypatch.setattr(pm, "mark_proposal_applied", lambda *a, **k: None)
-    saves = []
-    monkeypatch.setattr(pm, "save_prompt", lambda *a, **k: saves.append(a))
-    out = A.apply_proposal(pm, dict(p), cfg=_Cfg(), session_id="s2")
+    out2 = A.apply_proposal(pm, dict(p), cfg=_Cfg(), session_id="s2")
+    assert out2["status"] == "applied"
+    assert pm.load_prompt("typing") == txt
+    assert (
+        pm.get_prompt_history("typing")[0]["prompt"] == anchor
+    )  # anchor archived once
+
+
+def test_marker_failure_blocks_different_text_same_target(monkeypatch):
+    # CRITICAL: a marker-write failure must NOT leave the gate open for a DIFFERENT
+    # action on the same target within the staleness window. The bug was: the marker
+    # was written AFTER a committed prompt save and its failure was swallowed, so a
+    # different-text proposal for the same (kind,target) re-applied in-window and
+    # buried the rollback anchor under a now-meaningless intermediate version.
+    pm = _pm()
+    anchor = "An existing prompt long enough to anchor a rollback safely."
+    pm.save_prompt("typing", anchor)
+
+    def _boom(*a, **k):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(pm, "mark_proposal_applied", _boom)
+
+    text_a = "Develop the minor pieces before committing the queen, patiently."
+    text_b = "Castle early and keep the king safe before launching any attack."
+    prop_a = _safe(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="typing",
+            action={"domain": "typing", "text": text_a},
+            rationale="r",
+        )
+    )
+    prop_b = _safe(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="typing",
+            action={"domain": "typing", "text": text_b},
+            rationale="r",
+        )
+    )
+    # Same target -> same anti-thrash identity, even though the action text differs.
+    assert prop_a["dedupe_key"] == prop_b["dedupe_key"]
+
+    # Proposal A's marker write fails -> A must not apply.
+    out_a = A.apply_proposal(pm, prop_a, cfg=_Cfg(), session_id="s1")
+    assert out_a["status"] != "applied"
+
+    # Proposal B (different text, same target) must NOT apply within the window:
+    # with the gate unarmed, the only safe outcome is to apply nothing, so the
+    # original anchor is never buried.
+    out_b = A.apply_proposal(pm, prop_b, cfg=_Cfg(), session_id="s1")
+    assert out_b["status"] != "applied"
+    assert pm.load_prompt("typing") == anchor  # never moved off the anchor
+    assert pm.get_prompt_history("typing") == []  # nothing archived -> anchor intact
+
+
+def test_apply_escalation_window_branch_anchors_prior_from_cas():
+    # The 'window'-apply branch patches rule_windows and anchors rollback to the
+    # prior window value read from the committed CAS snapshot (not a separate read).
+    pm = _pm()
+    pm.save_escalation_matrix(
+        {
+            "version": "v1",
+            "rules": {"LOW+LOW": "LOW"},
+            "rule_windows": {"LOW+LOW": 30.0},
+        }
+    )
+    p = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"window": 60.0},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")
     assert out["status"] == "applied"
-    assert saves == []  # no re-save -> rollback history preserved
+    assert pm.load_escalation_matrix()["rule_windows"]["LOW+LOW"] == 60.0
+    assert p["action"]["prior_window"] == 30.0  # from the committed CAS snapshot
+    assert pm.is_proposal_applied(p["dedupe_key"]) is True
+
+
+def test_apply_invalid_matrix_patch_failsafe():
+    # An invalid matrix patch (severity not in LOW/MEDIUM/HIGH) must fail safe:
+    # apply_matrix_update returns an error -> status stays 'logged', matrix unchanged.
+    pm = _pm()
+    p = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "BANANA"},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")
+    assert out["status"] == "logged"
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"  # unchanged
+    assert "prior_target" not in p["action"]  # no anchor on a failed write
+
+
+def test_apply_unknown_kind_failsafe(monkeypatch):
+    # Defense-in-depth: if a kind ever passes the auto-applicable check but is not
+    # one the dispatch handles, the trailing else must fail safe to 'logged' and
+    # never touch the matrix. Forcing is_auto_applicable models a future kind added
+    # to _AUTO_APPLY_KINDS without a matching apply branch.
+    pm = _pm()
+    monkeypatch.setattr(P, "is_auto_applicable", lambda p: True)
+    p = P.normalize_klass(
+        P.make_proposal(
+            kind="future_unhandled_kind",
+            target="LOW+LOW",
+            action={"target": "MEDIUM"},
+            rationale="r",
+        )
+    )
+    p["status"] = "logged"
+    out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")
+    assert out["status"] == "logged"
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"  # unchanged
+    assert pm.is_proposal_applied(p["dedupe_key"]) is False
 
 
 @pytest.mark.parametrize("kind", sorted(P._KIND_KLASS) + ["unknown_kind"])
@@ -189,3 +318,28 @@ def test_invariant_apply_disabled_never_applies(kind):
     out = A.apply_proposal(pm, p, cfg=cfg, session_id="s")
     assert out["status"] != "applied"
     assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"
+
+
+def test_apply_never_raises_on_unexpected_write_error(monkeypatch):
+    # The outer fail-safe: an unexpected exception from the committing write must
+    # be swallowed into 'logged' (apply must never raise), and no matrix change
+    # may land. The gate was armed first, but with no commit there is nothing to
+    # thrash and the same proposal is reconsidered next window.
+    pm = _pm()
+    p = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "MEDIUM"},
+            rationale="r",
+        )
+    )
+
+    def _boom(*a, **k):
+        raise RuntimeError("redis down mid-write")
+
+    monkeypatch.setattr(A.matrix_ops, "apply_matrix_update", _boom)
+    out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")
+    assert out["status"] == "logged"
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"  # unchanged
+    assert "prior_target" not in p["action"]

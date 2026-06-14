@@ -11,6 +11,33 @@ from imperator import proposals as P
 log = logging.getLogger("imperator.apply")
 
 
+def _arm_gate(pm, p: dict, *, cfg) -> bool:
+    """Write the durable applied-marker that arms the one-move-per-(kind,target)
+    anti-thrash gate. Returns True if armed, False if the write failed.
+
+    The marker is the ONLY thing closing the gate, so it is written BEFORE the
+    primary (matrix/prompt) write: a marker failure must abort the apply rather
+    than leave a committed change behind an open gate, where a DIFFERENT-text
+    proposal for the same target could re-apply in-window and bury the rollback
+    anchor. There is no retry path here — a failed arm means the apply does not
+    happen, and the unchanged proposal is reconsidered on a later cycle.
+    """
+    try:
+        pm.mark_proposal_applied(
+            p["dedupe_key"], ttl_s=int(cfg.imperator_ii_dedupe_staleness_s)
+        )
+        return True
+    except Exception:
+        log.warning(
+            "imperator apply: idempotency marker write failed for %s; failing "
+            "closed (not applied) so the anti-thrash gate is never left open for "
+            "a different action on the same target",
+            p["dedupe_key"],
+            exc_info=True,
+        )
+        return False
+
+
 def apply_proposal(pm, p: dict, *, cfg, session_id: str | None) -> dict:
     """Apply p iff auto-applicable AND apply enabled AND not already applied AND a
     reversibility anchor exists; else leave 'logged' ('skipped' if already applied).
@@ -28,6 +55,11 @@ def apply_proposal(pm, p: dict, *, cfg, session_id: str | None) -> dict:
     try:
         if p["kind"] == "escalation_rule":
             action = p.get("action") or {}
+            # Arm the anti-thrash gate before the committing matrix write so the
+            # write can never land behind an open gate (a failed arm aborts here).
+            if not _arm_gate(pm, p, cfg=cfg):
+                p["status"] = "logged"
+                return p
             if "window" in action:
                 res = matrix_ops.apply_matrix_update(
                     pm, rule_windows={p["target"]: action["window"]}, mode="patch"
@@ -54,10 +86,16 @@ def apply_proposal(pm, p: dict, *, cfg, session_id: str | None) -> dict:
             if not is_prompt_acceptable(text, cfg) or current is None:
                 p["status"] = "logged"
                 return p
+            # Arm the gate before the committing save. A marker failure aborts
+            # BEFORE save_prompt runs, so the prior text is never archived: the
+            # rollback anchor stays intact and no different-text proposal for this
+            # target can re-apply in-window off an unarmed gate.
+            if not _arm_gate(pm, p, cfg=cfg):
+                p["status"] = "logged"
+                return p
             # Idempotent: only re-save (save_prompt archives the prior into rollback
             # history) when the text actually changes. A re-apply of identical text
-            # after a swallowed marker failure must NOT re-archive and corrupt the
-            # rollback anchor.
+            # must NOT re-archive and corrupt the rollback anchor.
             if current != text:
                 pm.save_prompt(domain, text)
         else:
@@ -68,18 +106,4 @@ def apply_proposal(pm, p: dict, *, cfg, session_id: str | None) -> dict:
         return p
     p["status"] = "applied"
     p["applied_session"] = session_id
-    # Best-effort idempotency marker: the write already committed, so a marker
-    # failure must not flip a real apply back to an error (re-applying the same
-    # reversible patch next cycle is harmless).
-    try:
-        pm.mark_proposal_applied(
-            p["dedupe_key"], ttl_s=int(cfg.imperator_ii_dedupe_staleness_s)
-        )
-    except Exception:
-        log.warning(
-            "imperator apply: idempotency marker write failed for %s; a re-apply "
-            "is a clean no-op (apply is idempotent), but the marker will be retried",
-            p["dedupe_key"],
-            exc_info=True,
-        )
     return p

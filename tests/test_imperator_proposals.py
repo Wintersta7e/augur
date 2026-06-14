@@ -145,6 +145,136 @@ def test_matches_recent_defers_prompt_when_domain_sigma_moved():
     )
 
 
+def test_matches_recent_prompt_mutation_does_not_defer_unrelated_domain():
+    # The over-defer bug: a prompt was mutated this session (for the reflection's
+    # own domain — always present in sigma_values), but a prompt_strategy proposal
+    # targeting an UNRELATED domain the reflection never touched must NOT defer.
+    # The mutated domain is the one that moved; an off-target domain has no fresh
+    # change to thrash, so deferring it just costs a wasted cycle.
+    p = P.normalize_klass(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="chess",
+            action={"domain": "chess", "text": "x" * 40},
+            rationale="r",
+        )
+    )
+    recent = {"prompt_mutated": True, "sigma_values": {"typing": 3.0}}
+    assert (
+        P.gate(dict(p), cfg=_Cfg(), recent_self_tuning=recent, applied_keys=set())[
+            "status"
+        ]
+        != "skipped"
+    )
+    # The session-wide prompt_mutated flag must not change an unrelated domain's
+    # fate: a `chess` proposal sees the same (non-skipped) outcome flag-on or
+    # flag-off, because the fix scopes the defer to the proposal's own domain.
+    flag_off = {"prompt_mutated": False, "sigma_values": {"typing": 3.0}}
+    assert (
+        P.gate(dict(p), cfg=_Cfg(), recent_self_tuning=flag_off, applied_keys=set())[
+            "status"
+        ]
+        != "skipped"
+    )
+
+
+def test_matches_recent_prompt_mutation_defers_its_own_domain():
+    # The flip side: when a prompt was mutated, the proposal that targets the
+    # mutated domain (which is the reflection's domain, so its sigma after-state
+    # is in sigma_values) DOES defer a cycle to avoid thrashing the fresh prompt.
+    p = P.normalize_klass(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="typing",
+            action={"domain": "typing", "text": "x" * 40},
+            rationale="r",
+        )
+    )
+    recent = {"prompt_mutated": True, "sigma_values": {"typing": 3.0}}
+    assert (
+        P.gate(dict(p), cfg=_Cfg(), recent_self_tuning=recent, applied_keys=set())[
+            "status"
+        ]
+        == "skipped"
+    )
+
+
+def test_matches_recent_defers_window_rule_when_windows_tuned():
+    # An escalation_rule proposal carrying a `window` action targets the window
+    # surface: it defers on `windows_tuned`, and is unaffected by `matrix_mutated`.
+    p = P.normalize_klass(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "MEDIUM", "window": 45},
+            rationale="r",
+        )
+    )
+    tuned = {"matrix_mutated": False, "windows_tuned": True, "sigma_values": {}}
+    assert (
+        P.gate(dict(p), cfg=_Cfg(), recent_self_tuning=tuned, applied_keys=set())[
+            "status"
+        ]
+        == "skipped"
+    )
+    # Matrix moved but windows did not — a window-action rule does NOT defer.
+    matrix_only = {"matrix_mutated": True, "windows_tuned": False, "sigma_values": {}}
+    assert (
+        P.gate(dict(p), cfg=_Cfg(), recent_self_tuning=matrix_only, applied_keys=set())[
+            "status"
+        ]
+        != "skipped"
+    )
+
+
+def test_matches_recent_window_rule_not_deferred_when_windows_untuned():
+    # Windows untuned this session → a window-action escalation_rule is free to land.
+    p = P.normalize_klass(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "MEDIUM", "window": 45},
+            rationale="r",
+        )
+    )
+    still = {"matrix_mutated": True, "windows_tuned": False, "sigma_values": {}}
+    assert (
+        P.gate(dict(p), cfg=_Cfg(), recent_self_tuning=still, applied_keys=set())[
+            "status"
+        ]
+        != "skipped"
+    )
+
+
+@pytest.mark.parametrize("kind", ["sigma", "gate_calibration", "observe_more"])
+def test_matches_recent_fallthrough_safe_non_auto_kinds(kind):
+    # The safe-but-non-auto kinds are never auto-applied, so _matches_recent has no
+    # anti-thrash branch for them: it falls through to False regardless of how much
+    # Disciplina tuned this session. (gate() then leaves them `logged`, not skipped.)
+    p = P.normalize_klass(
+        P.make_proposal(
+            kind=kind, target="typing", action={"domain": "typing"}, rationale="r"
+        )
+    )
+    everything_moved = {
+        "matrix_mutated": True,
+        "windows_tuned": True,
+        "prompt_mutated": True,
+        "sigma_values": {"typing": 3.0},
+    }
+    assert P._matches_recent(p, everything_moved) is False
+    # gate() routes a safe-non-auto kind to `logged` (not `skipped`).
+    assert (
+        P.gate(
+            dict(p),
+            cfg=_Cfg(),
+            recent_self_tuning=everything_moved,
+            applied_keys=set(),
+        )["status"]
+        == "logged"
+    )
+
+
 @pytest.mark.parametrize(
     "kind", sorted(P._KIND_KLASS) + ["totally_unknown", "", "ESCALATION_RULE"]
 )

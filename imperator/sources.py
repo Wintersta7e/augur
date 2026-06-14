@@ -27,11 +27,12 @@ def _current_sid(pm) -> str | None:
 
 def _recent_session_ids(pm, limit: int = 20) -> list[str]:
     """Newest-first feedback session ids (list_feedback_sessions does NOT exist)."""
-    return [
-        r.get("session_id")
-        for r in (pm.get_all_feedback(limit=limit) or [])
-        if isinstance(r, dict) and r.get("session_id")
-    ]
+    out: list[str] = []
+    for r in pm.get_all_feedback(limit=limit) or []:
+        sid = r.get("session_id") if isinstance(r, dict) else None
+        if sid:
+            out.append(sid)
+    return out
 
 
 def resolve_latest_reflection(pm) -> dict | None:
@@ -259,11 +260,10 @@ def gather(pm, stream_state: dict, now: float, cfg) -> dict:
     report = resolve_latest_reflection(pm)
     analyses = (report or {}).get("analyses", {})
     pd = analyses.get("precision", {}).get("per_domain", {})
-    ratios = [
-        d.get("precision_ratio")
-        for d in pd.values()
-        if isinstance(d, dict) and d.get("precision_ratio") is not None
-    ]
+    ratios: list[float] = []
+    for d in pd.values():
+        if isinstance(d, dict) and d.get("precision_ratio") is not None:
+            ratios.append(d["precision_ratio"])
     precision = (sum(ratios) / len(ratios)) if ratios else None
     util = analyses.get("utility", {})
     utility = util.get("utility_score")

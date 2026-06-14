@@ -51,6 +51,7 @@ COMPONENT_COMMANDS: dict[str, list[str]] = {
     "vox": [sys.executable, "-m", "vox.console_display"],
     "praefectus": [sys.executable, "-m", "praefectus.monitor"],
     "imperator": [sys.executable, "-m", "imperator.awareness"],
+    "imperator_ii": [sys.executable, "-m", "imperator.improver"],
 }
 
 # SEC-02: allowlist for domain / entity / stream_id values received through
@@ -805,6 +806,16 @@ def get_gate_silences(limit: int = 100) -> dict[str, Any]:
             "arm_counts": arm_counts,
             "total": len(silences),
         }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def get_proposals(limit: int = 50) -> dict[str, Any]:
+    """Imperator II's self-improvement proposals, newest first (read-only inspection)."""
+    try:
+        with _persistence_ctx() as pm:
+            return {"proposals": pm.load_proposals(limit=max(1, min(limit, 200)))}
     except Exception as exc:
         return {"error": str(exc)}
 

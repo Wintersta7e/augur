@@ -106,3 +106,209 @@ def resolve_reception(pm, last_advice) -> dict | None:
                 "unmeasurable": ev.get("unmeasurable"),
             }
     return None
+
+
+_GATE_LOG_CAP = 2000  # MAX_GATE_SILENCES / MAX_GATE_EMISSIONS in tabula/persistence.py
+
+
+def windowed_rates(pm, now: float, window_s: float) -> dict:
+    """True windowed suppression rate + advice volume. Read cap-sized (default 100 < 2000 cap).
+    Exclude probe / audit_only emissions from 'genuine delivered'.
+    """
+    lo = now - window_s
+    silences = [
+        s
+        for s in pm.load_silence_records(limit=_GATE_LOG_CAP)
+        if float(s.get("ts", 0.0)) >= lo
+    ]
+    emissions = [
+        e
+        for e in pm.load_emissions(limit=_GATE_LOG_CAP)
+        if float(e.get("ts", 0.0)) >= lo
+        and not e.get("probe")
+        and not e.get("audit_only")
+    ]
+    n_sup, n_del = len(silences), len(emissions)
+    denom = n_sup + n_del
+    return {
+        "suppression_rate": (n_sup / denom) if denom else 0.0,
+        "advice_volume": {
+            "delivered": n_del,
+            "suppressed": n_sup,
+            "total_decisions": denom,
+        },
+    }
+
+
+def _build_blind_spots(pm, baselines: dict, cfg) -> list[dict]:
+    """The spec's five structured, addressable weakness kinds (all from existing keys)."""
+    spots: list[dict] = []
+    confidence = pm.load_rule_confidence() or {}
+    matrix = pm.load_escalation_matrix() or {}
+    matrix_rules = matrix.get("rules") or {}
+    rule_windows = matrix.get("rule_windows") or {}
+    window_state = pm.load_rule_window_state() or {}
+
+    # (a) low-confidence rules + never-evaluated (in matrix, absent from confidence)
+    for rk, info in confidence.items():
+        conf = info.get("confidence", 1.0) if isinstance(info, dict) else 1.0
+        if conf < 0.5:
+            spots.append(
+                {
+                    "kind": "low_confidence_rule",
+                    "detail": f"{rk} conf={conf:.2f}",
+                    "evidence": rk,
+                }
+            )
+    for rk in matrix_rules:
+        if rk not in confidence:
+            spots.append(
+                {
+                    "kind": "never_evaluated_rule",
+                    "detail": f"{rk} has no confidence data",
+                    "evidence": rk,
+                }
+            )
+
+    # (b) mis-sized windows — derived target vs current window (Disciplina's formula)
+    mult = cfg.correlation_window_lag_multiplier
+    lo, hi = cfg.correlation_window_min_s, cfg.correlation_window_max_s
+    for rk, st in window_state.items():
+        lag = st.get("ewma_lag") if isinstance(st, dict) else None
+        if lag is None:
+            continue
+        target = max(lo, min(lag * mult, hi))
+        current = rule_windows.get(rk, cfg.correlation_window_s)
+        if (
+            current
+            and abs(target - current) / current
+            >= cfg.correlation_window_tuning_hysteresis_pct
+        ):
+            spots.append(
+                {
+                    "kind": "mis_sized_window",
+                    "detail": f"{rk} window={current:.1f}s target~{target:.1f}s",
+                    "evidence": rk,
+                }
+            )
+
+    # (c) muted channels
+    for muted in pm.load_self_tolerance() or []:
+        spots.append({"kind": "muted_channel", "detail": str(muted), "evidence": muted})
+
+    # (d) starving channels — nearing the configured cap
+    near = max(1, cfg.gate_max_consecutive_suppressions - 2)
+    for sk, stats in pm.load_all_channel_stats().items():
+        cs = stats.get("consecutive_suppressions", 0) if isinstance(stats, dict) else 0
+        if cs >= near:
+            spots.append(
+                {
+                    "kind": "starving_channel",
+                    "detail": f"{sk} consec={cs}/{cfg.gate_max_consecutive_suppressions}",
+                    "evidence": sk,
+                }
+            )
+
+    # (e) undertrained baselines
+    if baselines.get("untrained", 0) > 0:
+        spots.append(
+            {
+                "kind": "undertrained_baselines",
+                "detail": f"{baselines['untrained']} baselines < {cfg.imperator_baseline_trained_obs} obs",
+                "evidence": baselines.get("by_domain", {}),
+            }
+        )
+    return spots
+
+
+def _rollup_health(snapshot) -> str | None:
+    if not snapshot:
+        return None
+    bad = {"degraded", "stale", "warming_up", "unknown"}
+    overalls = [
+        f.get("overall")
+        for f in snapshot.get("faculties", {}).values()
+        if f.get("required")
+    ]
+    if any(o == "dead" for o in overalls):
+        return "down"
+    if any(o in bad for o in overalls):
+        return "degraded"
+    return "healthy"
+
+
+def _latest_value(history):
+    return history[0].get("value") if history else None
+
+
+def _latest_activity(focus_hist, intens_hist):
+    """Newest of the two Sensus streams: focus context.new_app or intensity focused_app."""
+    focus = focus_hist[0] if focus_hist else None
+    intens = intens_hist[0] if intens_hist else None
+    f_ts = _to_epoch(focus.get("timestamp")) if focus else float("-inf")
+    i_ts = _to_epoch(intens.get("timestamp")) if intens else float("-inf")
+    if intens and i_ts >= f_ts:
+        return (intens.get("context") or {}).get("focused_app") or intens.get("entity")
+    if focus:
+        return (focus.get("context") or {}).get("new_app") or focus.get("entity")
+    return None
+
+
+def gather(pm, stream_state: dict, now: float, cfg) -> dict:
+    """Assemble the full input dict for compute_auspices + compute_self_model."""
+    report = resolve_latest_reflection(pm)
+    analyses = (report or {}).get("analyses", {})
+    pd = analyses.get("precision", {}).get("per_domain", {})
+    ratios = [
+        d.get("precision_ratio")
+        for d in pd.values()
+        if isinstance(d, dict) and d.get("precision_ratio") is not None
+    ]
+    precision = (sum(ratios) / len(ratios)) if ratios else None
+    util = analyses.get("utility", {})
+    utility = util.get("utility_score")
+    utility_no_data = (not util) or "No advice events" in str(util.get("reason", ""))
+
+    rates = windowed_rates(pm, now, cfg.imperator_rate_window_s)
+    baselines = pm.scan_baseline_maturity(
+        trained_obs=cfg.imperator_baseline_trained_obs
+    )
+    coverage_no_data = baselines["total"] == 0
+    coverage_depth = (
+        None if coverage_no_data else baselines["trained"] / baselines["total"]
+    )
+    health = pm.load_health_snapshot()
+    last_advice = pm.load_last_advice()
+    advice_rate = pm.load_advice_rate() if hasattr(pm, "load_advice_rate") else None
+    dismissal = advice_rate.get("rate_ewma") if isinstance(advice_rate, dict) else None
+
+    focus_hist = pm.get_history("activity_focus", limit=1)
+    intens_hist = pm.get_history("activity_intensity", limit=1)
+
+    rollup = _rollup_health(health)
+    return {
+        "session_id": _current_sid(pm),
+        "activity": _latest_activity(focus_hist, intens_hist),
+        "intensity_ewma": _latest_value(intens_hist),
+        "anomaly_load": stream_state.get("anomaly_load"),
+        "escalation_tier": stream_state.get("escalation_tier"),
+        "has_active_correlation": stream_state.get("has_active_correlation"),
+        "active_correlations": stream_state.get("active_correlations"),
+        "last_advice": last_advice,
+        "reception": resolve_reception(pm, last_advice),
+        "pipeline_health_rollup": rollup,
+        "precision": precision,
+        "utility": utility,
+        "utility_no_data": utility_no_data,
+        "mrt": analyses.get("gate", {}).get("mrt"),
+        "suppression_rate": rates["suppression_rate"],
+        "dismissal_rate": dismissal,
+        "advice_volume": rates["advice_volume"],
+        "pipeline_health_full": health,
+        "health_score": 1.0 if rollup == "healthy" else 0.5,
+        "coverage": {"coverage_depth": coverage_depth, **baselines},
+        "coverage_no_data": coverage_no_data,
+        "latest_decision": resolve_latest_decision(pm),
+        "blind_spots": _build_blind_spots(pm, baselines, cfg),
+        "recent_self_tuning": (report or {}).get("tuning_summary"),
+    }

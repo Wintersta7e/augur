@@ -310,5 +310,5 @@ def gather(pm, stream_state: dict, now: float, cfg) -> dict:
         "coverage_no_data": coverage_no_data,
         "latest_decision": resolve_latest_decision(pm),
         "blind_spots": _build_blind_spots(pm, baselines, cfg),
-        "recent_self_tuning": (report or {}).get("tuning_summary"),
+        "recent_self_tuning": (report or {}).get("adjustments"),
     }

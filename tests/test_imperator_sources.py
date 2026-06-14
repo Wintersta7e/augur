@@ -167,7 +167,8 @@ def test_gather_uses_history_and_no_data_utility(monkeypatch):
         sources,
         "resolve_latest_reflection",
         lambda _pm: {
-            "analyses": {"utility": {"reason": "No advice events to evaluate"}}
+            "analyses": {"utility": {"reason": "No advice events to evaluate"}},
+            "adjustments": {"sigma_adjusted": True, "matrix_mutated": False},
         },
     )
     monkeypatch.setattr(sources, "resolve_reception", lambda _pm, a: None)
@@ -204,3 +205,7 @@ def test_gather_uses_history_and_no_data_utility(monkeypatch):
     assert out["intensity_ewma"] == 88.0
     assert out["utility_no_data"] is True
     assert out["dismissal_rate"] == 0.4
+    assert out["recent_self_tuning"] == {
+        "sigma_adjusted": True,
+        "matrix_mutated": False,
+    }

@@ -78,16 +78,27 @@ async def query_imperator_ollama(
     return text, (time.monotonic() - t0) * 1000.0
 
 
-def _extract_json_array(text: str) -> list | None:
-    """First top-level JSON array in text, ignoring trailing prose.
+def _array_from(val: Any) -> list | None:
+    """The proposals array from a decoded value: a bare list, or the first
+    array-valued field of an object wrapper like {"proposals":[...]}."""
+    if isinstance(val, list):
+        return val
+    if isinstance(val, dict):
+        return next((v for v in val.values() if isinstance(v, list)), None)
+    return None
 
+
+def _extract_json_array(text: str) -> list | None:
+    """First top-level proposals array in text, ignoring trailing prose.
+
+    Accepts a bare top-level array OR an object whose array-valued field holds
+    the proposals (models often wrap them as {"proposals":[...]}/{"items":[...]}).
     Tries to parse the whole (clean) output first, else raw_decode from the
     first '[' so a valid array followed by prose containing brackets still
     parses (a greedy regex would over-capture to a later ']' and fail).
     """
     try:
-        val = json.loads(text.strip())
-        return val if isinstance(val, list) else None
+        return _array_from(json.loads(text.strip()))
     except json.JSONDecodeError:
         pass
     start = text.find("[")

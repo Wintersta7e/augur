@@ -68,6 +68,41 @@ def test_parser_extracts_array_with_trailing_prose():
     assert [p["target"] for p in out] == ["LOW+LOW"]
 
 
+def test_parser_extracts_object_wrapped_array():
+    # Models often wrap the array in {"proposals":[...]} (or "items"/"results");
+    # the parser must dig out the array-valued field, not silently drop everything.
+    for key in ("proposals", "items", "results"):
+        txt = (
+            '{"%s":[{"kind":"escalation_rule","target":"LOW+LOW",'
+            '"action":{"target":"MEDIUM"},"rank":1}]}' % key
+        )
+        out = reasoner.parse_proposals(txt, now=0.0, max_n=5)
+        assert [p["target"] for p in out] == ["LOW+LOW"], key
+
+
+def test_parser_object_wrapped_with_trailing_prose():
+    # raw_decode tolerance must survive for the object-wrapped form too.
+    txt = (
+        '{"proposals":[{"kind":"escalation_rule","target":"A+B",'
+        '"action":{"target":"HIGH"},"rank":1}]}'
+        "\n\nThat is my recommendation."
+    )
+    out = reasoner.parse_proposals(txt, now=0.0, max_n=5)
+    assert [p["target"] for p in out] == ["A+B"]
+
+
+def test_parser_object_without_array_field_is_empty():
+    # An object whose values are all scalars (no array field) yields nothing.
+    txt = '{"note":"no proposals this cycle","count":0}'
+    assert reasoner.parse_proposals(txt, now=0.0, max_n=5) == []
+
+
+def test_parser_truncated_array_is_empty():
+    # A truncated/malformed array (model cut off mid-token) is intentionally [].
+    txt = '[{"kind":"escalation_rule","target":"A","action":{"target":"LOW"'
+    assert reasoner.parse_proposals(txt, now=0.0, max_n=5) == []
+
+
 def test_parser_caps_valid_survivors_not_raw_candidates():
     # Two malformed items precede two valid ones; max_n=2 must yield the two
     # VALID proposals, not stop after consuming two raw (invalid) candidates.

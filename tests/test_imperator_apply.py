@@ -1,4 +1,5 @@
 import fakeredis
+import pytest
 from tabula.persistence import PersistenceManager
 from imperator import apply as A, proposals as P
 
@@ -130,3 +131,24 @@ def test_apply_marker_failure_keeps_applied_status(monkeypatch):
     # apply back to 'logged'/'error' (re-applying the same patch later is harmless).
     assert out["status"] == "applied"
     assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "MEDIUM"
+
+
+@pytest.mark.parametrize("kind", sorted(P._KIND_KLASS) + ["unknown_kind"])
+def test_invariant_apply_disabled_never_applies(kind):
+    # Watch-first: with apply disabled, NO kind ever reaches 'applied' and the
+    # matrix is never written — for every kind.
+    pm = _pm()
+    cfg = _Cfg()
+    cfg.imperator_ii_apply_enabled = False
+    p = P.normalize_klass(
+        P.make_proposal(
+            kind=kind,
+            target="LOW+LOW",
+            action={"target": "MEDIUM", "domain": "typing", "text": "x" * 40},
+            rationale="r",
+        )
+    )
+    p["status"] = "logged"
+    out = A.apply_proposal(pm, p, cfg=cfg, session_id="s")
+    assert out["status"] != "applied"
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"

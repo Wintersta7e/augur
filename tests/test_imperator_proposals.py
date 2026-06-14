@@ -1,3 +1,5 @@
+import pytest
+
 from imperator import proposals as P
 
 
@@ -141,3 +143,22 @@ def test_matches_recent_defers_prompt_when_domain_sigma_moved():
         ]
         == "skipped"
     )
+
+
+@pytest.mark.parametrize(
+    "kind", sorted(P._KIND_KLASS) + ["totally_unknown", "", "ESCALATION_RULE"]
+)
+def test_invariant_only_safe_kinds_are_auto_applicable(kind):
+    # Privilege cannot be self-escalated: after the deterministic normalize_klass,
+    # the ONLY auto-applicable kinds are the safe-auto set, and code/structural or
+    # any unknown kind is always gated (never auto-applied) — for every kind.
+    p = P.normalize_klass(
+        P.make_proposal(
+            kind=kind, target="LOW+LOW", action={"target": "MEDIUM"}, rationale="r"
+        )
+    )
+    p["status"] = "logged"
+    if P.is_auto_applicable(p):
+        assert kind in P._AUTO_APPLY_KINDS
+    if kind in ("code", "structural") or kind not in P._KIND_KLASS:
+        assert P.is_auto_applicable(p) is False

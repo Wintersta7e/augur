@@ -136,6 +136,77 @@ def test_await_fresh_gates_on_reflection_ts_not_generated_at():
     )
 
 
+def test_run_cycle_applies_when_armed_and_is_idempotent():
+    from imperator import proposals as P
+
+    pm = PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
+    pm.save_escalation_matrix({"version": "v1", "rules": {"LOW+LOW": "LOW"}})
+    pm.save_self_model(
+        {
+            "schema_version": 1,
+            "generated_at": 200.0,
+            "reflection_ts": 200.0,
+            "session_id": "s1",
+            "blind_spots": {
+                "value": [
+                    {
+                        "kind": "low_confidence_rule",
+                        "detail": "x",
+                        "evidence": "LOW+LOW",
+                    }
+                ],
+                "fresh": True,
+            },
+            "recent_self_tuning": {"value": {}, "fresh": True},
+        }
+    )
+
+    async def fake_gen(sm, *, client, config, now):
+        return [
+            P.make_proposal(
+                kind="escalation_rule",
+                target="LOW+LOW",
+                action={"target": "MEDIUM"},
+                rationale="r",
+                now=now,
+            )
+        ]
+
+    cfg = _Cfg()
+    cfg.imperator_ii_apply_enabled = True  # arm the apply path end-to-end
+
+    asyncio.run(
+        improver.run_cycle(
+            pm,
+            cfg,
+            now=300.0,
+            session_id="s1",
+            generate_fn=fake_gen,
+            client=None,
+            publish=lambda s, d: None,
+        )
+    )
+    # Armed: the matrix is actually patched, idempotency is marked, record applied.
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "MEDIUM"
+    assert pm.is_proposal_applied(P.dedupe_key("escalation_rule", "LOW+LOW")) is True
+    assert [p["status"] for p in pm.load_proposals()].count("applied") == 1
+
+    # Second cycle, same proposal -> skipped across cycles, matrix unchanged.
+    asyncio.run(
+        improver.run_cycle(
+            pm,
+            cfg,
+            now=400.0,
+            session_id="s2",
+            generate_fn=fake_gen,
+            client=None,
+            publish=lambda s, d: None,
+        )
+    )
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "MEDIUM"
+    assert [p["status"] for p in pm.load_proposals()].count("skipped") == 1
+
+
 class _Cfg:
     imperator_ii_apply_enabled = False
     imperator_ii_max_proposals_per_cycle = 5

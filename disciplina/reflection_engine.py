@@ -36,6 +36,9 @@ from tabula.connections import connect_redis
 from tabula.heartbeat import start_heartbeat
 from tabula.persistence import PersistenceManager
 from nexus.correlator import DEFAULT_ESCALATION_MATRIX
+from consilium.prompt_safety import (
+    violates_forbidden_patterns as _violates_forbidden_patterns,
+)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -700,13 +703,6 @@ def analyze_correlation_window_tuning(
 # ---------------------------------------------------------------------------
 # Prompt mutation via Ollama
 # ---------------------------------------------------------------------------
-
-
-def _violates_forbidden_patterns(prompt_text: str, config: AugurConfig) -> bool:
-    """True if the mutated prompt reintroduces a forbidden valence/meta pattern
-    (the exact 1D failure mode, or LLM meta-text like 'as an ai'). Spec 1E §9."""
-    low = prompt_text.lower()
-    return any(pat.lower() in low for pat in config.prompt_forbidden_patterns)
 
 
 def maybe_rollback_prompt(

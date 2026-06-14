@@ -21,6 +21,7 @@ REQUIRED_FACULTIES: tuple[str, ...] = (
     "vox",
     "praefectus",
     "imperator",
+    "imperator_ii",
 )
 OPTIONAL_COMPONENTS: tuple[str, ...] = (
     "sensus.chess",

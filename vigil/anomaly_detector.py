@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -311,6 +312,53 @@ def load_persisted_baselines(
 
 
 # ---------------------------------------------------------------------------
+# R4: bounded per-entity memory — idle in-memory model reclamation
+# ---------------------------------------------------------------------------
+
+
+def evict_idle_baselines(
+    baselines: dict[tuple[str, str], EntityBaseline],
+    last_seen: dict[tuple[str, str], float],
+    *,
+    now: float,
+    idle_ttl_s: float,
+) -> list[tuple[str, str]]:
+    """Drop in-memory baselines not seen within ``idle_ttl_s`` seconds.
+
+    Each :class:`EntityBaseline` owns a River HalfSpaceTrees model, so an
+    unbounded entity namespace (churning IDs, hostile publishers) can pin
+    significant memory up to ``MAX_BASELINE_ENTITIES`` even while almost all
+    of those models are dormant. This reclaims dormant ones. Eviction drops
+    only the in-memory model; the persisted Redis profile is left intact. A
+    re-sighted entity is then treated like any mid-run-new entity — it starts
+    a fresh in-memory baseline and re-warms from incoming data (the durable
+    profile survives for a future *startup* reload; it is not auto-reloaded
+    mid-run on cache-miss).
+
+    Pure and clock-injected (``now`` passed in) so it is unit-testable. The
+    caller stamps ``last_seen[key]`` on every event; both maps are pruned in
+    lockstep here. A key absent from ``last_seen`` (e.g. a Redis-restored
+    baseline that has not yet received an event) is treated as maximally idle
+    and reclaimed rather than leaked.
+
+    Eviction is strictly-greater-than the TTL (idle == TTL is retained).
+    ``idle_ttl_s <= 0`` disables eviction and returns ``[]`` unchanged — the
+    documented opt-out. Returns the list of evicted keys (for logging).
+    """
+    if idle_ttl_s <= 0.0:
+        return []
+    evicted = [
+        key
+        for key in baselines
+        if (now - last_seen.get(key, float("-inf"))) > idle_ttl_s
+    ]
+    for key in evicted:
+        baselines.pop(key, None)
+        last_seen.pop(key, None)
+    return evicted
+
+
+# ---------------------------------------------------------------------------
 # Core loop
 # ---------------------------------------------------------------------------
 
@@ -338,6 +386,16 @@ async def run() -> None:
     )
     if baselines:
         log.info("Restored %d baselines from persistence", len(baselines))
+
+    # R4: last-sighting (monotonic) per in-memory baseline, for idle eviction.
+    # Seed Redis-restored baselines at process start so the first sweep gives
+    # them a full TTL of grace to receive an event before being reclaimed (the
+    # Redis profile survives eviction either way, so a re-sighted entity simply
+    # reloads its EWMA and re-warms its HST).
+    last_seen: dict[tuple[str, str], float] = {}
+    start_mono = time.monotonic()
+    for _k in baselines:
+        last_seen[_k] = start_mono
 
     # Cache of per-domain thresholds (loaded on first encounter)
     thresholds_cache: dict[str, dict] = {}
@@ -376,6 +434,8 @@ async def run() -> None:
             baselines[key] = EntityBaseline()
 
         bl = baselines[key]
+        # R4: stamp last-sighting so this (active) entity is never idle-evicted.
+        last_seen[key] = time.monotonic()
 
         # Enable the drift detector once per baseline (covers freshly-created and
         # Redis-restored baselines; detector state is in-memory, spec §6).
@@ -499,9 +559,31 @@ async def run() -> None:
     log.info("Default thresholds: %s", DEFAULT_THRESHOLDS)
     log.info("Waiting for perception events...")
 
+    # R4: idle-eviction sweep cadence. Bounded (the hot path is on_event, not
+    # here) — sweep at most once a minute, and never more often than the TTL.
+    idle_ttl_s = config.baseline_entity_idle_evict_s
+    sweep_interval_s = min(60.0, idle_ttl_s) if idle_ttl_s > 0.0 else 0.0
+    next_sweep = time.monotonic() + sweep_interval_s
+
     try:
         while True:
             await asyncio.sleep(1)
+            if sweep_interval_s <= 0.0:
+                continue
+            now = time.monotonic()
+            if now < next_sweep:
+                continue
+            next_sweep = now + sweep_interval_s
+            evicted = evict_idle_baselines(
+                baselines, last_seen, now=now, idle_ttl_s=idle_ttl_s
+            )
+            if evicted:
+                log.info(
+                    "Idle-evicted %d baseline(s) (>%.0fs idle); %d remain in memory",
+                    len(evicted),
+                    idle_ttl_s,
+                    len(baselines),
+                )
     except asyncio.CancelledError:
         pass
     finally:

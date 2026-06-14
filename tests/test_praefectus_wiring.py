@@ -12,6 +12,7 @@ ASYNC = {
     "sensus.typing_monitor": "sensus.typing",
     "sensus.activity_monitor": "sensus.activity",
     "imperator.awareness": "imperator",
+    "imperator.improver": "imperator_ii",
 }
 
 

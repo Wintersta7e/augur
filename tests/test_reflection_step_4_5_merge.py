@@ -1,16 +1,27 @@
-"""Tests for run_reflection: step 4 + step 5 merge into single matrix save."""
+"""Tests for run_reflection: step 4 + step 5 merge into a single matrix CAS patch."""
 
 from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 
 from tabula.config import AugurConfig
 from disciplina.reflection_engine import run_reflection
+from nexus import matrix_ops
+
+
+def _ok_update(*args, **kwargs):
+    """Success stand-in for matrix_ops.apply_matrix_update (real CAS needs Redis)."""
+    return {
+        "status": "saved",
+        "matrix": {"version": "1.0", "rules": {}, "rule_windows": {}},
+        "prior_rules": {},
+        "prior_rule_windows": {},
+    }
 
 
 @pytest.mark.asyncio
-async def test_step_4_and_5_save_single_merged_matrix():
-    """Both step 4 (rule-confidence) and step 5 (window) should merge
-    their changes into one matrix save call, not two."""
+async def test_step_4_and_5_save_single_merged_matrix(monkeypatch):
+    """Step 4 (rule-confidence) and step 5 (window) merge into ONE CAS patch
+    call, not two separate writes."""
     feedback = {
         "advice_events": [
             {
@@ -41,30 +52,27 @@ async def test_step_4_and_5_save_single_merged_matrix():
     pm.get_history.return_value = []
     pm.get_feedback.return_value = feedback
 
-    nc = AsyncMock()
-    redis_client = MagicMock()
-    http_client = AsyncMock()
+    update_mock = MagicMock(side_effect=_ok_update)
+    monkeypatch.setattr(matrix_ops, "apply_matrix_update", update_mock)
 
+    nc = AsyncMock()
     await run_reflection(
         "session-123",
         feedback,
         pm,
-        redis_client,
-        http_client,
+        MagicMock(),
+        AsyncMock(),
         nc,
         AugurConfig.from_env(),
     )
 
-    # Single matrix save with BOTH new rules and new rule_windows
-    save_calls = pm.save_escalation_matrix.call_args_list
-    assert len(save_calls) == 1, f"Expected 1 matrix save, got {len(save_calls)}"
-    saved = save_calls[0].args[0]
-    assert "rules" in saved
-    assert "rule_windows" in saved
+    # Single merged matrix write, routed through the shared CAS helper in patch mode.
+    assert update_mock.call_count == 1
+    assert update_mock.call_args.kwargs.get("mode") == "patch"
 
 
 @pytest.mark.asyncio
-async def test_window_state_persisted_independently_from_matrix():
+async def test_window_state_persisted_independently_from_matrix(monkeypatch):
     feedback = {
         "advice_events": [
             {
@@ -92,6 +100,9 @@ async def test_window_state_persisted_independently_from_matrix():
     pm.load_thresholds.return_value = None
     pm.get_history.return_value = []
 
+    monkeypatch.setattr(
+        matrix_ops, "apply_matrix_update", MagicMock(side_effect=_ok_update)
+    )
     nc = AsyncMock()
 
     await run_reflection(
@@ -102,13 +113,12 @@ async def test_window_state_persisted_independently_from_matrix():
     # (a single MULTI/EXEC pipeline writing both confidence + window_state).
     pm.save_tuning_state.assert_called_once()
     kwargs = pm.save_tuning_state.call_args.kwargs
-    # window_state should contain the new EWMA for LOW+LOW
     assert kwargs.get("window_state") is not None
     assert "LOW+LOW" in kwargs["window_state"]
 
 
 @pytest.mark.asyncio
-async def test_marker_set_after_both_writes():
+async def test_marker_set_after_both_writes(monkeypatch):
     feedback = {
         "advice_events": [
             {
@@ -136,6 +146,9 @@ async def test_marker_set_after_both_writes():
     pm.load_thresholds.return_value = None
     pm.get_history.return_value = []
 
+    monkeypatch.setattr(
+        matrix_ops, "apply_matrix_update", MagicMock(side_effect=_ok_update)
+    )
     nc = AsyncMock()
 
     await run_reflection(
@@ -148,11 +161,9 @@ async def test_marker_set_after_both_writes():
 
 
 @pytest.mark.asyncio
-async def test_marker_NOT_set_when_matrix_save_fails():
-    """Closes the race Codex flagged: a failed matrix save must NOT mark
-    the session applied. Otherwise next-session retry can't recover."""
-    import redis as redis_lib
-
+async def test_marker_NOT_set_when_matrix_save_fails(monkeypatch):
+    """A failed matrix CAS must NOT mark the session applied, so the next
+    session's reflection can retry the tuning."""
     feedback = {
         "advice_events": [
             {
@@ -180,11 +191,14 @@ async def test_marker_NOT_set_when_matrix_save_fails():
     pm.load_rule_window_state.return_value = {}
     pm.load_thresholds.return_value = None
     pm.get_history.return_value = []
-    # Matrix save fails — marker MUST NOT be set
-    pm.save_escalation_matrix.side_effect = redis_lib.RedisError("simulated")
+    # Matrix CAS fails — marker MUST NOT be set.
+    monkeypatch.setattr(
+        matrix_ops,
+        "apply_matrix_update",
+        MagicMock(return_value={"error": "simulated contention"}),
+    )
 
     nc = AsyncMock()
-
     await run_reflection(
         "session-FAIL",
         feedback,
@@ -204,7 +218,7 @@ async def test_marker_NOT_set_when_matrix_save_fails():
 
 
 @pytest.mark.asyncio
-async def test_marker_NOT_set_when_state_save_fails():
+async def test_marker_NOT_set_when_state_save_fails(monkeypatch):
     """rule_confidence or rule_window_state save failure also blocks the marker."""
     import redis as redis_lib
 
@@ -234,10 +248,12 @@ async def test_marker_NOT_set_when_state_save_fails():
     pm.load_rule_window_state.return_value = {}
     pm.load_thresholds.return_value = None
     pm.get_history.return_value = []
+    monkeypatch.setattr(
+        matrix_ops, "apply_matrix_update", MagicMock(side_effect=_ok_update)
+    )
     pm.save_tuning_state.side_effect = redis_lib.RedisError("simulated")
 
     nc = AsyncMock()
-
     await run_reflection(
         "session-FAIL2",
         feedback,

@@ -5,10 +5,11 @@ import pytest
 
 from tabula.config import AugurConfig
 from disciplina.reflection_engine import run_reflection
+from nexus import matrix_ops
 
 
 @pytest.mark.asyncio
-async def test_marker_set_skips_both_step_4_and_5():
+async def test_marker_set_skips_both_step_4_and_5(monkeypatch):
     feedback = {
         "advice_events": [
             {
@@ -28,6 +29,8 @@ async def test_marker_set_skips_both_step_4_and_5():
     pm.load_thresholds.return_value = None
     pm.get_history.return_value = []
 
+    update_mock = MagicMock()
+    monkeypatch.setattr(matrix_ops, "apply_matrix_update", update_mock)
     nc = AsyncMock()
 
     report = await run_reflection(
@@ -41,7 +44,7 @@ async def test_marker_set_skips_both_step_4_and_5():
     )
 
     # Neither matrix nor state saves should occur
-    pm.save_escalation_matrix.assert_not_called()
+    update_mock.assert_not_called()  # matrix CAS not reached when already applied
     pm.save_tuning_state.assert_not_called()
     pm.mark_tuning_applied.assert_not_called()
     # Both analyses report skipped

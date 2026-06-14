@@ -311,4 +311,8 @@ def gather(pm, stream_state: dict, now: float, cfg) -> dict:
         "latest_decision": resolve_latest_decision(pm),
         "blind_spots": _build_blind_spots(pm, baselines, cfg),
         "recent_self_tuning": (report or {}).get("adjustments"),
+        # Epoch of the reflection actually folded into this self-model, so the
+        # Imperator-II freshness gate can content-check (not wall-clock) that the
+        # triggering reflection has been incorporated. 0.0 when none exists.
+        "reflection_ts": _to_epoch((report or {}).get("timestamp")),
     }

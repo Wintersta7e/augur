@@ -57,6 +57,11 @@ class AugurConfig:
     hst_threshold: float = 0.7
     severity_medium_sigma: float = 2.5
     severity_high_sigma: float = 4.0
+    # Idle reclamation for per-entity in-memory baselines (each owns a River
+    # HST model). Evict a (domain, entity) model not seen for this many seconds
+    # so a high-churn entity namespace can't pin memory up to
+    # MAX_BASELINE_ENTITIES. 0 disables eviction (never reclaim).
+    baseline_entity_idle_evict_s: float = 3600.0
 
     # ── Advisor ────────────────────────────────────────────────────────────
     advisor_lock_timeout: int = 180
@@ -192,6 +197,16 @@ class AugurConfig:
     imperator_rate_window_s: float = 900.0
     imperator_baseline_trained_obs: int = 15
 
+    # ── Imperator II: Self-Improvement (spec 2026-06-14) ─────────────────────
+    imperator_ii_enabled: bool = True
+    imperator_ii_apply_enabled: bool = False  # watch-first: default OFF
+    imperator_ii_num_predict: int = 512
+    imperator_ii_max_proposals_per_cycle: int = 5
+    imperator_ii_min_interval_s: float = 60.0
+    imperator_ii_freshness_timeout_s: float = 15.0
+    imperator_ii_dedupe_staleness_s: float = 86400.0
+    min_prompt_len: int = 20
+
     def __post_init__(self) -> None:
         """Validate bounds on tuning fields. Raises ValueError on out-of-range.
 
@@ -250,6 +265,11 @@ class AugurConfig:
         if self.gate_tier1_mode not in {"note", "silent"}:
             raise ValueError(
                 f"gate_tier1_mode={self.gate_tier1_mode!r} must be 'note' or 'silent'"
+            )
+        if self.baseline_entity_idle_evict_s < 0.0:
+            raise ValueError(
+                f"baseline_entity_idle_evict_s={self.baseline_entity_idle_evict_s} "
+                "must be >= 0 (0 disables idle eviction)"
             )
         # ── Lane 1 bounds (spec 2026-06-09) ─────────────────────────────────
         if not (2 <= self.post_decision_window <= 50):
@@ -384,6 +404,21 @@ class AugurConfig:
             raise ValueError(
                 f"imperator_baseline_trained_obs={self.imperator_baseline_trained_obs} outside [1, 1000]"
             )
+        # ── Imperator II bounds ──
+        if not (16 <= self.imperator_ii_num_predict <= 4096):
+            raise ValueError(
+                f"imperator_ii_num_predict={self.imperator_ii_num_predict} outside [16, 4096]"
+            )
+        if not (1 <= self.imperator_ii_max_proposals_per_cycle <= 50):
+            raise ValueError("imperator_ii_max_proposals_per_cycle outside [1, 50]")
+        if not (0.0 <= self.imperator_ii_min_interval_s <= 3600.0):
+            raise ValueError("imperator_ii_min_interval_s outside [0, 3600]")
+        if not (1.0 <= self.imperator_ii_freshness_timeout_s <= 120.0):
+            raise ValueError("imperator_ii_freshness_timeout_s outside [1, 120]")
+        if not (1.0 <= self.imperator_ii_dedupe_staleness_s <= 31_536_000.0):
+            raise ValueError("imperator_ii_dedupe_staleness_s outside [1, 31536000]")
+        if not (1 <= self.min_prompt_len <= 500):
+            raise ValueError("min_prompt_len outside [1, 500]")
 
     # ── Constructors ───────────────────────────────────────────────────────
 

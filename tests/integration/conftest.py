@@ -141,6 +141,7 @@ async def pipeline(
         "vox": [sys.executable, "-m", "vox.console_display"],
         "praefectus": [sys.executable, "-m", "praefectus.monitor"],
         "imperator": [sys.executable, "-m", "imperator.awareness"],
+        "imperator_ii": [sys.executable, "-m", "imperator.improver"],
     }
 
     requested: list[str] = getattr(request, "param", [])

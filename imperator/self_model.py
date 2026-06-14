@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from imperator._readmodel import clamp, field
+
 SCHEMA_VERSION = 1
 _W_PRECISION, _W_UTILITY, _W_DISMISS, _W_COVERAGE, _W_HEALTH = (
     0.30,
@@ -11,14 +13,6 @@ _W_PRECISION, _W_UTILITY, _W_DISMISS, _W_COVERAGE, _W_HEALTH = (
     0.10,
 )
 _BLIND_PENALTY = 0.05
-
-
-def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
-    return max(lo, min(hi, x))
-
-
-def field(value, fresh: bool, now: float) -> dict:
-    return {"value": value, "fresh": fresh, "as_of": now}
 
 
 def competence(
@@ -34,7 +28,7 @@ def competence(
     """Inward headline. Higher = better; the inverse = room to grow."""
     utility_adj = 0.5 if utility_no_data else (utility or 0.0)
     coverage_adj = 0.5 if coverage_no_data else (coverage_depth or 0.0)
-    return _clamp(
+    return clamp(
         _W_PRECISION * (precision or 0.0)
         + _W_UTILITY * utility_adj
         + _W_DISMISS * (1.0 - (dismissal_rate or 0.0))
@@ -44,7 +38,7 @@ def competence(
     )
 
 
-def compute_self_model(inputs: dict, now: float, prev: dict, cfg) -> dict:
+def compute_self_model(inputs: dict, now: float) -> dict:
     def present(key):
         return key in inputs and inputs[key] is not None
 
@@ -52,11 +46,22 @@ def compute_self_model(inputs: dict, now: float, prev: dict, cfg) -> dict:
     coverage = inputs.get("coverage") or {}
     coverage_no_data = bool(inputs.get("coverage_no_data"))
     blind = inputs.get("blind_spots") or []
+    # The competence headline is only a current reading when at least one of the
+    # genuine report/feedback signals it summarizes is present. coverage,
+    # blind_spots and health_score always carry defaults, so they don't signal
+    # that a real reflection/feedback report was folded in; without one,
+    # competence is a warmup figure and must not be advertised fresh (the
+    # reasoner only reads fresh cells).
+    competence_fresh = report_fresh or present("utility") or present("dismissal_rate")
 
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": now,
         "session_id": inputs.get("session_id"),
+        # Epoch of the reflection folded into this snapshot (0.0 if none). The
+        # Imperator-II freshness gate compares this against the triggering
+        # reflection's epoch — a content check, not wall-clock generated_at.
+        "reflection_ts": inputs.get("reflection_ts") or 0.0,
         "precision": field(inputs.get("precision"), report_fresh, now),
         "utility": field(inputs.get("utility"), present("utility"), now),
         "mrt": field(inputs.get("mrt"), present("mrt"), now),
@@ -88,7 +93,7 @@ def compute_self_model(inputs: dict, now: float, prev: dict, cfg) -> dict:
                 len(blind),
                 coverage_no_data,
             ),
-            True,
+            competence_fresh,
             now,
         ),
     }

@@ -96,16 +96,20 @@ def test_liveness_absent_optional():
 
 def test_stall_signal_deficit():
     cfg = _Cfg()
-    w = H.ActivityWindow(detected_mh=[1.0, 2.0, 3.0])  # 3 MEDIUM/HIGH, 0 terminals
-    v = H.stall_signal(w, 100.0, cfg)
+    # 3 MEDIUM/HIGH aged past the servicing grace (in [window, grace) band),
+    # 0 terminals → genuine stall
+    w = H.ActivityWindow(detected_mh=[750.0, 760.0, 770.0])
+    v = H.stall_signal(w, 1000.0, cfg)
     assert v.degraded and "consilium_stall" in v.reasons
 
 
 def test_stall_signal_no_false_trigger_on_coalescing():
     cfg = _Cfg()
-    # 3 detected, 2 terminals — within tolerance(1) → NOT degraded
-    w = H.ActivityWindow(detected_mh=[1.0, 2.0, 3.0], advice=[1.5, 2.5])
-    assert H.stall_signal(w, 100.0, cfg).degraded is False
+    # 3 detected (aged past grace) + 2 terminals — deficit within tolerance(1)
+    # → NOT degraded. Aged so the tolerance gate, not the in-flight grace, is what
+    # is under test.
+    w = H.ActivityWindow(detected_mh=[750.0, 760.0, 770.0], advice=[755.0, 765.0])
+    assert H.stall_signal(w, 1000.0, cfg).degraded is False
 
 
 def test_stall_signal_delivery_failure_spike():
@@ -120,7 +124,8 @@ def test_evaluate_entered_then_cleared():
     states = H.initial_states(1000.0)
     for f in H.REQUIRED_FACULTIES:  # all alive
         H.record_heartbeat(states, f, 1000.0)
-    w = H.ActivityWindow(detected_mh=[1000.0, 1000.0, 1000.0])  # consilium stall
+    # detections aged past the servicing grace (800 <= now-grace=880) → real stall
+    w = H.ActivityWindow(detected_mh=[800.0, 800.0, 800.0])  # consilium stall
     r1 = H.evaluate(states, w, 1000.0, 1000.0, cfg)
     assert ("consilium", "consilium_stall") in r1.entered
     # clear the stall → recovery
@@ -225,18 +230,64 @@ def test_stall_signal_below_min_events_floor():
     # verdict isolates the floor as the blocker; crossing to 2 detected then degrades.
     cfg = _Cfg()
     cfg.praefectus_stall_tolerance = 0
-    below = H.ActivityWindow(detected_mh=[1.0])  # 1 < min_events(2) → floor blocks
-    assert H.stall_signal(below, 100.0, cfg).degraded is False
-    at_floor = H.ActivityWindow(detected_mh=[1.0, 2.0])  # 2 ≥ floor, deficit 2>0
-    assert H.stall_signal(at_floor, 100.0, cfg).degraded is True
+    # detections aged past the servicing grace so the floor, not the grace, gates
+    below = H.ActivityWindow(detected_mh=[750.0])  # 1 < min_events(2) → floor blocks
+    assert H.stall_signal(below, 1000.0, cfg).degraded is False
+    at_floor = H.ActivityWindow(detected_mh=[750.0, 760.0])  # 2 ≥ floor, deficit 2>0
+    assert H.stall_signal(at_floor, 1000.0, cfg).degraded is True
 
 
 def test_stall_signal_deficit_equals_tolerance_plus_one():
     # T3b: 3 detected, 1 terminal — deficit (2) == tolerance(1)+1 → degraded.
     cfg = _Cfg()
-    w = H.ActivityWindow(detected_mh=[1.0, 2.0, 3.0], advice=[1.5])
-    v = H.stall_signal(w, 100.0, cfg)
+    # detections aged past the servicing grace (in [window, grace) band)
+    w = H.ActivityWindow(detected_mh=[750.0, 760.0, 770.0], advice=[755.0])
+    v = H.stall_signal(w, 1000.0, cfg)
     assert v.degraded and "consilium_stall" in v.reasons
+
+
+def test_stall_signal_in_flight_detections_not_a_stall():
+    # R2: BUSY/freshly-restarted consilium — detections arrived within the
+    # servicing grace (mid long LLM call) and have not had a chance to produce a
+    # terminal yet. These are in-flight work, NOT a stall. With grace=120, two
+    # detections at t=950/960 (age 50/40 < 120) must be excluded from the deficit
+    # numerator → NOT degraded, even though there are 0 terminals.
+    cfg = _Cfg()
+    w = H.ActivityWindow(detected_mh=[950.0, 960.0])  # both within grace, 0 terminals
+    v = H.stall_signal(w, 1000.0, cfg)
+    assert v.degraded is False
+    assert "consilium_stall" not in v.reasons
+
+
+def test_stall_signal_aged_detections_still_stall():
+    # R2: a genuine stall — the same detection count, but now aged past the
+    # servicing grace with still no terminal. These ARE unserviced pending work
+    # → degraded. (Guards that the in-flight grace does not silence real stalls.)
+    cfg = _Cfg()
+    # both aged past grace (in [window, grace) band), 0 terminals
+    w = H.ActivityWindow(detected_mh=[750.0, 760.0])
+    v = H.stall_signal(w, 1000.0, cfg)
+    assert v.degraded and "consilium_stall" in v.reasons
+
+
+def test_stall_signal_idle_consilium_not_stalled():
+    # R2: IDLE consilium — no inbound detections at all. There is no pending work
+    # to service, so it must NOT be flagged stalled regardless of (lack of) terminals.
+    cfg = _Cfg()
+    v = H.stall_signal(H.ActivityWindow(), 1000.0, cfg)
+    assert v.degraded is False
+    assert "consilium_stall" not in v.reasons
+
+
+def test_stall_signal_grace_excludes_only_recent_from_numerator():
+    # R2: mixed ages — one aged detection (serviceable) + several in-flight. Only
+    # the aged one counts toward the deficit floor/numerator, so it stays below
+    # min_events and does NOT degrade; the in-flight ones are not blamed.
+    cfg = _Cfg()
+    # 1 aged (in-band) + 3 in-flight; only the aged one counts → 1 < min_events(2)
+    w = H.ActivityWindow(detected_mh=[750.0, 950.0, 960.0, 970.0])
+    v = H.stall_signal(w, 1000.0, cfg)
+    assert v.degraded is False
 
 
 def test_evaluate_overall_state_masking_and_isolation():
@@ -246,7 +297,8 @@ def test_evaluate_overall_state_masking_and_isolation():
     states = H.initial_states(1000.0)
     for f in H.REQUIRED_FACULTIES:  # everyone alive
         H.record_heartbeat(states, f, 1000.0)
-    w = H.ActivityWindow(detected_mh=[1000.0, 1000.0, 1000.0])  # consilium stall
+    # detections aged past the servicing grace → real stall
+    w = H.ActivityWindow(detected_mh=[800.0, 800.0, 800.0])  # consilium stall
     H.evaluate(states, w, 1000.0, 1000.0, cfg)
     assert states["consilium"].overall_state == "degraded"
     assert states["nexus"].activity_state == "ok"
@@ -255,6 +307,7 @@ def test_evaluate_overall_state_masking_and_isolation():
 class _Cfg:
     """Minimal config stand-in for the pure functions."""
 
+    ollama_timeout = 120  # servicing grace = one ollama_timeout
     praefectus_heartbeat_interval_s = 10.0
     praefectus_stale_after_s = 30.0
     praefectus_dead_after_s = 90.0

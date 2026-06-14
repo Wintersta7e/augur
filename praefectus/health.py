@@ -21,6 +21,7 @@ REQUIRED_FACULTIES: tuple[str, ...] = (
     "vox",
     "praefectus",
     "imperator",
+    "imperator_ii",
 )
 OPTIONAL_COMPONENTS: tuple[str, ...] = (
     "sensus.chess",
@@ -188,9 +189,23 @@ def liveness(state: FacultyHealth, now: float, started_at: float, cfg) -> str:
 def stall_signal(window: ActivityWindow, now: float, cfg) -> StallVerdict:
     """Windowed MEDIUM/HIGH nexus.detected vs {advice|suppressed|delivery_failure}
     deficit + a delivery_failure spike → degraded, with reasons. Rate-based (not
-    per-event) so anti-starvation coalescing within tolerance does not false-trigger."""
+    per-event) so anti-starvation coalescing within tolerance does not false-trigger.
+
+    consilium_stall counts only detections aged past the servicing grace (one
+    ollama_timeout — the worst-case time to turn a detection into a terminal via a
+    cold-start LLM call) as the deficit numerator: a detection still within the grace
+    is in-flight work consilium has not yet had time to service (a long LLM call, or a
+    fresh restart), NOT a stall. An idle consilium with no inbound detections never
+    trips this — there is no pending work to fail. Terminals still count over the whole
+    window, so a late terminal clears earlier pending work.
+    """
     cutoff = now - cfg.effective_stall_window_s
-    detected = [t for t in window.detected_mh if t >= cutoff]
+    # servicing grace = one ollama_timeout (cold-start call is the worst case), always
+    # < effective_stall_window_s (>=300 >= 2*timeout > timeout) so the band is non-empty.
+    grace_cutoff = now - float(cfg.ollama_timeout)
+    # deficit numerator = detections old enough to have produced a terminal by now;
+    # fresh in-flight detections are excluded so BUSY/restart does not false-trigger.
+    detected = [t for t in window.detected_mh if cutoff <= t <= grace_cutoff]
     terminals = (
         [t for t in window.advice if t >= cutoff]
         + [t for t in window.suppressed if t >= cutoff]

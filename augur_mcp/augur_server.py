@@ -6,6 +6,7 @@ PersistenceManager via context managers that close sockets on exit.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import re
@@ -16,7 +17,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, TypeVar
 
 import nats as nats_client
 import redis
@@ -27,6 +28,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from nexus import matrix_ops  # noqa: E402
 from tabula.config import AugurConfig  # noqa: E402
 from tabula.contracts import PerceptionEvent  # noqa: E402
 from tabula.persistence import PersistenceManager  # noqa: E402
@@ -50,6 +52,7 @@ COMPONENT_COMMANDS: dict[str, list[str]] = {
     "vox": [sys.executable, "-m", "vox.console_display"],
     "praefectus": [sys.executable, "-m", "praefectus.monitor"],
     "imperator": [sys.executable, "-m", "imperator.awareness"],
+    "imperator_ii": [sys.executable, "-m", "imperator.improver"],
 }
 
 # SEC-02: allowlist for domain / entity / stream_id values received through
@@ -114,6 +117,38 @@ def _persistence_ctx() -> Iterator[PersistenceManager]:
     """Context-managed PersistenceManager that closes the Redis client."""
     with _redis_ctx() as client:
         yield PersistenceManager(client)
+
+
+# ---------------------------------------------------------------------------
+# Uniform tool error handling
+# ---------------------------------------------------------------------------
+#
+# Most read-only inspection tools share the same failure contract: any
+# uncaught exception is returned as {"error": str(exc)} so the MCP caller
+# gets a structured result instead of a transport-level fault. `_tool_safe`
+# factors that wrapper out of every such tool body. It is applied UNDER
+# @mcp.tool() (the safety wrapper wraps the raw function first, then FastMCP
+# registers the wrapped callable); functools.wraps preserves the name,
+# docstring, and signature so the MCP-visible tool is unchanged.
+#
+# Tools with a different error contract (per-component {"status": "error"},
+# structured NATS handling, or no try/except at all) are intentionally NOT
+# decorated and keep their own bodies.
+
+_R = TypeVar("_R")
+
+
+def _tool_safe(fn: Callable[..., _R]) -> Callable[..., _R | dict[str, str]]:
+    """Wrap a tool so any uncaught Exception returns {"error": str(exc)}."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> _R | dict[str, str]:
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    return wrapper
 
 
 # ---------------------------------------------------------------------------
@@ -493,86 +528,77 @@ async def inject_sequence(
 
 
 @mcp.tool()
+@_tool_safe
 def get_baseline(domain: str, entity: str) -> dict[str, Any]:
     """Read the persisted EWMA baseline for a domain/entity pair."""
-    try:
-        with _persistence_ctx() as pm:
-            baseline = pm.load_baseline(domain, entity)
-        if baseline is None:
-            return {"error": "not found", "domain": domain, "entity": entity}
-        return {"domain": domain, "entity": entity, "baseline": baseline}
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        baseline = pm.load_baseline(domain, entity)
+    if baseline is None:
+        return {"error": "not found", "domain": domain, "entity": entity}
+    return {"domain": domain, "entity": entity, "baseline": baseline}
 
 
 @mcp.tool()
+@_tool_safe
 def get_last_anomaly(domain: str | None = None) -> dict[str, Any]:
     """Read the last anomaly event from Redis (ARCH-07: via PersistenceManager)."""
-    try:
-        with _persistence_ctx() as pm:
-            data = pm.load_last_anomaly()
-        if data is None:
-            return {"error": "not found"}
-        if domain is not None and data.get("domain") != domain:
-            return {"error": "not found", "requested_domain": domain}
-        return data
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        data = pm.load_last_anomaly()
+    if data is None:
+        return {"error": "not found"}
+    if domain is not None and data.get("domain") != domain:
+        return {"error": "not found", "requested_domain": domain}
+    return data
 
 
 @mcp.tool()
+@_tool_safe
 def get_last_advice(domain: str | None = None) -> dict[str, Any]:
     """Read the last LLM advice from Redis (ARCH-07: via PersistenceManager)."""
-    try:
-        with _persistence_ctx() as pm:
-            data = pm.load_last_advice()
-        if data is None:
-            return {"error": "not found"}
-        if domain is not None and data.get("domain") != domain:
-            return {"error": "not found", "requested_domain": domain}
-        return data
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        data = pm.load_last_advice()
+    if data is None:
+        return {"error": "not found"}
+    if domain is not None and data.get("domain") != domain:
+        return {"error": "not found", "requested_domain": domain}
+    return data
 
 
 @mcp.tool()
+@_tool_safe
 def get_pipeline_health() -> dict[str, Any]:
     """Read the Praefectus pipeline-health snapshot from Redis: per-faculty
     liveness/activity/overall states, degraded reasons, and uptime."""
-    try:
-        with _persistence_ctx() as pm:
-            data = pm.load_health_snapshot()
-        if data is None:
-            # Match the summarize() payload shape so consumers can read
-            # ts/started_at/uptime_s without a KeyError before the first snapshot.
-            return {
-                "status": "warming_up",
-                "started_at": 0.0,
-                "ts": 0.0,
-                "uptime_s": 0.0,
-                "faculties": {},
-            }
-        return data
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        data = pm.load_health_snapshot()
+    if data is None:
+        # Match the summarize() payload shape so consumers can read
+        # ts/started_at/uptime_s without a KeyError before the first snapshot.
+        return {
+            "status": "warming_up",
+            "started_at": 0.0,
+            "ts": 0.0,
+            "uptime_s": 0.0,
+            "faculties": {},
+        }
+    return data
 
 
 @mcp.tool()
+@_tool_safe
 def get_auspices() -> dict[str, Any]:
     """Imperator's outward read of the user's current situation.
 
     Returns the auspices snapshot dict (each field {value, fresh, as_of}), or
     {"status": "warming_up"} if Imperator has not produced one yet.
     """
-    try:
-        with _persistence_ctx() as pm:
-            data = pm.load_auspices()
-            return data if data is not None else {"status": "warming_up"}
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        data = pm.load_auspices()
+        return data if data is not None else {"status": "warming_up"}
 
 
 @mcp.tool()
+@_tool_safe
 def get_self_model() -> dict[str, Any]:
     """Imperator's inward read of Augur's own state.
 
@@ -580,71 +606,63 @@ def get_self_model() -> dict[str, Any]:
     dismissal_rate/advice_volume/pipeline_health/coverage/blind_spots/competence),
     or {"status": "warming_up"} if none yet.
     """
-    try:
-        with _persistence_ctx() as pm:
-            data = pm.load_self_model()
-            return data if data is not None else {"status": "warming_up"}
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        data = pm.load_self_model()
+        return data if data is not None else {"status": "warming_up"}
 
 
 @mcp.tool()
+@_tool_safe
 def get_session(session_id: str | None = None) -> dict[str, Any]:
     """Read session info from Redis.
 
     If ``session_id`` is None, returns the current session metadata.
     Otherwise returns the reflection report for that session.
     """
-    try:
-        with _persistence_ctx() as pm:
-            if session_id is None:
-                current = pm.load_current_session()
-                if current is None:
-                    return {"error": "no current session"}
-                return current
-            report = pm.load_reflection(session_id)
-        if report is None:
-            return {"error": "not found", "session_id": session_id}
-        return report
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        if session_id is None:
+            current = pm.load_current_session()
+            if current is None:
+                return {"error": "no current session"}
+            return current
+        report = pm.load_reflection(session_id)
+    if report is None:
+        return {"error": "not found", "session_id": session_id}
+    return report
 
 
 @mcp.tool()
+@_tool_safe
 def get_reflection(session_id: str | None = None) -> dict[str, Any]:
     """Read reflection report (ARCH-07: via PersistenceManager).
 
     If session_id is None, falls back to the current session from Redis.
     """
-    try:
-        with _persistence_ctx() as pm:
-            sid = session_id
-            if sid is None:
-                current = pm.load_current_session()
-                if current is not None:
-                    sid = current.get("session_id")
-            if sid is None:
-                return {"error": "no session_id available"}
-            report = pm.load_reflection(sid)
-        if report is None:
-            return {"error": "not found", "session_id": sid}
-        return report
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        sid = session_id
+        if sid is None:
+            current = pm.load_current_session()
+            if current is not None:
+                sid = current.get("session_id")
+        if sid is None:
+            return {"error": "no session_id available"}
+        report = pm.load_reflection(sid)
+    if report is None:
+        return {"error": "not found", "session_id": sid}
+    return report
 
 
 @mcp.tool()
+@_tool_safe
 def list_sessions(limit: int = 10) -> dict[str, Any]:
     """List recent sessions using feedback records."""
-    try:
-        with _persistence_ctx() as pm:
-            sessions = pm.get_all_feedback(limit=limit)
-        return {"sessions": sessions, "count": len(sessions)}
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        sessions = pm.get_all_feedback(limit=limit)
+    return {"sessions": sessions, "count": len(sessions)}
 
 
 @mcp.tool()
+@_tool_safe
 def get_thresholds(domain: str | None = None) -> dict[str, Any]:
     """Read detection thresholds from persistence or return config defaults.
 
@@ -654,31 +672,28 @@ def get_thresholds(domain: str | None = None) -> dict[str, Any]:
     Returns:
         Threshold dict.
     """
-    try:
-        if domain is None:
-            return {
-                "source": "config_defaults",
-                "default_sigma_threshold": _config.default_sigma_threshold,
-                "hst_threshold": _config.hst_threshold,
-                "severity_medium_sigma": _config.severity_medium_sigma,
-                "severity_high_sigma": _config.severity_high_sigma,
-                "min_observations": _config.min_observations,
-            }
-        with _persistence_ctx() as pm:
-            thresholds = pm.load_thresholds(domain)
-        if thresholds is None:
-            return {
-                "source": "config_defaults",
-                "domain": domain,
-                "default_sigma_threshold": _config.default_sigma_threshold,
-                "hst_threshold": _config.hst_threshold,
-                "severity_medium_sigma": _config.severity_medium_sigma,
-                "severity_high_sigma": _config.severity_high_sigma,
-                "min_observations": _config.min_observations,
-            }
-        return {"source": "persistence", "domain": domain, "thresholds": thresholds}
-    except Exception as exc:
-        return {"error": str(exc)}
+    if domain is None:
+        return {
+            "source": "config_defaults",
+            "default_sigma_threshold": _config.default_sigma_threshold,
+            "hst_threshold": _config.hst_threshold,
+            "severity_medium_sigma": _config.severity_medium_sigma,
+            "severity_high_sigma": _config.severity_high_sigma,
+            "min_observations": _config.min_observations,
+        }
+    with _persistence_ctx() as pm:
+        thresholds = pm.load_thresholds(domain)
+    if thresholds is None:
+        return {
+            "source": "config_defaults",
+            "domain": domain,
+            "default_sigma_threshold": _config.default_sigma_threshold,
+            "hst_threshold": _config.hst_threshold,
+            "severity_medium_sigma": _config.severity_medium_sigma,
+            "severity_high_sigma": _config.severity_high_sigma,
+            "min_observations": _config.min_observations,
+        }
+    return {"source": "persistence", "domain": domain, "thresholds": thresholds}
 
 
 @mcp.tool()
@@ -692,6 +707,7 @@ def get_config() -> dict[str, Any]:
 
 
 @mcp.tool()
+@_tool_safe
 def get_correlation_graph(session_id: str) -> dict[str, Any]:
     """Read a persisted cross-domain correlation graph from Redis.
 
@@ -704,28 +720,24 @@ def get_correlation_graph(session_id: str) -> dict[str, Any]:
         'links'), or {'error': 'not found'} if the session has no
         persisted graph.
     """
-    try:
-        with _persistence_ctx() as pm:
-            graph = pm.load_correlation_graph(session_id)
-        if graph is None:
-            return {"error": "not found", "session_id": session_id}
-        return {"session_id": session_id, "graph": graph}
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        graph = pm.load_correlation_graph(session_id)
+    if graph is None:
+        return {"error": "not found", "session_id": session_id}
+    return {"session_id": session_id, "graph": graph}
 
 
 @mcp.tool()
+@_tool_safe
 def list_correlation_graphs(limit: int = 50) -> dict[str, Any]:
     """List recent session ids that have persisted correlation graphs."""
-    try:
-        with _persistence_ctx() as pm:
-            ids = pm.list_correlation_graphs(limit=limit)
-        return {"session_ids": ids, "count": len(ids)}
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        ids = pm.list_correlation_graphs(limit=limit)
+    return {"session_ids": ids, "count": len(ids)}
 
 
 @mcp.tool()
+@_tool_safe
 def dump_correlation_window() -> dict[str, Any]:
     """Return the current contents of the correlator's sliding window.
 
@@ -734,49 +746,43 @@ def dump_correlation_window() -> dict[str, Any]:
     Useful for verifying what the correlator currently sees as "recent"
     when debugging correlation misses.
     """
-    try:
-        with _redis_ctx() as r:
-            raw_members = r.zrevrangebyscore(
-                "augur:nexus:window", "+inf", "-inf", withscores=True
-            )
-        window: list[dict[str, Any]] = []
-        for member, score in raw_members:
-            member_str = member.decode() if isinstance(member, bytes) else member
-            try:
-                anomaly = json.loads(member_str)
-            except json.JSONDecodeError:
-                continue
-            window.append({"anomaly": anomaly, "score": float(score)})
-        return {"window": window, "count": len(window)}
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _redis_ctx() as r:
+        raw_members = r.zrevrangebyscore(
+            "augur:nexus:window", "+inf", "-inf", withscores=True
+        )
+    window: list[dict[str, Any]] = []
+    for member, score in raw_members:
+        member_str = member.decode() if isinstance(member, bytes) else member
+        try:
+            anomaly = json.loads(member_str)
+        except json.JSONDecodeError:
+            continue
+        window.append({"anomaly": anomaly, "score": float(score)})
+    return {"window": window, "count": len(window)}
 
 
 @mcp.tool()
+@_tool_safe
 def get_escalation_matrix() -> dict[str, Any]:
     """Read the current cross-domain escalation matrix from Redis."""
-    try:
-        with _persistence_ctx() as pm:
-            matrix = pm.load_escalation_matrix()
-        if matrix is None:
-            return {"error": "not set"}
-        return {"matrix": matrix}
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        matrix = pm.load_escalation_matrix()
+    if matrix is None:
+        return {"error": "not set"}
+    return {"matrix": matrix}
 
 
 @mcp.tool()
+@_tool_safe
 def get_app_descriptors() -> dict[str, Any]:
     """Read the autonomously-learned app->descriptor map from Redis."""
-    try:
-        with _persistence_ctx() as pm:
-            descriptors = pm.load_app_descriptors()
-        return {"descriptors": descriptors}
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        descriptors = pm.load_app_descriptors()
+    return {"descriptors": descriptors}
 
 
 @mcp.tool()
+@_tool_safe
 def get_gate_silences(limit: int = 100) -> dict[str, Any]:
     """Return recent gate suppression records and per-arm counts.
 
@@ -791,104 +797,38 @@ def get_gate_silences(limit: int = 100) -> dict[str, Any]:
         Dict with 'silences' (list of records), 'arm_counts' (dict mapping
         arm name to suppression count), and 'total' (int).
     """
-    try:
-        with _persistence_ctx() as pm:
-            silences = pm.load_silence_records(limit=limit)
-        arm_counts: dict[str, int] = {}
-        for rec in silences:
-            arm = rec.get("arm")
-            if arm:
-                arm_counts[arm] = arm_counts.get(arm, 0) + 1
-        return {
-            "silences": silences,
-            "arm_counts": arm_counts,
-            "total": len(silences),
-        }
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        silences = pm.load_silence_records(limit=limit)
+    arm_counts: dict[str, int] = {}
+    for rec in silences:
+        arm = rec.get("arm")
+        if arm:
+            arm_counts[arm] = arm_counts.get(arm, 0) + 1
+    return {
+        "silences": silences,
+        "arm_counts": arm_counts,
+        "total": len(silences),
+    }
 
 
-_VALID_SEVERITIES = {"LOW", "MEDIUM", "HIGH"}
-
-# SEC-04: caps on matrix size. Without these, a caller could pass
-# thousands of rules or very long keys, amplifying memory and Redis-read
-# latency (the correlator re-reads the matrix on every anomaly event).
-# Bumped from 20 → 40 to accommodate 6 pairwise + 10 3-way defaults
-# plus room for future expansion.
-MAX_ESCALATION_RULES = 40
-MAX_ESCALATION_RULE_KEY_LEN = 32
-MAX_ESCALATION_VERSION_LEN = 32
-MAX_RULE_WINDOWS = 40
+@mcp.tool()
+@_tool_safe
+def get_proposals(limit: int = 50) -> dict[str, Any]:
+    """Imperator II's self-improvement proposals, newest first (read-only inspection)."""
+    with _persistence_ctx() as pm:
+        return {"proposals": pm.load_proposals(limit=max(1, min(limit, 200)))}
 
 
-def _validate_escalation_rules(rules: dict[str, str]) -> str | None:
-    """Return an error message if rules fail shape validation, else None."""
-    if not isinstance(rules, dict):
-        return "rules must be a dict"
-    if len(rules) > MAX_ESCALATION_RULES:
-        return f"too many rules: {len(rules)} (max {MAX_ESCALATION_RULES})"
-    for key, value in rules.items():
-        if not isinstance(key, str) or "+" not in key:
-            return f"invalid rule key (expected 'A+B'): {key!r}"
-        if len(key) > MAX_ESCALATION_RULE_KEY_LEN:
-            return (
-                f"rule key too long: {len(key)} chars "
-                f"(max {MAX_ESCALATION_RULE_KEY_LEN})"
-            )
-        parts = key.split("+")
-        if not all(p in _VALID_SEVERITIES for p in parts):
-            return (
-                f"invalid severity in rule key {key!r}: "
-                f"each part must be one of {sorted(_VALID_SEVERITIES)}"
-            )
-        if not isinstance(value, str) or value not in _VALID_SEVERITIES:
-            return (
-                f"invalid rule value for {key!r}: "
-                f"must be one of {sorted(_VALID_SEVERITIES)}, got {value!r}"
-            )
-    return None
-
-
-def _validate_escalation_matrix_rule_windows(
-    rule_windows: dict | None,
-    config: AugurConfig,
-) -> str | None:
-    """Validate optional rule_windows dict in the matrix.
-
-    Pairwise-only this phase (one '+'). Values must be numeric within
-    [correlation_window_min_s, correlation_window_max_s]. Returns None
-    if valid; an error string otherwise.
-    """
-    if rule_windows is None:
-        return None
-    if not isinstance(rule_windows, dict):
-        return "rule_windows must be a dict"
-    if len(rule_windows) > MAX_RULE_WINDOWS:
-        return f"too many rule_windows: {len(rule_windows)} (max {MAX_RULE_WINDOWS})"
-    for key, value in rule_windows.items():
-        if not isinstance(key, str):
-            return f"invalid rule_windows key type: {type(key).__name__}"
-        if len(key) > MAX_ESCALATION_RULE_KEY_LEN:
-            return (
-                f"rule_windows key '{key}' exceeds {MAX_ESCALATION_RULE_KEY_LEN} chars"
-            )
-        if key.count("+") != 1:
-            return (
-                f"rule_windows key '{key}' must be pairwise (one '+'); "
-                f"N-way windows are not yet supported."
-            )
-        if not isinstance(value, (int, float)):
-            return f"rule_windows value for '{key}' must be numeric"
-        if not (
-            config.correlation_window_min_s
-            <= float(value)
-            <= config.correlation_window_max_s
-        ):
-            return (
-                f"rule_windows[{key}]={value} outside "
-                f"[{config.correlation_window_min_s}, {config.correlation_window_max_s}]"
-            )
-    return None
+# Re-exported from nexus.matrix_ops so existing imports in tests keep working.
+_VALID_SEVERITIES = matrix_ops._VALID_SEVERITIES
+MAX_ESCALATION_RULES = matrix_ops.MAX_ESCALATION_RULES
+MAX_ESCALATION_RULE_KEY_LEN = matrix_ops.MAX_ESCALATION_RULE_KEY_LEN
+MAX_ESCALATION_VERSION_LEN = matrix_ops.MAX_ESCALATION_VERSION_LEN
+MAX_RULE_WINDOWS = matrix_ops.MAX_RULE_WINDOWS
+_validate_escalation_rules = matrix_ops._validate_escalation_rules
+_validate_escalation_matrix_rule_windows = (
+    matrix_ops._validate_escalation_matrix_rule_windows
+)
 
 
 @mcp.tool()
@@ -903,44 +843,14 @@ def set_escalation_matrix(
     matrix are preserved (so callers updating only ``rules`` don't erase
     tuned windows).
     """
-    # R2-SEC-01: the version string is written to Redis as part of the
-    # matrix JSON and the correlator re-reads the matrix on every anomaly
-    # event. An unbounded version string would amplify the per-event
-    # Redis read+deserialize cost. Cap it.
-    if not isinstance(version, str):
-        return {"error": f"version must be a string, got {type(version).__name__}"}
-    if len(version) > MAX_ESCALATION_VERSION_LEN:
-        return {
-            "error": (
-                f"version string too long: {len(version)} chars "
-                f"(max {MAX_ESCALATION_VERSION_LEN})"
-            )
-        }
-
-    err = _validate_escalation_rules(rules)
-    if err is not None:
-        return {"error": err}
-
-    config = AugurConfig.from_env()
-    err = _validate_escalation_matrix_rule_windows(rule_windows, config)
-    if err is not None:
-        return {"error": err}
-
-    matrix: dict = {"version": version, "rules": rules}
-    try:
-        with _persistence_ctx() as pm:
-            if rule_windows is None:
-                # Preserve existing rule_windows; don't erase tuned windows
-                # when the caller only wants to update rules.
-                existing = pm.load_escalation_matrix() or {}
-                if "rule_windows" in existing:
-                    matrix["rule_windows"] = existing["rule_windows"]
-            else:
-                matrix["rule_windows"] = rule_windows
-            pm.save_escalation_matrix(matrix)
-        return {"status": "saved", "matrix": matrix}
-    except Exception as exc:
-        return {"error": str(exc)}
+    with _persistence_ctx() as pm:
+        return matrix_ops.apply_matrix_update(
+            pm,
+            rules=rules,
+            rule_windows=rule_windows,
+            version=version,
+            mode="replace",
+        )
 
 
 # ===========================================================================

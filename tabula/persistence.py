@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Any  # noqa: F401  (used only in deferred annotations; PEP-563)
 
 import redis
 
@@ -35,6 +36,9 @@ MAX_GATE_DELIVERY_FAILURES: int = 500
 # (fail-open / fire-leaning); existing keys keep updating.
 MAX_GATE_STATE_KEYS: int = 2000
 MAX_MEMORY_ITEMS: int = 5000  # refuse-at-cap ceiling for Memoria tier sets (Lane 2)
+MAX_IMPERATOR_PROPOSALS: int = (
+    200  # newest-first capped append-log for Imperator proposals
+)
 
 # Default TTL for per-session Redis keys (feedback, correlation graph,
 # reflection report). Prevents indefinite growth beyond the 1000-entry
@@ -54,19 +58,50 @@ class PersistenceManager:
     def __init__(self, r: redis.Redis) -> None:
         self._r = r
 
+    # -- JSON get/set helpers ------------------------------------------------
+    # Collapse the uniform "set(key, json.dumps(x))" / "raw = get(key); return
+    # json.loads(raw) if raw is not None else default" boilerplate. Only the
+    # methods that match that pattern EXACTLY use these; archival writes, TTL
+    # variants with extra index bookkeeping, in-place updates, list ops, and
+    # corrupt-tolerant loaders keep their bespoke bodies.
+
+    def _set_json(self, key: str, value: object, *, ex: int | None = None) -> None:
+        """SET *key* to ``json.dumps(value)``, optionally with a TTL.
+
+        When *ex* is None the ``ex`` kwarg is omitted entirely (not passed as
+        ``ex=None``) so the underlying ``redis.set`` call is byte-for-byte the
+        same as the prior inline ``self._r.set(key, json.dumps(x))`` — callers
+        and tests that inspect the call args see no new keyword.
+        """
+        if ex is None:
+            self._r.set(key, json.dumps(value))
+        else:
+            self._r.set(key, json.dumps(value), ex=ex)
+
+    def _get_json(self, key: str, default: Any = None) -> Any:
+        """GET *key* and JSON-decode it; return *default* when the key is absent.
+
+        Mirrors the inline ``json.loads(raw) if raw is not None else default``
+        pattern verbatim — a present-but-malformed value still raises, matching
+        the prior behavior of every method that used this shape. Returns ``Any``
+        (like ``json.loads``) so callers keep their concrete ``dict | None``
+        return annotations without a cast.
+        """
+        raw = self._r.get(key)
+        if raw is None:
+            return default
+        return json.loads(raw)
+
     # -- Baseline persistence ------------------------------------------------
 
     def save_baseline(self, domain: str, entity: str, state_dict: dict) -> None:
         key = f"augur:vigil:profile:{domain}:{entity}"
-        self._r.set(key, json.dumps(state_dict))
+        self._set_json(key, state_dict)
         log.debug("Saved baseline %s", key)
 
     def load_baseline(self, domain: str, entity: str) -> dict | None:
         key = f"augur:vigil:profile:{domain}:{entity}"
-        raw = self._r.get(key)
-        if raw is None:
-            return None
-        return json.loads(raw)
+        return self._get_json(key)
 
     def scan_baseline_maturity(self, *, trained_obs: int = 15) -> dict:
         """Tally Vigil baselines by training maturity via SCAN (never KEYS).
@@ -128,10 +163,7 @@ class PersistenceManager:
 
     def get_feedback(self, session_id: str) -> dict | None:
         key = f"augur:responsum:{session_id}"
-        raw = self._r.get(key)
-        if raw is None:
-            return None
-        return json.loads(raw)
+        return self._get_json(key)
 
     def get_all_feedback(self, limit: int = 50) -> list[dict]:
         session_ids = self._r.lrange("augur:responsum:_index", 0, limit - 1)
@@ -241,44 +273,35 @@ class PersistenceManager:
 
     def save_thresholds(self, domain: str, thresholds_dict: dict) -> None:
         key = f"augur:vigil:thresholds:{domain}"
-        self._r.set(key, json.dumps(thresholds_dict))
+        self._set_json(key, thresholds_dict)
         log.debug("Saved thresholds for domain %s", domain)
 
     def load_thresholds(self, domain: str) -> dict | None:
         key = f"augur:vigil:thresholds:{domain}"
-        raw = self._r.get(key)
-        if raw is None:
-            return None
-        return json.loads(raw)
+        return self._get_json(key)
 
     # -- Escalation matrix (cross-domain correlator) -------------------------
 
     def save_escalation_matrix(self, matrix: dict) -> None:
         """Store the full matrix dict (including 'version' and 'rules' keys) as-is."""
         key = "augur:nexus:matrix"
-        self._r.set(key, json.dumps(matrix))
+        self._set_json(key, matrix)
         log.debug("Saved escalation matrix (version=%s)", matrix.get("version"))
 
     def load_escalation_matrix(self) -> dict | None:
         """Return the full matrix dict or None if not set."""
         key = "augur:nexus:matrix"
-        raw = self._r.get(key)
-        if raw is None:
-            return None
-        return json.loads(raw)
+        return self._get_json(key)
 
     def save_health_snapshot(self, snapshot: dict) -> None:
         """Store the Praefectus health snapshot (overwritten each tick; no TTL — live state)."""
         key = "augur:praefectus:health"
-        self._r.set(key, json.dumps(snapshot))
+        self._set_json(key, snapshot)
 
     def load_health_snapshot(self) -> dict | None:
         """Return the last Praefectus health snapshot or None if not set."""
         key = "augur:praefectus:health"
-        raw = self._r.get(key)
-        if raw is None:
-            return None
-        return json.loads(raw)
+        return self._get_json(key)
 
     # ── App descriptors (autonomous app->identity map) ────────────────────
 
@@ -348,10 +371,7 @@ class PersistenceManager:
     def load_correlation_graph(self, session_id: str) -> dict | None:
         """Load a persisted correlation graph or return None if absent."""
         key = f"augur:nexus:graph:{session_id}"
-        raw = self._r.get(key)
-        if raw is None:
-            return None
-        return json.loads(raw)
+        return self._get_json(key)
 
     def list_correlation_graphs(self, limit: int = 50) -> list[str]:
         """Return recent session ids that have persisted correlation graphs.
@@ -369,7 +389,7 @@ class PersistenceManager:
         Schema: {rule_key: {"confidence": float, "restore_target": str | None}}
         """
         key = "augur:nexus:escalation_confidence"
-        self._r.set(key, json.dumps(confidence_state))
+        self._set_json(key, confidence_state)
         log.debug(
             "Saved rule confidence state: %d rules",
             len(confidence_state),
@@ -378,10 +398,7 @@ class PersistenceManager:
     def load_rule_confidence(self) -> dict | None:
         """Return the per-rule confidence state dict or None if not set."""
         key = "augur:nexus:escalation_confidence"
-        raw = self._r.get(key)
-        if raw is None:
-            return None
-        return json.loads(raw)
+        return self._get_json(key)
 
     def save_rule_window_state(self, state: dict) -> None:
         """Persist per-rule observed-lag EWMA state.
@@ -389,7 +406,7 @@ class PersistenceManager:
         Schema: {rule_key: {"ewma_lag": float}}.
         Mirrors save_rule_confidence; written to a separate Redis key.
         """
-        self._r.set("augur:nexus:rule_window_state", json.dumps(state))
+        self._set_json("augur:nexus:rule_window_state", state)
 
     def load_rule_window_state(self) -> dict:
         """Load per-rule observed-lag EWMA state. Returns {} if absent or corrupt."""
@@ -440,58 +457,72 @@ class PersistenceManager:
         concerns and TTL is applied consistently.
         """
         key = f"augur:disciplina:{session_id}"
-        self._r.set(key, json.dumps(report_dict), ex=SESSION_KEY_TTL_S)
+        self._set_json(key, report_dict, ex=SESSION_KEY_TTL_S)
         log.debug("Saved reflection report for session %s", session_id)
 
     def load_reflection(self, session_id: str) -> dict | None:
         """Return a session's reflection report or None if not set."""
         key = f"augur:disciplina:{session_id}"
-        raw = self._r.get(key)
-        if raw is None:
-            return None
-        return json.loads(raw)
+        return self._get_json(key)
 
     # -- Last anomaly / last advice (live state, not per-session) -----------
 
     def save_last_anomaly(self, anomaly_dict: dict) -> None:
         """Persist the most recent anomaly event (no TTL — live state)."""
-        self._r.set("augur:vigil:last_anomaly", json.dumps(anomaly_dict))
+        self._set_json("augur:vigil:last_anomaly", anomaly_dict)
 
     def load_last_anomaly(self) -> dict | None:
         """Return the most recent anomaly event or None if not set."""
-        raw = self._r.get("augur:vigil:last_anomaly")
-        if raw is None:
-            return None
-        return json.loads(raw)
+        return self._get_json("augur:vigil:last_anomaly")
 
     def save_last_advice(self, advice_dict: dict) -> None:
         """Persist the most recent LLM advice payload (no TTL — live state)."""
-        self._r.set("augur:consilium:last_advice", json.dumps(advice_dict))
+        self._set_json("augur:consilium:last_advice", advice_dict)
 
     def load_last_advice(self) -> dict | None:
         """Return the most recent LLM advice payload or None if not set."""
-        raw = self._r.get("augur:consilium:last_advice")
-        if raw is None:
-            return None
-        return json.loads(raw)
+        return self._get_json("augur:consilium:last_advice")
 
     def save_auspices(self, snapshot: dict) -> None:
         """Overwrite the live auspices snapshot (no TTL)."""
-        self._r.set("augur:imperator:auspices", json.dumps(snapshot))
+        self._set_json("augur:imperator:auspices", snapshot)
 
     def load_auspices(self) -> dict | None:
         """Return the auspices snapshot, or None if absent."""
-        raw = self._r.get("augur:imperator:auspices")
-        return None if raw is None else json.loads(raw)
+        return self._get_json("augur:imperator:auspices")
 
     def save_self_model(self, snapshot: dict) -> None:
         """Overwrite the live self-model snapshot (no TTL)."""
-        self._r.set("augur:imperator:self_model", json.dumps(snapshot))
+        self._set_json("augur:imperator:self_model", snapshot)
 
     def load_self_model(self) -> dict | None:
         """Return the self-model snapshot, or None if absent."""
-        raw = self._r.get("augur:imperator:self_model")
-        return None if raw is None else json.loads(raw)
+        return self._get_json("augur:imperator:self_model")
+
+    def save_proposal(self, record: dict) -> None:
+        """Append a terminal-status proposal record (newest-first, capped)."""
+        key = "augur:imperator:proposals"
+        self._r.lpush(key, json.dumps(record))
+        self._r.ltrim(key, 0, MAX_IMPERATOR_PROPOSALS - 1)
+
+    def load_proposals(self, *, limit: int = 50) -> list[dict]:
+        """Up to *limit* recent proposals, newest first. [] on corrupt/absent."""
+        raw = self._r.lrange("augur:imperator:proposals", 0, limit - 1)
+        try:
+            return [json.loads(e) for e in raw]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning(
+                "augur:imperator:proposals contained a corrupt entry; returning []"
+            )
+            return []
+
+    def mark_proposal_applied(self, dedupe_key: str, *, ttl_s: int) -> None:
+        """Durable applied-dedup marker (TTL'd), independent of the capped log."""
+        self._r.set(f"augur:imperator:applied:{dedupe_key}", "1", ex=int(ttl_s))
+
+    def is_proposal_applied(self, dedupe_key: str) -> bool:
+        """True if a recent (un-expired) apply of this dedupe_key exists."""
+        return bool(self._r.exists(f"augur:imperator:applied:{dedupe_key}"))
 
     # -- Current session --------------------------------------------------
 
@@ -503,10 +534,7 @@ class PersistenceManager:
         method so the key namespace is discoverable and the private
         client is not leaking.
         """
-        raw = self._r.get("augur:session:current")
-        if raw is None:
-            return None
-        return json.loads(raw)
+        return self._get_json("augur:session:current")
 
     # -- Correlation tuning idempotency marker ------------------------------
 
@@ -766,7 +794,7 @@ class PersistenceManager:
 
     def save_advice_rate(self, entry: dict) -> None:
         """Persist the global advice-rate EWMA state."""
-        self._r.set("augur:limen:advice_rate", json.dumps(entry))
+        self._set_json("augur:limen:advice_rate", entry)
 
     def load_advice_rate(self) -> dict:
         """Return advice-rate state, or {} if missing/corrupt."""
@@ -873,8 +901,7 @@ class PersistenceManager:
         self._r.sadd(f"augur:memoria:tier:{state['tier']}", memory_id)
 
     def load_memory_state(self, memory_id: str) -> dict | None:
-        raw = self._r.get(f"augur:memoria:dsr:{memory_id}")
-        return None if raw is None else json.loads(raw)
+        return self._get_json(f"augur:memoria:dsr:{memory_id}")
 
     def list_memory_ids(self, tier: str) -> list[str]:
         # Decode set members: the live connect_redis client has NO
@@ -896,8 +923,7 @@ class PersistenceManager:
         return out
 
     def load_archived_memory(self, memory_id: str) -> dict | None:
-        raw = self._r.get(f"augur:memoria:archive:{memory_id}")
-        return None if raw is None else json.loads(raw)
+        return self._get_json(f"augur:memoria:archive:{memory_id}")
 
     def is_session_processed(self, session_id: str) -> bool:
         return bool(self._r.sismember("augur:memoria:processed_sessions", session_id))

@@ -443,6 +443,24 @@ class PersistenceManager:
             return None
         return json.loads(raw)
 
+    def save_auspices(self, snapshot: dict) -> None:
+        """Overwrite the live auspices snapshot (no TTL)."""
+        self._r.set("augur:imperator:auspices", json.dumps(snapshot))
+
+    def load_auspices(self) -> dict | None:
+        """Return the auspices snapshot, or None if absent."""
+        raw = self._r.get("augur:imperator:auspices")
+        return None if raw is None else json.loads(raw)
+
+    def save_self_model(self, snapshot: dict) -> None:
+        """Overwrite the live self-model snapshot (no TTL)."""
+        self._r.set("augur:imperator:self_model", json.dumps(snapshot))
+
+    def load_self_model(self) -> dict | None:
+        """Return the self-model snapshot, or None if absent."""
+        raw = self._r.get("augur:imperator:self_model")
+        return None if raw is None else json.loads(raw)
+
     # -- Current session --------------------------------------------------
 
     def load_current_session(self) -> dict | None:

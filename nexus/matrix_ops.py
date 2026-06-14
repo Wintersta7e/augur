@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 
+import redis
+
 from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
 
@@ -120,7 +122,11 @@ def apply_matrix_update(
         _retries: Number of WATCH/CAS retry attempts on contention.
 
     Returns:
-        {"status": "saved", "matrix": {...}} on success, {"error": "..."} on failure.
+        On success: {"status": "saved", "matrix": {...}, "prior_rules": {key: old|None},
+        "prior_rule_windows": {key: old|None}} — prior_* hold the pre-write values, read
+        from the SAME committed WATCH snapshot, for exactly the keys in rules/rule_windows
+        (so a reversible caller anchors rollback to the real prior, not a separate read).
+        On failure: {"error": "..."}.
     """
     if mode not in ("replace", "patch"):
         return {"error": f"invalid mode: {mode}"}
@@ -137,6 +143,7 @@ def apply_matrix_update(
                 raw = pipe.get(_MATRIX_KEY)
                 current = {} if raw is None else json.loads(raw)
                 cur_rules = dict(current.get("rules", {}))
+                cur_windows = dict(current.get("rule_windows", {}))
                 merged_rules = (
                     (rules or {})
                     if mode == "replace"
@@ -145,10 +152,7 @@ def apply_matrix_update(
                 if rule_windows is None:
                     merged_windows = current.get("rule_windows")
                 elif mode == "patch":
-                    merged_windows = {
-                        **dict(current.get("rule_windows", {})),
-                        **rule_windows,
-                    }
+                    merged_windows = {**cur_windows, **rule_windows}
                 else:
                     merged_windows = rule_windows
                 eff_version = (
@@ -156,10 +160,20 @@ def apply_matrix_update(
                     if version is not None
                     else (current.get("version", "1.0") if mode == "patch" else "1.0")
                 )
-                err = _validate_escalation_rules(merged_rules) or (
-                    _validate_escalation_matrix_rule_windows(
+                # Validate the EFFECTIVE version too: a preserved (patch-mode) version
+                # read from an already-corrupt matrix must not be silently re-committed.
+                ver_err = (
+                    None
+                    if isinstance(eff_version, str)
+                    and len(eff_version) <= MAX_ESCALATION_VERSION_LEN
+                    else "version invalid or too long"
+                )
+                err = (
+                    _validate_escalation_rules(merged_rules)
+                    or _validate_escalation_matrix_rule_windows(
                         merged_windows or None, config
                     )
+                    or ver_err
                 )
                 if err is not None:
                     pipe.unwatch()
@@ -170,9 +184,16 @@ def apply_matrix_update(
                 pipe.multi()
                 pipe.set(_MATRIX_KEY, json.dumps(matrix))
                 pipe.execute()
-                return {"status": "saved", "matrix": matrix}
+                return {
+                    "status": "saved",
+                    "matrix": matrix,
+                    "prior_rules": {k: cur_rules.get(k) for k in (rules or {})},
+                    "prior_rule_windows": {
+                        k: cur_windows.get(k) for k in (rule_windows or {})
+                    },
+                }
+        except redis.WatchError:
+            continue
         except Exception as exc:
-            if "WatchError" in type(exc).__name__:
-                continue
             return {"error": str(exc)}
     return {"error": "matrix update failed after retries (contention)"}

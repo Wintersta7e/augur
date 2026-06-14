@@ -36,6 +36,7 @@ from tabula.connections import connect_redis
 from tabula.heartbeat import start_heartbeat
 from tabula.persistence import PersistenceManager
 from nexus.correlator import DEFAULT_ESCALATION_MATRIX
+from nexus import matrix_ops
 from consilium.prompt_safety import (
     violates_forbidden_patterns as _violates_forbidden_patterns,
 )
@@ -1398,29 +1399,42 @@ async def run_reflection(
         )
         matrix_save_ok = True
         if matrix_changed:
-            merged: dict[str, Any] = {
-                "version": current_matrix.get("version", "1.0"),
-                "rules": (
-                    matrix_tuning["new_matrix"]["rules"]
-                    if matrix_tuning.get("new_matrix") is not None
-                    else dict(current_matrix.get("rules", {}))
-                ),
-                "rule_windows": (
-                    window_tuning["new_rule_windows"]
-                    if window_tuning.get("new_rule_windows") is not None
-                    else dict(current_matrix.get("rule_windows", {}))
-                ),
+            cur_rules = dict(current_matrix.get("rules", {}))
+            new_rules = (
+                matrix_tuning["new_matrix"]["rules"]
+                if matrix_tuning.get("new_matrix") is not None
+                else cur_rules
+            )
+            cur_windows = dict(current_matrix.get("rule_windows", {}))
+            new_windows = (
+                window_tuning["new_rule_windows"]
+                if window_tuning.get("new_rule_windows") is not None
+                else cur_windows
+            )
+            # Patch ONLY changed keys through the shared CAS helper. The matrix now
+            # has multiple writers (Disciplina + Imperator II); a whole-matrix
+            # overwrite would clobber a concurrent II patch to OTHER rules/windows.
+            changed_rules = {
+                k: v for k, v in new_rules.items() if cur_rules.get(k) != v
             }
-            try:
-                pm.save_escalation_matrix(merged)
+            changed_windows = {
+                k: v for k, v in new_windows.items() if cur_windows.get(k) != v
+            }
+            res = matrix_ops.apply_matrix_update(
+                pm,
+                rules=changed_rules or None,
+                rule_windows=changed_windows or None,
+                mode="patch",
+            )
+            if "error" in res:
+                matrix_save_ok = False
+                log.error("Merged matrix CAS update failed: %s", res["error"])
+            else:
                 log.info(
                     "Merged matrix updated: matrix=%s, windows=%s",
                     "yes" if matrix_tuning.get("new_matrix") else "unchanged",
                     "yes" if window_tuning.get("new_rule_windows") else "unchanged",
                 )
-            except redis.RedisError as exc:
-                matrix_save_ok = False
-                log.error("Merged matrix save failed: %s", exc)
 
         state_save_ok = True
         if matrix_save_ok:

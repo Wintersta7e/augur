@@ -29,6 +29,7 @@ from tabula.config import AugurConfig
 from tabula.connections import connect_redis
 from tabula.heartbeat import start_heartbeat
 from tabula.persistence import PersistenceManager
+from nexus import matrix_ops
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -480,21 +481,20 @@ def ensure_matrix_seeded(pm: PersistenceManager) -> dict:
     rule_windows in an existing matrix are preserved untouched.
     """
     existing = pm.load_escalation_matrix()
+    default_rules = DEFAULT_ESCALATION_MATRIX["rules"]
     if existing is None:
-        pm.save_escalation_matrix(DEFAULT_ESCALATION_MATRIX)
+        # Seed the full default through the shared CAS writer (patch from empty).
+        res = matrix_ops.apply_matrix_update(
+            pm,
+            rules=default_rules,
+            version=DEFAULT_ESCALATION_MATRIX.get("version", "1.0"),
+            mode="patch",
+        )
         log.info("Seeded default escalation matrix (version=1.0)")
-        return DEFAULT_ESCALATION_MATRIX
+        return res.get("matrix", DEFAULT_ESCALATION_MATRIX)
 
     existing_rules = existing.get("rules", {})
-    default_rules = DEFAULT_ESCALATION_MATRIX["rules"]
-
-    merged_rules = dict(existing_rules)
-    added: list[str] = []
-    for k, v in default_rules.items():
-        if k not in merged_rules:
-            merged_rules[k] = v
-            added.append(k)
-
+    added = [k for k in default_rules if k not in existing_rules]
     if not added:
         log.info(
             "Loaded existing escalation matrix (version=%s, no defaults missing)",
@@ -502,20 +502,17 @@ def ensure_matrix_seeded(pm: PersistenceManager) -> dict:
         )
         return existing
 
-    merged = {
-        "version": existing.get("version", "1.0"),
-        "rules": merged_rules,
-    }
-    if "rule_windows" in existing:
-        merged["rule_windows"] = existing["rule_windows"]
-
-    pm.save_escalation_matrix(merged)
+    # Add ONLY the missing default rules via a CAS patch, so operator changes and a
+    # concurrent Imperator-II patch to other rules/windows are never clobbered.
+    res = matrix_ops.apply_matrix_update(
+        pm, rules={k: default_rules[k] for k in added}, mode="patch"
+    )
     log.info(
         "Seeded %d missing default rules into existing matrix: %s",
         len(added),
         ", ".join(added),
     )
-    return merged
+    return res.get("matrix", existing)
 
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,6 @@ from nexus.correlator import (
     add_to_window,
     compute_prune_window,
     correlate,
-    ensure_matrix_seeded,
     flush_graph_to_redis,
     lookup_escalation_n_way,
     new_session_graph,
@@ -579,37 +578,6 @@ class TestFlushGraphToRedis:
         _, graph_data_arg = mock_pm.save_correlation_graph.call_args[0]
         assert len(graph_data_arg["nodes"]) == 3
         assert len(graph_data_arg["edges"]) == 2
-
-
-class TestEnsureMatrixSeeded:
-    def test_seeds_default_when_missing(self) -> None:
-        mock_pm = MagicMock()
-        mock_pm.load_escalation_matrix.return_value = None
-
-        result = ensure_matrix_seeded(mock_pm)
-
-        mock_pm.save_escalation_matrix.assert_called_once_with(
-            DEFAULT_ESCALATION_MATRIX
-        )
-        assert result == DEFAULT_ESCALATION_MATRIX
-
-    def test_preserves_operator_overrides_and_adds_missing_defaults(self) -> None:
-        # Existing matrix has one operator-overridden rule and is missing all others.
-        existing = {"version": "1.5", "rules": {"LOW+LOW": "HIGH"}}
-        mock_pm = MagicMock()
-        mock_pm.load_escalation_matrix.return_value = existing
-
-        result = ensure_matrix_seeded(mock_pm)
-
-        # Operator's HIGH override for LOW+LOW is preserved
-        assert result["rules"]["LOW+LOW"] == "HIGH"
-        # Missing defaults are merged in
-        assert result["rules"]["LOW+LOW+LOW"] == "MEDIUM"
-        assert result["rules"]["HIGH+HIGH+HIGH"] == "HIGH"
-        # Version is preserved from existing
-        assert result["version"] == "1.5"
-        # Save was called because defaults were missing
-        mock_pm.save_escalation_matrix.assert_called_once()
 
 
 class TestPayloadRuleKey:

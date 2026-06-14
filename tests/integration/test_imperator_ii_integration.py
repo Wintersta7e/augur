@@ -17,14 +17,19 @@ from tests.integration.conftest import (
 @pytest.mark.asyncio
 async def test_imperator_ii_emits_proposal(pipeline, nats_conn, redis_client):
     """Disciplina completion triggers Imperator II to emit a self-improvement proposal."""
-    # Pre-seed a self-model that is already fresh relative to the (past) reflection
-    # timestamp we will publish — so the freshness gate passes immediately.
+    # Pre-seed a self-model whose FOLDED reflection (reflection_ts) is already
+    # newer than the past-dated reflection timestamp we publish below, so the
+    # freshness gate (_await_fresh content-checks reflection_ts, NOT generated_at)
+    # passes immediately and the cycle actually runs. Seeding only generated_at —
+    # as the original test did — leaves reflection_ts=0.0, which the gate rejects,
+    # making the cycle SKIP and the test pass vacuously.
     redis_client.set(
         "augur:imperator:self_model",
         json.dumps(
             {
                 "schema_version": 1,
-                "generated_at": 4102444800.0,  # year 2100 — always newer than past ts
+                "generated_at": 4102444800.0,  # year 2100
+                "reflection_ts": 4102444800.0,  # year 2100 — newer than the 2020 trigger
                 "session_id": "itest",
                 "blind_spots": {
                     "value": [

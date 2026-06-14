@@ -207,9 +207,343 @@ def test_run_cycle_applies_when_armed_and_is_idempotent():
     assert [p["status"] for p in pm.load_proposals()].count("skipped") == 1
 
 
+def test_run_cycle_dedupes_duplicate_target_within_cycle():
+    # BUG C: two proposals with the same (kind, target) in ONE reasoner batch must
+    # be deduped within the cycle — only the first (highest-ranked) is logged and
+    # emitted; the second is dropped. The applied-TTL marker only blocks across
+    # cycles, so without an in-cycle guard both slip through.
+    from imperator import proposals as P
+
+    pm = PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
+    pm.save_escalation_matrix({"version": "v1", "rules": {"LOW+LOW": "LOW"}})
+    pm.save_self_model(
+        {
+            "schema_version": 1,
+            "generated_at": 200.0,
+            "reflection_ts": 200.0,
+            "session_id": "s1",
+            "recent_self_tuning": {"value": {}, "fresh": True},
+        }
+    )
+
+    async def fake_gen(sm, *, client, config, now):
+        return [
+            P.make_proposal(
+                kind="escalation_rule",
+                target="LOW+LOW",
+                action={"target": "MEDIUM"},
+                rationale="first",
+                rank=1,
+                now=now,
+            ),
+            P.make_proposal(
+                kind="escalation_rule",
+                target="LOW+LOW",
+                action={"target": "HIGH"},
+                rationale="dup",
+                rank=2,
+                now=now,
+            ),
+        ]
+
+    published = []
+    asyncio.run(
+        improver.run_cycle(
+            pm,
+            _Cfg(),
+            now=300.0,
+            session_id="s1",
+            generate_fn=fake_gen,
+            client=None,
+            publish=lambda subj, data: published.append((subj, json.loads(data))),
+        )
+    )
+    props = pm.load_proposals()
+    assert len(props) == 1
+    assert props[0]["rationale"] == "first"  # the higher-ranked one survives
+    assert [s for s, _ in published].count("augur.imperator.proposal") == 1
+
+
+# ---------------------------------------------------------------------------
+# on_msg / run() orchestration (BUG A head-of-line + BUG B lock serialization)
+# ---------------------------------------------------------------------------
+
+
+class _Msg:
+    def __init__(self, subject, payload):
+        self.subject = subject
+        self.data = json.dumps(payload).encode()
+
+
+def _seed_fresh(pm):
+    pm.save_escalation_matrix({"version": "v1", "rules": {"LOW+LOW": "LOW"}})
+    pm.save_self_model(
+        {
+            "schema_version": 1,
+            "generated_at": 200.0,
+            # reflection_ts newer than any past-dated trigger -> freshness gate passes
+            "reflection_ts": 4_102_444_800.0,  # year 2100
+            "session_id": "s1",
+            "blind_spots": {
+                "value": [
+                    {
+                        "kind": "low_confidence_rule",
+                        "detail": "x",
+                        "evidence": "LOW+LOW",
+                    }
+                ],
+                "fresh": True,
+            },
+            "recent_self_tuning": {"value": {}, "fresh": True},
+        }
+    )
+
+
+def _harness(pm, cfg, *, monkeypatch, last_run_at=0.0):
+    """Build a make_on_msg wired to a synchronous spawn that records the cycle
+    tasks but does NOT run them, so tests can drive scheduling explicitly."""
+    lock = asyncio.Lock()
+    last_run = [last_run_at]
+    spawned = []
+
+    def spawn(coro):
+        spawned.append(coro)
+
+    # generate_proposals is stubbed via the reasoner so no Ollama/network is hit.
+    async def fake_gen(self_model, *, client, config, now):
+        from imperator import proposals as P
+
+        return [
+            P.make_proposal(
+                kind="escalation_rule",
+                target="LOW+LOW",
+                action={"target": "MEDIUM"},
+                rationale="r",
+                now=now,
+            )
+        ]
+
+    monkeypatch.setattr(improver.reasoner, "generate_proposals", fake_gen)
+    on_msg = improver.make_on_msg(
+        pm,
+        cfg,
+        None,
+        lock=lock,
+        last_run=last_run,
+        spawn=spawn,
+        publish=lambda s, d: None,
+    )
+    return on_msg, lock, last_run, spawned
+
+
+def test_on_msg_ignores_unconsumed_subject(monkeypatch):
+    pm = PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
+    _seed_fresh(pm)
+    on_msg, _lock, _last, spawned = _harness(pm, _Cfg(), monkeypatch=monkeypatch)
+    asyncio.run(on_msg(_Msg("augur.consilium.advice", {"session_id": "s1"})))
+    assert spawned == []  # not a consumed subject -> no cycle
+
+
+def test_on_msg_rate_limited(monkeypatch):
+    pm = PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
+    _seed_fresh(pm)
+    cfg = _Cfg()
+    cfg.imperator_ii_min_interval_s = 10_000_000.0  # effectively always rate-limited
+    on_msg, _lock, _last, spawned = _harness(
+        pm, cfg, monkeypatch=monkeypatch, last_run_at=__import__("time").time()
+    )
+    asyncio.run(on_msg(_Msg("augur.disciplina.complete", {"session_id": "s1"})))
+    assert spawned == []  # within the min-interval -> dropped before spawning
+
+
+def test_on_msg_spawns_cycle_and_does_not_block_on_freshness(monkeypatch):
+    # BUG A: the handler must return PROMPTLY — the freshness wait happens inside
+    # the spawned task, not on the dispatch path. We prove this by making the
+    # cycle's freshness wait never resolve; on_msg must still complete and the
+    # rate-limit anchor must be set the instant the trigger is accepted.
+    pm = PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
+    pm.save_self_model({"schema_version": 1, "reflection_ts": 0.0})  # never fresh
+
+    blocked = asyncio.Event()
+
+    async def never_fresh(_pm, _epoch, _timeout, tick_s=0.5):
+        blocked.set()
+        await asyncio.Event().wait()  # block forever
+        return False
+
+    monkeypatch.setattr(improver, "_await_fresh", never_fresh)
+    cfg = _Cfg()
+    cfg.imperator_ii_min_interval_s = 0.0
+    cfg.imperator_ii_freshness_timeout_s = 60.0
+
+    async def scenario():
+        lock = asyncio.Lock()
+        last_run = [0.0]
+        tasks = []
+
+        def spawn(coro):
+            tasks.append(asyncio.ensure_future(coro))
+
+        on_msg = improver.make_on_msg(
+            pm,
+            cfg,
+            None,
+            lock=lock,
+            last_run=last_run,
+            spawn=spawn,
+            publish=lambda s, d: None,
+        )
+        # A future-dated trigger so epoch is truthy and the freshness gate runs.
+        await on_msg(
+            _Msg(
+                "augur.disciplina.complete", {"timestamp": "2030-01-01T00:00:00+00:00"}
+            )
+        )
+        # Handler returned without waiting for freshness:
+        assert last_run[0] > 0.0  # rate-limit anchored at acceptance
+        assert lock.locked()  # cycle task holds the lock (in flight)
+        # Let the spawned task run up to its (forever) freshness wait.
+        await asyncio.sleep(0)
+        assert blocked.is_set()  # the wait is happening in the TASK, not the handler
+        for t in tasks:
+            t.cancel()
+        return True
+
+    assert asyncio.run(scenario()) is True
+
+
+def test_on_msg_drops_trigger_while_cycle_in_flight(monkeypatch):
+    # BUG B: at most one cycle in flight. While the first cycle holds the lock, a
+    # second consumed trigger is dropped (not queued) — proven by only one spawn.
+    pm = PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
+    pm.save_self_model({"schema_version": 1, "reflection_ts": 0.0})
+
+    async def never_fresh(_pm, _epoch, _timeout, tick_s=0.5):
+        await asyncio.Event().wait()
+        return False
+
+    monkeypatch.setattr(improver, "_await_fresh", never_fresh)
+    cfg = _Cfg()
+    cfg.imperator_ii_min_interval_s = 0.0
+
+    async def scenario():
+        lock = asyncio.Lock()
+        last_run = [0.0]
+        tasks = []
+
+        def spawn(coro):
+            tasks.append(asyncio.ensure_future(coro))
+
+        on_msg = improver.make_on_msg(
+            pm,
+            cfg,
+            None,
+            lock=lock,
+            last_run=last_run,
+            spawn=spawn,
+            publish=lambda s, d: None,
+        )
+        m = _Msg(
+            "augur.disciplina.complete", {"timestamp": "2030-01-01T00:00:00+00:00"}
+        )
+        await on_msg(m)  # accepted, lock now held by task
+        await on_msg(m)  # second trigger: lock held -> dropped
+        assert len(tasks) == 1
+        for t in tasks:
+            t.cancel()
+        return True
+
+    assert asyncio.run(scenario()) is True
+
+
+def test_on_msg_freshness_skip_emits_no_proposal(monkeypatch):
+    # The freshness-skip path: epoch is truthy but the model never folds it in
+    # time -> the cycle returns without logging/emitting any proposal, and no
+    # failure is published (a skip is not a failure).
+    pm = PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
+    pm.save_self_model({"schema_version": 1, "reflection_ts": 0.0})
+
+    async def stale(_pm, _epoch, _timeout, tick_s=0.5):
+        return False  # never fresh
+
+    monkeypatch.setattr(improver, "_await_fresh", stale)
+    cfg = _Cfg()
+    cfg.imperator_ii_min_interval_s = 0.0
+    published = []
+
+    async def scenario():
+        await improver._cycle(
+            pm,
+            cfg,
+            None,
+            payload={"timestamp": "2030-01-01T00:00:00+00:00", "session_id": "s1"},
+            now=1.0,
+            publish=lambda s, d: published.append((s, json.loads(d))),
+        )
+
+    asyncio.run(scenario())
+    assert published == []  # neither a proposal nor a failure
+    assert pm.load_proposals() == []
+
+
+def test_on_msg_lock_released_after_cycle_completes(monkeypatch):
+    # After a normal cycle the lock is released, so a later (non-rate-limited)
+    # trigger is accepted again.
+    pm = PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
+    _seed_fresh(pm)
+    cfg = _Cfg()
+    cfg.imperator_ii_min_interval_s = 0.0
+
+    async def scenario():
+        lock = asyncio.Lock()
+        last_run = [0.0]
+        tasks = []
+
+        def spawn(coro):
+            tasks.append(asyncio.ensure_future(coro))
+
+        async def fake_gen(self_model, *, client, config, now):
+            from imperator import proposals as P
+
+            return [
+                P.make_proposal(
+                    kind="escalation_rule",
+                    target="LOW+LOW",
+                    action={"target": "MEDIUM"},
+                    rationale="r",
+                    now=now,
+                )
+            ]
+
+        monkeypatch.setattr(improver.reasoner, "generate_proposals", fake_gen)
+        on_msg = improver.make_on_msg(
+            pm,
+            cfg,
+            None,
+            lock=lock,
+            last_run=last_run,
+            spawn=spawn,
+            publish=lambda s, d: None,
+        )
+        await on_msg(
+            _Msg(
+                "augur.disciplina.complete",
+                {"timestamp": "2020-01-01T00:00:00+00:00", "session_id": "s1"},
+            )
+        )
+        await asyncio.gather(*tasks)
+        assert not lock.locked()  # released after the cycle finished
+        assert len(pm.load_proposals()) == 1
+        return True
+
+    assert asyncio.run(scenario()) is True
+
+
 class _Cfg:
     imperator_ii_apply_enabled = False
     imperator_ii_max_proposals_per_cycle = 5
+    imperator_ii_min_interval_s = 60.0
+    imperator_ii_freshness_timeout_s = 15.0
     imperator_ii_dedupe_staleness_s = 86400.0
     min_prompt_len = 20
     prompt_forbidden_patterns = ()

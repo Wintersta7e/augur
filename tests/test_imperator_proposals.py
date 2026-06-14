@@ -77,3 +77,67 @@ def test_gate_rejects_unsafe_prompt():
         P.gate(p, cfg=_Cfg(), recent_self_tuning={}, applied_keys=set())["status"]
         == "logged"
     )
+
+
+def test_matches_recent_defers_rule_when_matrix_mutated():
+    p = P.normalize_klass(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "MEDIUM"},
+            rationale="r",
+        )
+    )
+    moved = {"matrix_mutated": True, "windows_tuned": False, "sigma_values": {}}
+    assert (
+        P.gate(dict(p), cfg=_Cfg(), recent_self_tuning=moved, applied_keys=set())[
+            "status"
+        ]
+        == "skipped"
+    )
+    still = {"matrix_mutated": False, "windows_tuned": False, "sigma_values": {}}
+    assert (
+        P.gate(dict(p), cfg=_Cfg(), recent_self_tuning=still, applied_keys=set())[
+            "status"
+        ]
+        != "skipped"
+    )
+
+
+def test_matches_recent_no_substring_collision_on_domain():
+    # The old substring scan skipped domain "type" merely because "type" is a
+    # substring of "typing" in the recent blob; the structured check keys off
+    # the exact domain, so "type" is not deferred.
+    p = P.normalize_klass(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="type",
+            action={"domain": "type", "text": "x" * 40},
+            rationale="r",
+        )
+    )
+    recent = {"prompt_mutated": False, "sigma_values": {"typing": 3.0}}
+    assert (
+        P.gate(dict(p), cfg=_Cfg(), recent_self_tuning=recent, applied_keys=set())[
+            "status"
+        ]
+        != "skipped"
+    )
+
+
+def test_matches_recent_defers_prompt_when_domain_sigma_moved():
+    p = P.normalize_klass(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="typing",
+            action={"domain": "typing", "text": "x" * 40},
+            rationale="r",
+        )
+    )
+    recent = {"prompt_mutated": False, "sigma_values": {"typing": 3.0}}
+    assert (
+        P.gate(dict(p), cfg=_Cfg(), recent_self_tuning=recent, applied_keys=set())[
+            "status"
+        ]
+        == "skipped"
+    )

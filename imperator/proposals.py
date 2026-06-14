@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import uuid
 
 from consilium.prompt_safety import is_prompt_acceptable
@@ -21,6 +20,15 @@ _AUTO_APPLY_KINDS = {"escalation_rule", "prompt_strategy"}
 
 
 def dedupe_key(kind: str, target: str) -> str:
+    """Idempotency/anti-thrash identity: (kind, target) only — NOT the action.
+
+    Deliberate: once any change to a target is applied, the applied-TTL key
+    (augur:imperator:applied:{key}, imperator_ii_dedupe_staleness_s) blocks EVERY
+    further proposal for that target — including an opposite-direction correction
+    — until the window expires. This is "one move per target per staleness window"
+    anti-oscillation; the trade-off is that a wrong move waits out the TTL rather
+    than being walked back through the normal gate.
+    """
     return hashlib.sha256(f"{kind}\x00{target}".encode()).hexdigest()[:16]
 
 
@@ -87,4 +95,25 @@ def gate(p: dict, *, cfg, recent_self_tuning: dict, applied_keys: set) -> dict:
 
 
 def _matches_recent(p: dict, recent: dict) -> bool:
-    return bool(recent) and p["target"] in json.dumps(recent)
+    """True if Disciplina (rung-0 autonomic tuning) just changed the same surface
+    this proposal targets, so II defers a cycle to avoid thrashing a fresh change.
+
+    `recent` is the reflection's `adjustments` block — coarse booleans + per-domain
+    sigma, no rule-key granularity — so escalation/window proposals defer when the
+    matrix/windows were tuned this session, and prompt proposals defer when a prompt
+    was mutated or the target domain's sigma moved. Structured field checks, not a
+    substring scan of the serialized blob (which both over- and under-matched).
+    """
+    if not recent:
+        return False
+    kind = p.get("kind")
+    if kind == "escalation_rule":
+        if "window" in (p.get("action") or {}):
+            return bool(recent.get("windows_tuned"))
+        return bool(recent.get("matrix_mutated"))
+    if kind == "prompt_strategy":
+        if recent.get("prompt_mutated"):
+            return True
+        domain = (p.get("action") or {}).get("domain", p.get("target"))
+        return domain in (recent.get("sigma_values") or {})
+    return False

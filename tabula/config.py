@@ -405,6 +405,8 @@ class AugurConfig:
             raise ValueError("imperator_ii_min_interval_s outside [0, 3600]")
         if not (1.0 <= self.imperator_ii_freshness_timeout_s <= 120.0):
             raise ValueError("imperator_ii_freshness_timeout_s outside [1, 120]")
+        if not (1.0 <= self.imperator_ii_dedupe_staleness_s <= 31_536_000.0):
+            raise ValueError("imperator_ii_dedupe_staleness_s outside [1, 31536000]")
         if not (1 <= self.min_prompt_len <= 500):
             raise ValueError("min_prompt_len outside [1, 500]")
 

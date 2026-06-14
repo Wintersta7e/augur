@@ -36,7 +36,12 @@ def test_imperator_ii_apply_env_override(monkeypatch):
 
 
 def test_imperator_ii_bounds():
-    import pytest
-
     with pytest.raises(ValueError):
         AugurConfig(imperator_ii_num_predict=0)
+
+
+def test_imperator_ii_dedupe_staleness_must_be_at_least_one_second():
+    # A zero/negative TTL would make mark_proposal_applied a no-op or error,
+    # leaving a committed apply unmarked (and re-appliable next cycle).
+    with pytest.raises(ValueError):
+        AugurConfig(imperator_ii_dedupe_staleness_s=0.0)

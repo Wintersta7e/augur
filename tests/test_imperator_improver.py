@@ -1,4 +1,6 @@
 import asyncio
+import json
+
 import fakeredis
 from tabula.persistence import PersistenceManager
 from imperator import improver
@@ -62,6 +64,54 @@ def test_run_cycle_logs_and_respects_watch_first():
     assert len(props) == 1 and props[0]["status"] == "logged"
     assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"
     assert "augur.imperator.proposal" in published
+
+
+def test_run_and_route_publishes_reasoner_reason():
+    from imperator import reasoner
+
+    published = []
+
+    async def boom():
+        raise reasoner.ReasonerError("ollama_timeout", "slow")
+
+    asyncio.run(
+        improver._run_and_route(
+            boom, publish=lambda s, d: published.append((s, json.loads(d))), now=5.0
+        )
+    )
+    assert len(published) == 1
+    subj, body = published[0]
+    assert subj == "augur.imperator.failure" and body["reason"] == "ollama_timeout"
+
+
+def test_run_and_route_publishes_cycle_error_for_other_failures():
+    # An apply/persistence failure (not a reasoner failure) must still surface on
+    # the distinct failure channel, tagged cycle_error.
+    published = []
+
+    async def boom():
+        raise RuntimeError("redis exploded during apply")
+
+    asyncio.run(
+        improver._run_and_route(
+            boom, publish=lambda s, d: published.append((s, json.loads(d))), now=7.0
+        )
+    )
+    assert len(published) == 1
+    subj, body = published[0]
+    assert subj == "augur.imperator.failure" and body["reason"] == "cycle_error"
+
+
+def test_run_and_route_silent_on_success():
+    published = []
+
+    async def ok():
+        return None
+
+    asyncio.run(
+        improver._run_and_route(ok, publish=lambda s, d: published.append(s), now=1.0)
+    )
+    assert published == []
 
 
 class _Cfg:

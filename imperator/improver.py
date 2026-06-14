@@ -81,6 +81,36 @@ async def _await_fresh(pm, epoch, timeout_s, tick_s=0.5):
     return False
 
 
+async def _run_and_route(coro_fn, *, publish, now) -> None:
+    """Run a cycle coroutine; route ANY failure to augur.imperator.failure.
+
+    Reasoner failures carry their classified reason; apply/persistence/other
+    failures carry reason='cycle_error'. Both go to the distinct Imperator
+    channel so an operator watching (apply is watch-first) sees an apply break,
+    and Praefectus never miscounts it as a Consilium terminal. The runner never
+    crashes on a cycle failure (fail-open)."""
+    try:
+        await coro_fn()
+    except reasoner.ReasonerError as exc:
+        await _emit(
+            publish,
+            "augur.imperator.failure",
+            json.dumps({"reason": exc.reason, "ts": now}).encode(),
+        )
+    except Exception as exc:
+        log.warning("imperator II cycle failed; continuing", exc_info=True)
+        try:
+            await _emit(
+                publish,
+                "augur.imperator.failure",
+                json.dumps(
+                    {"reason": "cycle_error", "detail": str(exc), "ts": now}
+                ).encode(),
+            )
+        except Exception:
+            log.debug("imperator II failure publish failed", exc_info=True)
+
+
 async def run() -> None:
     config = AugurConfig.from_env()
     if not config.imperator_ii_enabled:
@@ -115,15 +145,15 @@ async def run() -> None:
                 ):
                     log.info("self-model did not fold reflection in time; skipping")
                     return
-                last_run[0] = time.time()
+                last_run[0] = now  # rate-limit from cycle start; single clock read
 
                 async def gen(sm, *, client, config, now):
                     return await reasoner.generate_proposals(
                         sm, client=client, config=config, now=now
                     )
 
-                try:
-                    await run_cycle(
+                await _run_and_route(
+                    lambda: run_cycle(
                         pm,
                         config,
                         now=now,
@@ -131,14 +161,14 @@ async def run() -> None:
                         generate_fn=gen,
                         client=http,
                         publish=nc.publish,
-                    )
-                except reasoner.ReasonerError as exc:
-                    await nc.publish(
-                        "augur.imperator.failure",
-                        json.dumps({"reason": exc.reason, "ts": now}).encode(),
-                    )
+                    ),
+                    publish=nc.publish,
+                    now=now,
+                )
             except Exception:
-                log.warning("imperator II cycle failed; continuing", exc_info=True)
+                log.warning(
+                    "imperator II cycle setup failed; continuing", exc_info=True
+                )
 
     sub = await nc.subscribe("augur.>", cb=on_msg)
     try:

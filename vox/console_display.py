@@ -55,6 +55,8 @@ SUBJECT_CORRELATION = "augur.nexus.detected"
 SUBJECT_REFLECT = "augur.disciplina.complete"
 SUBJECT_SUPPRESSED = "augur.limen.suppressed"
 SUBJECT_HEALTH = "augur.praefectus.health"
+SUBJECT_AUSPICES = "augur.imperator.auspices"
+SUBJECT_SELF_MODEL = "augur.imperator.self_model"
 WRAP_WIDTH = 80
 
 # ---------------------------------------------------------------------------
@@ -438,6 +440,51 @@ def render_reflection(data: dict) -> str:
     return "\n".join(lines)
 
 
+def render_auspices(data: dict) -> str:
+    if data.get("status") == "warming_up":
+        return f"{SEPARATOR}\n  AUSPICES — warming up…\n{SEPARATOR}"
+
+    def v(key):
+        cell = data.get(key) or {}
+        return cell.get("value") if cell.get("fresh") else "—"
+
+    return "\n".join(
+        str(x)
+        for x in [
+            THICK_SEPARATOR,
+            "  AUSPICES  (the user's situation)",
+            SEPARATOR,
+            f"  activity:   {v('activity')}",
+            f"  intensity:  {v('intensity')}",
+            f"  anomaly:    {v('anomaly_load')}   tier: {v('escalation_tier')}",
+            f"  salience:   {v('salience')}",
+            THICK_SEPARATOR,
+        ]
+    )
+
+
+def render_self_model(data: dict) -> str:
+    if data.get("status") == "warming_up":
+        return f"{SEPARATOR}\n  SELF-MODEL — warming up…\n{SEPARATOR}"
+
+    def v(key):
+        cell = data.get(key) or {}
+        return cell.get("value") if cell.get("fresh") else "—"
+
+    spots = (data.get("blind_spots") or {}).get("value") or []
+    lines = [
+        THICK_SEPARATOR,
+        "  SELF-MODEL  (Augur's own state)",
+        SEPARATOR,
+        f"  competence: {v('competence')}   precision: {v('precision')}   utility: {v('utility')}",
+        f"  dismissal:  {v('dismissal_rate')}   suppression: {v('suppression_rate')}",
+        f"  blind spots ({len(spots)}):",
+    ]
+    lines += [f"    - {s.get('kind')}: {s.get('detail')}" for s in spots[:6]]
+    lines.append(THICK_SEPARATOR)
+    return "\n".join(str(x) for x in lines)
+
+
 def _short_ts(iso_ts: str) -> str:
     """Extract HH:MM:SS from an ISO timestamp, or return as-is."""
     try:
@@ -556,6 +603,18 @@ async def run() -> None:
 
         print(render_health(data), flush=True)
 
+    async def on_auspices(msg: nats.aio.client.Msg) -> None:
+        try:
+            print(render_auspices(json.loads(msg.data.decode())))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
+    async def on_self_model(msg: nats.aio.client.Msg) -> None:
+        try:
+            print(render_self_model(json.loads(msg.data.decode())))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
     # LEAK-07: save subscription handles so unsubscribe() is called on
     # shutdown rather than relying on nc.close() to tear them down abruptly
     # mid-render.
@@ -565,6 +624,8 @@ async def run() -> None:
     sub_suppressed = await nc.subscribe(SUBJECT_SUPPRESSED, cb=on_suppressed)
     sub_reflect = await nc.subscribe(SUBJECT_REFLECT, cb=on_reflection)
     sub_health = await nc.subscribe(SUBJECT_HEALTH, cb=on_health)
+    sub_auspices = await nc.subscribe(SUBJECT_AUSPICES, cb=on_auspices)
+    sub_self_model = await nc.subscribe(SUBJECT_SELF_MODEL, cb=on_self_model)
 
     try:
         while True:
@@ -585,6 +646,8 @@ async def run() -> None:
             await sub_suppressed.unsubscribe()
             await sub_reflect.unsubscribe()
             await sub_health.unsubscribe()
+            await sub_auspices.unsubscribe()
+            await sub_self_model.unsubscribe()
         except Exception as exc:
             log.debug("Unsubscribe failed during shutdown: %s", exc)
         await nc.close()

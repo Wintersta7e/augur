@@ -54,3 +54,24 @@ def test_load_all_channel_stats_returns_every_field():
 
 def test_load_all_channel_stats_empty():
     assert _pm().load_all_channel_stats() == {}
+
+
+def test_proposals_round_trip_and_cap():
+    pm = _pm()
+    assert pm.load_proposals() == []
+    for i in range(3):
+        pm.save_proposal({"proposal_id": f"p{i}", "status": "logged"})
+    assert [r["proposal_id"] for r in pm.load_proposals(limit=10)] == ["p2", "p1", "p0"]
+
+
+def test_proposals_corrupt_entry_guard():
+    pm = _pm()
+    pm._r.lpush("augur:imperator:proposals", b"{not json")
+    assert pm.load_proposals() == []
+
+
+def test_applied_dedup_marker():
+    pm = _pm()
+    assert pm.is_proposal_applied("k1") is False
+    pm.mark_proposal_applied("k1", ttl_s=3600)
+    assert pm.is_proposal_applied("k1") is True

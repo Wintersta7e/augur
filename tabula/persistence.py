@@ -35,6 +35,9 @@ MAX_GATE_DELIVERY_FAILURES: int = 500
 # (fail-open / fire-leaning); existing keys keep updating.
 MAX_GATE_STATE_KEYS: int = 2000
 MAX_MEMORY_ITEMS: int = 5000  # refuse-at-cap ceiling for Memoria tier sets (Lane 2)
+MAX_IMPERATOR_PROPOSALS: int = (
+    200  # newest-first capped append-log for Imperator proposals
+)
 
 # Default TTL for per-session Redis keys (feedback, correlation graph,
 # reflection report). Prevents indefinite growth beyond the 1000-entry
@@ -492,6 +495,31 @@ class PersistenceManager:
         """Return the self-model snapshot, or None if absent."""
         raw = self._r.get("augur:imperator:self_model")
         return None if raw is None else json.loads(raw)
+
+    def save_proposal(self, record: dict) -> None:
+        """Append a terminal-status proposal record (newest-first, capped)."""
+        key = "augur:imperator:proposals"
+        self._r.lpush(key, json.dumps(record))
+        self._r.ltrim(key, 0, MAX_IMPERATOR_PROPOSALS - 1)
+
+    def load_proposals(self, *, limit: int = 50) -> list[dict]:
+        """Up to *limit* recent proposals, newest first. [] on corrupt/absent."""
+        raw = self._r.lrange("augur:imperator:proposals", 0, limit - 1)
+        try:
+            return [json.loads(e) for e in raw]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning(
+                "augur:imperator:proposals contained a corrupt entry; returning []"
+            )
+            return []
+
+    def mark_proposal_applied(self, dedupe_key: str, *, ttl_s: int) -> None:
+        """Durable applied-dedup marker (TTL'd), independent of the capped log."""
+        self._r.set(f"augur:imperator:applied:{dedupe_key}", "1", ex=int(ttl_s))
+
+    def is_proposal_applied(self, dedupe_key: str) -> bool:
+        """True if a recent (un-expired) apply of this dedupe_key exists."""
+        return bool(self._r.exists(f"augur:imperator:applied:{dedupe_key}"))
 
     # -- Current session --------------------------------------------------
 

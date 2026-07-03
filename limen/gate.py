@@ -345,10 +345,10 @@ class Gate:
 
         Stage 0.5 — taught-directive pre-check (spec §7.2): reads only
         ``pm.load_dialogue_directives()`` + ``pm.load_focused_app()``. A
-        ``"suppress"`` directive matching the current focused app whose
-        ``scope`` covers the event's domain (see
-        :func:`_directive_scope_allows`) returns
-        ``SUPPRESS("taught_directive:<id>")`` immediately, bypassing the
+        directive matching the current focused app whose ``scope`` covers the
+        event's domain (see :func:`_directive_scope_allows`) returns
+        ``SUPPRESS("taught_directive:<id>")`` or ``DOWNGRADE("taught_directive:
+        <id>")`` immediately per its ``action`` field, bypassing the
         biological arm pipeline entirely (by design — see the inline comment
         at the call site).
 
@@ -378,13 +378,17 @@ class Gate:
         # Imperator III taught-directive pre-check (read-only, spec §7.2). Runs
         # AFTER the exempt fast-exit, so high+correlated advice (invariant B)
         # is never silenced by a directive, and BEFORE any other gate state is
-        # read/loaded. A matching "suppress" directive short-circuits the
-        # entire biological arm pipeline (including anti-starvation/Arm 9 and
-        # the cap-fail-open check below) — deliberately: a taught directive is
-        # a known, reversible, user-authored policy ("stay silent in app X"),
-        # not a learned/behavioral suppression, so it is exempt from the
-        # anti-starvation release that exists to catch the *system* silencing
-        # a channel unknowably (spec §7.2 "honoring the spirit of invariant D").
+        # read/loaded. A matching directive short-circuits the entire
+        # biological arm pipeline (including anti-starvation/Arm 9 and the
+        # cap-fail-open check below) — deliberately: a taught directive is a
+        # known, reversible, user-authored policy ("stay silent in app X" /
+        # "downgrade app X"), not a learned/behavioral suppression, so it is
+        # exempt from the anti-starvation release that exists to catch the
+        # *system* silencing a channel unknowably (spec §7.2 "honoring the
+        # spirit of invariant D"). Both "suppress" and "downgrade" directive
+        # actions are consulted here, under the identical predicate/scope
+        # match — a taught "downgrade" is otherwise a silent false promise
+        # (stored, echoed back as confirmed, but never actually applied).
         directives: list[dict[str, Any]] = getattr(
             pm, "load_dialogue_directives", lambda: []
         )()
@@ -392,14 +396,21 @@ class Gate:
             focused = getattr(pm, "load_focused_app", lambda: None)()
             for d in directives:
                 pred = d.get("predicate") or {}
-                if (
+                if not (
                     pred.get("context") == "focused_app"
                     and focused is not None
                     and pred.get("match") == focused
-                    and d.get("action") == "suppress"
                     and _directive_scope_allows(d.get("scope"), signature.domain)
                 ):
+                    continue
+                directive_action = d.get("action")
+                if directive_action == "suppress":
                     return GateDecision.suppress(
+                        f"taught_directive:{d.get('directive_id')}",
+                        deciding_arm="taught_directive",
+                    )
+                if directive_action == "downgrade":
+                    return GateDecision.downgrade(
                         f"taught_directive:{d.get('directive_id')}",
                         deciding_arm="taught_directive",
                     )

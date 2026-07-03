@@ -1,7 +1,7 @@
 """Route a validated intent to a reversible faculty surface.
 
-Pure translation layer between Task 12's intent taxonomy and the sanctioned
-apply surface (imperator/apply.py, imperator/proposals.py): a validated
+Pure translation layer between the intents.py taxonomy (spec §7.1) and the
+sanctioned apply surface (imperator/apply.py, imperator/proposals.py): a validated
 teaching intent becomes a *pending* proposal awaiting user confirmation
 (route), a confirmed pending becomes an applied record (apply_confirmed),
 and an applied record can be inverted back to its prior state (build_inverse,
@@ -29,26 +29,67 @@ _SIGMA_MIN, _SIGMA_MAX = 1.5, 5.0
 _FLOOR_MIN, _FLOOR_MAX = 0.0, 0.6
 
 
-def _arm_for_silence(ctx, state_key: str) -> dict:
-    """Pick the gate_calibration op that reverses whichever arm most recently
-    suppressed this state_key, per the suppression record's ``arm`` field.
+def _directive_id_from_reason(reason: Any) -> str | None:
+    """Parse the directive id out of a taught-directive suppression's
+    ``"taught_directive:<id>"`` reason string. Returns None on anything that
+    doesn't match -- absent reason, wrong prefix, or an empty id -- so the
+    caller can reject with a clarification instead of building a removal
+    proposal that targets nothing real."""
+    prefix = "taught_directive:"
+    if not isinstance(reason, str) or not reason.startswith(prefix):
+        return None
+    directive_id = reason[len(prefix) :]
+    return directive_id or None
 
-    habituation -> reset the habituation floor to 0 (speak up again).
-    central_tolerance -> drop the permanent self-tolerance dismissal (the only
-    deciding_arm value limen/gate.py ever emits for that suppression path).
+
+def _arm_for_silence(ctx, state_key: str) -> tuple[str, dict]:
+    """Pick the (proposal kind, action) pair that reverses whichever arm most
+    recently suppressed this state_key, per the suppression record's ``arm``
+    field.
+
+    habituation -> reset the habituation floor to 0 (speak up again);
+    gate_calibration floor_set.
+    central_tolerance -> drop the permanent self-tolerance dismissal;
+    gate_calibration self_tolerance_remove.
+    taught_directive -> remove the offending taught directive (spec §7.2/§9):
+    limen/gate.py's directive pre-check is the ONLY source of this arm value,
+    and it always stamps the reason "taught_directive:<id>", so the id is
+    parsed straight from the suppression record rather than re-derived;
+    context_directive op="remove".
     Anything else -- a different arm, or no matching suppression record at
-    all -- falls back to self_tolerance_remove, the safe universal "make this
-    fireable again" default.
+    all -- falls back to gate_calibration self_tolerance_remove, the safe
+    universal "make this fireable again" default.
+
+    Raises ValueError when a taught_directive suppression's reason carries no
+    parseable directive id: correct_silence must reject with a clarification
+    rather than build a proposal that removes nothing real.
     """
     for s in ctx.recent_suppressions:
         if s.get("state_key") == state_key:
             arm = s.get("arm")
             if arm == "habituation":
-                return {"op": "floor_set", "state_key": state_key, "value": 0.0}
+                return "gate_calibration", {
+                    "op": "floor_set",
+                    "state_key": state_key,
+                    "value": 0.0,
+                }
             if arm == "central_tolerance":
-                return {"op": "self_tolerance_remove", "state_key": state_key}
+                return "gate_calibration", {
+                    "op": "self_tolerance_remove",
+                    "state_key": state_key,
+                }
+            if arm == "taught_directive":
+                directive_id = _directive_id_from_reason(s.get("reason"))
+                if not directive_id:
+                    raise ValueError(
+                        f"can't tell which taught rule silenced {state_key}"
+                    )
+                return "context_directive", {
+                    "op": "remove",
+                    "directive_id": directive_id,
+                }
             break
-    return {"op": "self_tolerance_remove", "state_key": state_key}
+    return "gate_calibration", {"op": "self_tolerance_remove", "state_key": state_key}
 
 
 def route(intent: dict, ctx, *, pm, cfg) -> dict:
@@ -61,9 +102,10 @@ def route(intent: dict, ctx, *, pm, cfg) -> dict:
     """
     kind = intent["kind"]
     # Cast (not assert): _REQUIRE_TARGET-gated kinds always carry a target by
-    # the time a validated intent reaches route() (Task 12's validate_intent);
-    # kinds that don't require one (query/undo) never dispatch past the
-    # `else: raise ValueError` branch below, so they never read this value.
+    # the time a validated intent reaches route() (intents.validate_intent
+    # enforces it); kinds that don't require one (query/undo) never dispatch
+    # past the `else: raise ValueError` branch below, so they never read this
+    # value.
     target = cast(str, intent.get("target"))
     action = intent.get("action", {})
     rationale = intent.get("rationale", "")
@@ -71,14 +113,19 @@ def route(intent: dict, ctx, *, pm, cfg) -> dict:
     confirm_phrase = None
 
     if kind == "correct_silence":
+        proposal_kind, silence_action = _arm_for_silence(ctx, target)
         p = P.make_proposal(
-            kind="gate_calibration",
+            kind=proposal_kind,
             target=target,
-            action=_arm_for_silence(ctx, target),
+            action=silence_action,
             rationale=rationale,
             source="dialogue",
         )
-        echo = f"I'll speak up for {target} next time."
+        echo = (
+            f"I'll remove the rule that's keeping me quiet about {target}."
+            if proposal_kind == "context_directive"
+            else f"I'll speak up for {target} next time."
+        )
     elif kind == "correct_noise":
         p = P.make_proposal(
             kind="gate_calibration",
@@ -238,8 +285,9 @@ def build_inverse(applied: dict) -> dict | None:
             {"domain": a.get("domain", p["target"]), "text": a["prior_text"]},
         )
     if kind == "context_directive":
-        # Complete restore semantics (Task 20 decision A), designed once and
-        # mirrored by the semantic_fact case below: a create/upsert apply
+        # Complete restore semantics (mirrors apply.py's rollback-anchor
+        # discipline, spec §8), designed once and mirrored by the
+        # semantic_fact case below: a create/upsert apply
         # records the FULL pre-write content as prior_directive (None for a
         # brand-new id); an applied remove records the FULL pre-delete
         # content the same way. Whichever direction has a real prior
@@ -294,8 +342,9 @@ def build_inverse(applied: dict) -> dict | None:
             {"op": "remove", "directive_id": a["directive_id"]},
         )
     if kind == "semantic_fact":
-        # Mirrors the context_directive case above (Task 20 decision A):
-        # prior_fact is the FULL memory state read before the write, on
+        # Mirrors the context_directive case above (same rollback-anchor
+        # discipline, spec §8): prior_fact is the FULL memory state read
+        # before the write, on
         # BOTH the create/upsert and remove sides.
         prior_fact = a.get("prior_fact")
         if a.get("op") == "remove":

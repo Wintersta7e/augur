@@ -143,6 +143,84 @@ def test_correct_silence_unmatched_arm_falls_back_to_self_tolerance_remove():
     }
 
 
+def test_correct_silence_taught_directive_arm_removes_directive():
+    """A silence caused by the taught-directive pre-check (limen/gate.py)
+    routes to a context_directive removal, not a gate_calibration op -- the
+    only way correct_silence can actually reverse a taught (not learned)
+    silence."""
+    ctx = C.DialogueContext(
+        recent_suppressions=[
+            {
+                "state_key": "single:typing:user",
+                "arm": "taught_directive",
+                "reason": "taught_directive:d1",
+            }
+        ]
+    )
+    pending = R.route(
+        {
+            "kind": "correct_silence",
+            "target": "single:typing:user",
+            "action": {},
+            "rationale": "speak up",
+        },
+        ctx,
+        pm=None,
+        cfg=_Cfg(),
+    )
+    p = pending["proposal"]
+    assert p["kind"] == "context_directive"
+    assert p["action"] == {"op": "remove", "directive_id": "d1"}
+    assert "remove" in pending["echo"].lower()
+
+
+def test_correct_silence_taught_directive_malformed_reason_raises():
+    """A taught_directive suppression record with an unparseable reason must
+    reject with a ValueError (surfaced by the engine as a needs_clarification
+    reply), not build a proposal that removes nothing real."""
+    ctx = C.DialogueContext(
+        recent_suppressions=[
+            {
+                "state_key": "single:typing:user",
+                "arm": "taught_directive",
+                "reason": "habituated",  # wrong prefix -- corrupt/foreign record
+            }
+        ]
+    )
+    with pytest.raises(ValueError):
+        R.route(
+            {
+                "kind": "correct_silence",
+                "target": "single:typing:user",
+                "action": {},
+                "rationale": "speak up",
+            },
+            ctx,
+            pm=None,
+            cfg=_Cfg(),
+        )
+
+
+def test_correct_silence_taught_directive_absent_reason_raises():
+    ctx = C.DialogueContext(
+        recent_suppressions=[
+            {"state_key": "single:typing:user", "arm": "taught_directive"}
+        ]
+    )
+    with pytest.raises(ValueError):
+        R.route(
+            {
+                "kind": "correct_silence",
+                "target": "single:typing:user",
+                "action": {},
+                "rationale": "speak up",
+            },
+            ctx,
+            pm=None,
+            cfg=_Cfg(),
+        )
+
+
 def test_correct_noise_is_light_self_tolerance_add():
     pending = R.route(
         {

@@ -176,16 +176,78 @@ def test_directive_predicate_mismatch_does_not_suppress(fake_pm, cfg):
     assert dec.deciding_arm != "taught_directive"
 
 
-def test_directive_wrong_action_does_not_suppress(fake_pm, cfg):
-    """Only action=="suppress" directives are consulted by this pre-check; a
-    "downgrade" directive (stored, but not yet handled here) is a no-op."""
+def test_directive_unknown_action_does_not_suppress(fake_pm, cfg):
+    """Only action in {"suppress", "downgrade"} is consulted by this
+    pre-check; any other value (a future/unrecognized action) is a no-op."""
+    fake_pm.load_focused_app = lambda: "appX"
+    fake_pm.add_dialogue_directive(
+        {
+            "directive_id": "d1",
+            "predicate": {"context": "focused_app", "match": "appX"},
+            "action": "annotate",
+            "scope": "all",
+        }
+    )
+    g = G.Gate()
+    dec = g.evaluate(_sig(exempt=False), fake_pm, cfg, now=100.0)
+    assert dec.deciding_arm != "taught_directive"
+
+
+# ── Task-13-follow-up: "downgrade" directive consult ────────────────────────
+
+
+def test_directive_downgrade_action_produces_downgrade_decision():
+    """A taught "downgrade" directive matching the focused app returns a
+    DOWNGRADE decision (not suppress, not fire) — the confirmed teach must
+    actually change gate behavior, not just be echoed back."""
+    pm = _PM(
+        "appX",
+        [
+            {
+                "directive_id": "d1",
+                "predicate": {"context": "focused_app", "match": "appX"},
+                "action": "downgrade",
+                "scope": "all",
+            }
+        ],
+    )
+    g = G.Gate()
+    dec = g.evaluate(_sig(exempt=False), pm, _gate_cfg(), now=100.0)
+    assert dec.action == "downgrade"
+    assert dec.reason == "taught_directive:d1"
+    assert dec.deciding_arm == "taught_directive"
+
+
+def test_directive_downgrade_never_overrides_exempt_high_correlated():
+    """Invariant B wins over a taught downgrade too: an exempt (high+
+    correlated) signature fires before the directive pre-check is reached."""
+    pm = _PM(
+        "appX",
+        [
+            {
+                "directive_id": "d1",
+                "predicate": {"context": "focused_app", "match": "appX"},
+                "action": "downgrade",
+                "scope": "all",
+            }
+        ],
+    )
+    g = G.Gate()
+    dec = g.evaluate(_sig(exempt=True), pm, _gate_cfg(), now=100.0)
+    assert dec.action == "fire"
+    assert dec.reason == "exempt_high_correlated"
+
+
+def test_directive_downgrade_scoped_to_other_domain_does_not_downgrade(fake_pm, cfg):
+    """A downgrade directive scoped to ["chess"] must not touch a typing
+    anomaly even when the focused-app predicate matches."""
     fake_pm.load_focused_app = lambda: "appX"
     fake_pm.add_dialogue_directive(
         {
             "directive_id": "d1",
             "predicate": {"context": "focused_app", "match": "appX"},
             "action": "downgrade",
-            "scope": "all",
+            "scope": ["chess"],
         }
     )
     g = G.Gate()

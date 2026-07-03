@@ -165,11 +165,7 @@ async def _handle_undo(
     way.
     """
     audit = pm.load_dialogue_audit(limit=1)
-    if (
-        not audit
-        or not audit[0].get("proposal")
-        or audit[0].get("status") != "applied"
-    ):
+    if not audit or not audit[0].get("proposal") or audit[0].get("status") != "applied":
         # Nothing committed to reverse: no audit trail at all; a prior undo
         # attempt that never produced a proposal; OR a confirmed apply that
         # ended "logged" (e.g. a transient write raised after the rollback

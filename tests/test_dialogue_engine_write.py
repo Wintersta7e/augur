@@ -157,14 +157,24 @@ def test_publish_failure_after_commit_still_reports_applied():
 
     asyncio.run(
         E.handle_turn(
-            "s1", "treat low+low as medium", pm=pm, nc=_NC(), http_client=None,
-            cfg=_Cfg(), query_fn=llm_tune,
+            "s1",
+            "treat low+low as medium",
+            pm=pm,
+            nc=_NC(),
+            http_client=None,
+            cfg=_Cfg(),
+            query_fn=llm_tune,
         )
     )
     turn = asyncio.run(
         E.handle_turn(
-            "s1", "change the matrix", pm=pm, nc=_FailNC(), http_client=None,
-            cfg=_Cfg(), query_fn=llm_tune,
+            "s1",
+            "change the matrix",
+            pm=pm,
+            nc=_FailNC(),
+            http_client=None,
+            cfg=_Cfg(),
+            query_fn=llm_tune,
         )
     )
     assert turn.error is None
@@ -204,7 +214,12 @@ def test_undo_of_failed_confirm_reports_nothing_to_undo():
 
     turn = asyncio.run(
         E.handle_turn(
-            "s1", "undo that", pm=pm, nc=nc, http_client=None, cfg=_Cfg(),
+            "s1",
+            "undo that",
+            pm=pm,
+            nc=nc,
+            http_client=None,
+            cfg=_Cfg(),
             query_fn=llm_undo,
         )
     )

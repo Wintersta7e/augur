@@ -2,12 +2,32 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable
 
 from imperator.dialogue import context as C, intents as I, persona, router as R
+
+
+def _cfg_with_num_predict(cfg: Any, num_predict: int) -> Any:
+    """A view of ``cfg`` with ``dialogue_num_predict`` overridden to
+    ``num_predict`` -- used only for a single LLM call so persona's
+    register-scaled reply budget (``persona.num_predict_for_register``,
+    spec §6) reaches ``query_dialogue_ollama``'s options dict without
+    changing the ``QueryFn`` signature every test's stub ``query_fn``
+    relies on. Production ``cfg`` (``AugurConfig``) is an immutable
+    dataclass, so this goes through ``dataclasses.replace`` (which
+    re-validates ``__post_init__`` bounds); a plain test-stub cfg (not a
+    dataclass) gets a shallow attribute-copy instead.
+    """
+    try:
+        return replace(cfg, dialogue_num_predict=num_predict)
+    except TypeError:
+        view = copy.copy(cfg)
+        view.dialogue_num_predict = num_predict
+        return view
 
 
 @dataclass
@@ -55,8 +75,8 @@ QueryFn = Callable[[str, str, Any, Any], Awaitable[str]]
 
 async def _publish(nc, subject: str, payload: dict) -> None:
     """Fire a dialogue event on NATS. No try/except here: a publish failure
-    is an infra failure (same class as Redis down), and per the Task 6/7
-    design every other faculty's nc.publish call is unguarded too -- it
+    is an infra failure (same class as Redis down), and every other
+    faculty's nc.publish call is unguarded too -- it
     propagates out of handle_turn for the surface (console per-turn
     try/except, MCP @_tool_safe) to catch and report truthfully. Only the
     LLM-call/parse path below fails soft inside the engine."""
@@ -68,7 +88,7 @@ async def _record_and_publish(pm, nc, record: dict) -> None:
     """Persist a confirmed-apply/undo audit record and fire the two dialogue
     events every such record emits (mirrors the reasoner trigger every other
     faculty's completion publishes). Shared by _resolve_pending and
-    _handle_undo -- both build a differently-shaped record dict, then take
+    _finish_undo -- both build a differently-shaped record dict, then take
     this identical audit+publish action on it."""
     pm.append_dialogue_audit(record)
     await _publish(nc, "augur.imperator.dialogue.applied", record)
@@ -103,20 +123,33 @@ def _save_turn(
     pm.save_dialogue_turn(record)
 
 
-async def _handle_undo(
-    session_id: str, user_text: str, base_reply: str, *, pm, nc, cfg
-) -> DialogueTurn:
-    """Reverse the most recently audited dialogue change.
+def _undo_echo(prior: dict) -> str:
+    """Describe, for the confirmation prompt, what an undo of the audit-head
+    record ``prior`` would reverse."""
+    kind = prior.get("kind", "change")
+    target = prior.get("target")
+    if target:
+        return f"I'll undo the {kind} change on {target}."
+    return f"I'll undo the last {kind} change."
 
-    Goes through router.apply_undo (Task 13) rather than a hand-built
-    build_inverse + apply.apply_proposal call: apply_undo pre-checks the
-    inverse against the CURRENT apply-layer bounds so a rollback anchor
-    recorded before those bounds tightened (e.g. a stale prior_sigma/prior
-    floor) is reported as a distinct, truthful "blocked" outcome instead of
-    silently failing closed with the same generic status as any other
-    rejected proposal. All four apply_undo outcomes (unavailable/blocked/
-    logged/applied) get their own reply text below -- never a blanket
-    "Reversed." regardless of what actually happened.
+
+async def _handle_undo(
+    session_id: str, user_text: str, base_reply: str, *, pm, cfg
+) -> DialogueTurn:
+    """Begin an undo request (spec §9: ``undo`` is a LIGHT-tier intent,
+    confirmed by a plain affirmative like every other light intent -- never
+    applied on the spot). Reads the most recently audited dialogue change
+    GLOBALLY: ``pm.load_dialogue_audit`` is not session-scoped (unlike the
+    conversation log), so "undo that" reverses the last confirmed change
+    from ANY session, not just this one.
+
+    Nothing-to-undo is reported immediately -- no pending stored, nothing
+    audited or published -- since there's nothing for a confirmation to
+    gate. Otherwise a light pending is stored carrying the audit-head record
+    (``prior``); ``_finish_undo`` runs the real ``router.apply_undo`` (bounds
+    pre-check + apply) once the user confirms, producing the same
+    four-outcome (applied/blocked/logged/unavailable) truthful reply either
+    way.
     """
     audit = pm.load_dialogue_audit(limit=1)
     if not audit or not audit[0].get("proposal"):
@@ -127,6 +160,39 @@ async def _handle_undo(
         # nothing to invert either. Same truthful reply for both.
         return DialogueTurn(reply="There's nothing recent to undo.")
     prior = audit[0]
+    echo = _undo_echo(prior)
+    pending = {
+        "kind": "undo",
+        "tier": "light",
+        "echo": echo,
+        "confirm_phrase": None,
+        "prior": prior,
+    }
+    pm.save_dialogue_pending(session_id, pending, ttl=cfg.dialogue_pending_ttl_s)
+    reply = (
+        f"{base_reply}\n{echo} Confirm? (yes)"
+        if base_reply
+        else f"{echo} Confirm? (yes)"
+    )
+    return DialogueTurn(reply=reply, pending=pending)
+
+
+async def _finish_undo(
+    prior: dict, session_id: str, user_text: str, *, pm, nc, cfg
+) -> DialogueTurn:
+    """Apply a confirmed undo (spec §9), run by ``_resolve_pending`` once the
+    light pending ``_handle_undo`` created is confirmed.
+
+    Goes through router.apply_undo rather than a hand-built build_inverse +
+    apply.apply_proposal call: apply_undo pre-checks the inverse against the
+    CURRENT apply-layer bounds so a rollback anchor recorded before those
+    bounds tightened (e.g. a stale prior_sigma/prior floor) is reported as a
+    distinct, truthful "blocked" outcome instead of silently failing closed
+    with the same generic status as any other rejected proposal. All four
+    apply_undo outcomes (unavailable/blocked/logged/applied) get their own
+    reply text below -- never a blanket "Reversed." regardless of what
+    actually happened.
+    """
     out = R.apply_undo(prior, pm=pm, cfg=cfg, session_id=session_id)
     proposal = out["proposal"]
     record = {
@@ -138,8 +204,8 @@ async def _handle_undo(
         "status": out["status"],
         "undo": True,
         # Confirmation provenance (constraint: audit must record WHO/WHAT
-        # authorized this write) -- undo has no separate confirm step, so
-        # the triggering utterance itself is the provenance.
+        # authorized this write) -- the plain-affirmative turn that confirmed
+        # the undo pending is the provenance.
         "confirming_text": user_text,
     }
     await _record_and_publish(pm, nc, record)
@@ -157,8 +223,19 @@ async def _handle_undo(
         "unavailable": "That change can't be undone automatically.",
         "logged": "I tried to reverse that, but it didn't take.",
     }.get(out["status"], "I couldn't undo that.")
-    reply = f"{base_reply}\n{status_reply}" if base_reply else status_reply
-    return DialogueTurn(reply=reply, applied=record)
+    turn = DialogueTurn(reply=status_reply, applied=record)
+    # Truthful: a confirmed undo can still resolve blocked/logged/unavailable
+    # -- the conversation log must agree with the reply and audit, not claim
+    # success unconditionally.
+    _save_turn(
+        pm,
+        session_id,
+        user_text,
+        status_reply,
+        ts=record["ts"],
+        applied=out["status"] == "applied",
+    )
+    return turn
 
 
 async def _resolve_pending(
@@ -179,6 +256,10 @@ async def _resolve_pending(
     pm.clear_dialogue_pending(session_id)  # cleared before apply: no double-apply
     if not ok:
         return None
+    if pending.get("kind") == "undo":
+        return await _finish_undo(
+            pending["prior"], session_id, user_text, pm=pm, nc=nc, cfg=cfg
+        )
     applied = R.apply_confirmed(pending, pm=pm, cfg=cfg, session_id=session_id)
     record = {
         "ts": time.time(),
@@ -213,18 +294,17 @@ async def _resolve_pending(
 
 
 async def _handle_intent(
-    intent: dict, base_reply: str, ctx, session_id: str, user_text: str, *, pm, nc, cfg
+    intent: dict, base_reply: str, ctx, session_id: str, user_text: str, *, pm, cfg
 ) -> DialogueTurn:
     """Validate and route a freshly parsed intent: dispatch to undo, route a
     new pending proposal awaiting confirmation, or fall back to a
     clarification reply on an invalid intent. Never applies anything itself
-    except via _handle_undo's router.apply_undo."""
+    -- undo (like every other kind) only ever creates a pending here; the
+    actual apply/reversal happens at confirm time in ``_resolve_pending``."""
     try:
         valid = I.validate_intent(intent)
         if valid["kind"] == "undo":
-            return await _handle_undo(
-                session_id, user_text, base_reply, pm=pm, nc=nc, cfg=cfg
-            )
+            return await _handle_undo(session_id, user_text, base_reply, pm=pm, cfg=cfg)
         new_pending = R.route(valid, ctx, pm=pm, cfg=cfg)
         pm.save_dialogue_pending(
             session_id, new_pending, ttl=cfg.dialogue_pending_ttl_s
@@ -262,6 +342,12 @@ async def handle_turn(
     ctx = C.assemble(pm, now=time.time(), cfg=cfg)
     register = persona.register_for_salience(ctx.salience)
     system = persona.build_system_prompt(register, C.render(ctx, cfg), cfg)
+    # Register-scaled reply budget (spec §6): a terse register gets a smaller
+    # num_predict than an urgent one. Only the LLM-call cfg is adjusted --
+    # every other read of ``cfg`` in this turn keeps its configured value.
+    call_cfg = _cfg_with_num_predict(
+        cfg, persona.num_predict_for_register(register, cfg)
+    )
 
     notice = ""  # prefixed to the fresh-turn reply when a pending was dropped
     pending = pm.load_dialogue_pending(session_id)
@@ -283,7 +369,7 @@ async def handle_turn(
         return turn
 
     try:
-        raw = await query_fn(user_text, system, http_client, cfg)
+        raw = await query_fn(user_text, system, http_client, call_cfg)
         obj = _parse(raw)
     except Exception as exc:  # fail-truthful: never guess a mutation
         return DialogueTurn(
@@ -301,7 +387,7 @@ async def handle_turn(
     intent = obj.get("intent")
     if intent:
         turn = await _handle_intent(
-            intent, obj["reply"], ctx, session_id, user_text, pm=pm, nc=nc, cfg=cfg
+            intent, obj["reply"], ctx, session_id, user_text, pm=pm, cfg=cfg
         )
         turn.reply = notice + turn.reply
         _save_turn(pm, session_id, user_text, turn.reply)

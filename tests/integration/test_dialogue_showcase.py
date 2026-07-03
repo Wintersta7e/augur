@@ -147,7 +147,21 @@ async def test_stay_silent_in_appx_then_undo(real_pm, real_nc, dialogue_cfg):
         cfg=dialogue_cfg,
         query_fn=undo,
     )
-    assert t3.applied is not None and t3.applied["status"] == "applied"
+    # spec §9: undo is a LIGHT-tier intent, confirmed by a plain affirmative
+    # like every other light intent -- not applied on the same turn it's
+    # requested.
+    assert t3.pending is not None and t3.applied is None
+
+    t4 = await E.handle_turn(
+        "sc1",
+        "yes",
+        pm=real_pm,
+        nc=real_nc,
+        http_client=None,
+        cfg=dialogue_cfg,
+        query_fn=undo,
+    )
+    assert t4.applied is not None and t4.applied["status"] == "applied"
 
     dec2 = G.Gate().evaluate(
         _sig(SINGLE_MEDIUM_TYPING), real_pm, dialogue_cfg, now=101.0

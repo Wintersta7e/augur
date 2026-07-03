@@ -2,8 +2,13 @@ import asyncio
 
 import fakeredis
 
+from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
 from imperator.dialogue import engine as E
+from limen import gate as G
+from tests.conftest import SINGLE_MEDIUM_TYPING
+
+_GATE_CFG = AugurConfig()  # real gate_* bounds for the taught-directive round-trip
 
 
 class _Cfg:
@@ -109,6 +114,68 @@ def test_teach_then_confirm_applies_and_audits():
     assert len(pm.load_dialogue_audit(limit=5)) == 1  # no new audit entry
 
 
+def test_correct_silence_reverses_taught_directive_and_gate_stops_suppressing():
+    """A silence caused by a taught directive (limen/gate.py's Stage-0.5
+    pre-check) is reversible via correct_silence: teach -> confirm removes
+    the directive, and a subsequent gate evaluation on the same channel no
+    longer suppresses via that directive."""
+    pm, nc = _pm(), _NC()
+    pm.load_focused_app = lambda: "appX"
+    pm.add_dialogue_directive(
+        {
+            "directive_id": "d1",
+            "predicate": {"context": "focused_app", "match": "appX"},
+            "action": "suppress",
+            "scope": "all",
+        }
+    )
+    sig = G.build_signature(SINGLE_MEDIUM_TYPING)
+    gate = G.Gate()
+    before = gate.evaluate(sig, pm, _GATE_CFG, now=500.0)
+    assert before.action == "suppress"
+    assert before.deciding_arm == "taught_directive"
+    assert gate.record_suppression(before, sig, pm, 500.0) is True
+
+    async def correct(prompt, system, client, cfg):
+        return (
+            '{"reply":"Noted.", "needs_clarification":false,"question":null,'
+            '"intent":{"kind":"correct_silence","target":"single:typing:user",'
+            '"action":{},"rationale":"you should have spoken up"}}'
+        )
+
+    t1 = asyncio.run(
+        E.handle_turn(
+            "s12",
+            "you should've spoken up about typing",
+            pm=pm,
+            nc=nc,
+            http_client=None,
+            cfg=_GATE_CFG,
+            query_fn=correct,
+        )
+    )
+    assert t1.pending is not None
+    assert t1.pending["proposal"]["kind"] == "context_directive"
+    assert t1.pending["proposal"]["action"] == {"op": "remove", "directive_id": "d1"}
+
+    t2 = asyncio.run(
+        E.handle_turn(
+            "s12",
+            "yes",
+            pm=pm,
+            nc=nc,
+            http_client=None,
+            cfg=_GATE_CFG,
+            query_fn=correct,
+        )
+    )
+    assert t2.applied is not None and t2.applied["status"] == "applied"
+    assert pm.get_dialogue_directive("d1") is None  # the taught rule is gone
+
+    after = G.Gate().evaluate(sig, pm, _GATE_CFG, now=501.0)
+    assert after.action != "suppress" or after.deciding_arm != "taught_directive"
+
+
 def test_heavy_requires_phrase():
     pm, nc = _pm(), _NC()
 
@@ -167,16 +234,22 @@ def test_bare_yes_with_no_pending_is_truthful():
 
 
 def test_undo_with_no_audit_history_is_truthful():
+    """No audit trail at all -> _handle_undo (the request phase) reports
+    immediately: no pending is created, nothing is audited or published."""
     pm, nc = _pm(), _NC()
-    out = asyncio.run(E._handle_undo("s1", "undo that", "ok", pm=pm, nc=nc, cfg=_Cfg()))
+    out = asyncio.run(E._handle_undo("s1", "undo that", "ok", pm=pm, cfg=_Cfg()))
     assert out.applied is None
+    assert out.pending is None
     assert "nothing" in out.reply.lower()
     assert nc.published == []  # no event for a no-op
 
 
 def test_undo_round_trip_restores_state_and_audits():
-    """Full path: teach -> confirm -> undo, via handle_turn's intent kind=undo,
-    exercising router.apply_undo (not a hand-built inverse+apply_proposal)."""
+    """Full path: teach -> confirm -> undo request -> confirm undo, via
+    handle_turn's intent kind=undo (spec §9: undo is a light-tier pending
+    like every other light intent, never applied on the same turn it's
+    requested), exercising router.apply_undo (not a hand-built
+    inverse+apply_proposal)."""
     pm, nc = _pm(), _NC()
 
     async def llm_intent(prompt, system, client, cfg):
@@ -223,9 +296,18 @@ def test_undo_round_trip_restores_state_and_audits():
             query_fn=llm_undo,
         )
     )
-    assert t3.applied is not None and t3.applied["status"] == "applied"
-    assert t3.applied["undo"] is True
-    assert t3.applied["confirming_text"] == "undo that"
+    assert t3.pending is not None and t3.applied is None  # awaiting confirm
+    assert pm.is_self_tolerant("single:typing:user") is False  # not reversed yet
+    assert len(pm.load_dialogue_audit(limit=5)) == 1  # no new audit entry yet
+
+    t4 = asyncio.run(
+        E.handle_turn(
+            "s1", "yes", pm=pm, nc=nc, http_client=None, cfg=_Cfg(), query_fn=llm_undo
+        )
+    )
+    assert t4.applied is not None and t4.applied["status"] == "applied"
+    assert t4.applied["undo"] is True
+    assert t4.applied["confirming_text"] == "yes"  # the turn that confirmed it
     assert pm.is_self_tolerant("single:typing:user") is True  # restored
     audit = pm.load_dialogue_audit(limit=5)
     assert len(audit) == 2 and audit[0]["undo"] is True
@@ -249,7 +331,13 @@ def test_undo_unavailable_when_no_inverse_exists():
             "status": "applied",
         }
     )
-    out = asyncio.run(E._handle_undo("s4", "undo that", "ok", pm=pm, nc=nc, cfg=_Cfg()))
+    requested = asyncio.run(E._handle_undo("s4", "undo that", "ok", pm=pm, cfg=_Cfg()))
+    assert requested.pending is not None and requested.applied is None
+    out = asyncio.run(
+        E._finish_undo(
+            requested.pending["prior"], "s4", "yes", pm=pm, nc=nc, cfg=_Cfg()
+        )
+    )
     assert out.applied is not None and out.applied["status"] == "unavailable"
     assert "can't be undone" in out.reply.lower() or "cannot" in out.reply.lower()
 
@@ -390,8 +478,10 @@ def test_non_affirmative_turn_drops_pending_with_notice():
 def test_undo_after_unavailable_undo_does_not_crash():
     """A prior undo attempt that itself resolved 'unavailable' audits a
     record with proposal=None. router.build_inverse assumes a real proposal
-    dict (`p.get("action")`), so a chained "undo that" on top of that
-    record would AttributeError without the precondition guard."""
+    dict (`p.get("action")`), so a chained "undo that" REQUEST on top of that
+    record would AttributeError without the precondition guard in
+    _handle_undo -- the second request must instead hit the immediate
+    nothing-to-undo reply (no new pending)."""
     pm, nc = _pm(), _NC()
     pm.append_dialogue_audit(
         {
@@ -407,21 +497,25 @@ def test_undo_after_unavailable_undo_does_not_crash():
             "status": "applied",
         }
     )
+    requested = asyncio.run(E._handle_undo("s7", "undo that", "ok", pm=pm, cfg=_Cfg()))
+    assert requested.pending is not None
     first = asyncio.run(
-        E._handle_undo("s7", "undo that", "ok", pm=pm, nc=nc, cfg=_Cfg())
+        E._finish_undo(
+            requested.pending["prior"], "s7", "yes", pm=pm, nc=nc, cfg=_Cfg()
+        )
     )
     assert first.applied["status"] == "unavailable"
-    second = asyncio.run(
-        E._handle_undo("s7", "undo that", "ok", pm=pm, nc=nc, cfg=_Cfg())
-    )
+
+    second = asyncio.run(E._handle_undo("s7", "undo that", "ok", pm=pm, cfg=_Cfg()))
     assert second.applied is None
+    assert second.pending is None
     assert "nothing" in second.reply.lower()
 
 
 def test_undo_blocked_when_prior_value_outside_current_bounds():
-    """Task 13's apply_undo bounds pre-check: a rollback anchor recorded
-    before the floor bounds tightened must report 'blocked', not silently
-    fail or (worse) claim success."""
+    """apply_undo's bounds pre-check: a rollback anchor recorded before the
+    floor bounds tightened must report 'blocked', not silently fail or
+    (worse) claim success."""
     pm, nc = _pm(), _NC()
     pm.append_dialogue_audit(
         {
@@ -442,7 +536,13 @@ def test_undo_blocked_when_prior_value_outside_current_bounds():
             "status": "applied",
         }
     )
-    out = asyncio.run(E._handle_undo("s5", "undo that", "ok", pm=pm, nc=nc, cfg=_Cfg()))
+    requested = asyncio.run(E._handle_undo("s5", "undo that", "ok", pm=pm, cfg=_Cfg()))
+    assert requested.pending is not None
+    out = asyncio.run(
+        E._finish_undo(
+            requested.pending["prior"], "s5", "yes", pm=pm, nc=nc, cfg=_Cfg()
+        )
+    )
     assert out.applied is not None and out.applied["status"] == "blocked"
     # the reason surfaces once, cleanly -- no "can't undo -- cannot restore"
     # double negation.
@@ -473,8 +573,14 @@ def test_undo_logged_when_confirmed_apply_disabled():
             "status": "applied",
         }
     )
+    requested = asyncio.run(
+        E._handle_undo("s6", "undo that", "ok", pm=pm, cfg=_CfgDisabled())
+    )
+    assert requested.pending is not None
     out = asyncio.run(
-        E._handle_undo("s6", "undo that", "ok", pm=pm, nc=nc, cfg=_CfgDisabled())
+        E._finish_undo(
+            requested.pending["prior"], "s6", "yes", pm=pm, nc=nc, cfg=_CfgDisabled()
+        )
     )
     assert out.applied is not None and out.applied["status"] == "logged"
     assert "didn't take" in out.reply.lower()

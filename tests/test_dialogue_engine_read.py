@@ -68,6 +68,56 @@ def test_malformed_json_fails_soft():
     assert out.error is not None and out.intent is None  # no guessed mutation
 
 
+def test_query_fn_receives_register_scaled_num_predict():
+    """persona.num_predict_for_register must actually reach the LLM call
+    (spec §6): a low-salience (terse) turn and a high-salience (urgent) turn
+    reach query_fn with a different cfg.dialogue_num_predict."""
+
+    class _LowPM(_PM):
+        def load_auspices(self):
+            return {"salience": {"value": 0.05}}  # terse register
+
+    class _HighPM(_PM):
+        def load_auspices(self):
+            return {"salience": {"value": 0.95}}  # urgent register
+
+    captured: list[int] = []
+
+    async def capture_llm(prompt, system, client, cfg):
+        captured.append(cfg.dialogue_num_predict)
+        return (
+            '{"reply": "ok", "intent": null, "needs_clarification": false,'
+            ' "question": null}'
+        )
+
+    asyncio.run(
+        E.handle_turn(
+            "s1",
+            "hi",
+            pm=_LowPM(),
+            nc=None,
+            http_client=None,
+            cfg=_Cfg(),
+            query_fn=capture_llm,
+        )
+    )
+    asyncio.run(
+        E.handle_turn(
+            "s2",
+            "hi",
+            pm=_HighPM(),
+            nc=None,
+            http_client=None,
+            cfg=_Cfg(),
+            query_fn=capture_llm,
+        )
+    )
+    assert len(captured) == 2
+    assert captured[0] != captured[1]
+    assert captured[0] < captured[1]  # terse budget < urgent budget
+    assert _Cfg.dialogue_num_predict == 512  # the shared class attr is untouched
+
+
 def test_dialogue_disabled_short_circuits_before_llm_or_persistence():
     pm = _PM()
 

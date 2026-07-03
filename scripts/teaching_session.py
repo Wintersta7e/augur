@@ -13,8 +13,9 @@ NATS dialogue events after every step:
      the "(Dropped the pending proposal.)" notice), never silently kept.
   3. Directive -> fire: propose again, confirm with "yes", verify the
      directive is persisted and augur.imperator.dialogue.applied fires.
-  4. Fire -> undo: "undo that" reverses the applied directive; verify the
-     directive is removed and the undo audit record + NATS event exist.
+  4. Fire -> undo: "undo that" (light pending) then "yes" (confirm, spec §9)
+     reverses the applied directive; verify the directive is removed and the
+     undo audit record + NATS event exist.
 
 Run-unique session IDs => isolated conversation contexts. Runs from WSL
 against the loopback-exposed deploy NATS (127.0.0.1:4222) and Redis
@@ -224,9 +225,13 @@ async def main() -> int:
     arc3 = arc3_applied and dirs_after > dirs_before and len(applied_evts) >= 2
 
     # ---- Arc 4: Fire -> undo (reverse the applied directive)
+    # undo is a light-tier pending like every other light intent (spec §9):
+    # the request turn only proposes the reversal, a second "yes" confirms
+    # and actually applies it.
     print("-> Arc 4: undo the applied directive", flush=True)
-    t4 = await turn("Please undo that.")
-    arc4_applied = bool(t4.applied and t4.applied.get("status") == "applied")
+    t4a = await turn("Please undo that.")
+    t4b = await turn("yes") if t4a.pending is not None else None
+    arc4_applied = bool(t4b and t4b.applied and t4b.applied.get("status") == "applied")
     await wait_for(lambda: any(e.get("undo") for e in applied_evts), timeout=10)
     dirs_final = len(pm.load_dialogue_directives())
     undo_evts = [e for e in applied_evts if e.get("undo")]

@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from tabula.config import AugurConfig  # noqa: E402
 from tabula.contracts import PerceptionEvent  # noqa: E402
+from tabula.persistence import PersistenceManager  # noqa: E402
 
 _config = AugurConfig.from_env()
 
@@ -119,6 +120,31 @@ async def nats_conn() -> AsyncIterator[nats_client.NATS]:
 def session_id() -> str:
     """Fresh UUID session identifier."""
     return str(uuid4())
+
+
+@pytest_asyncio.fixture
+async def real_pm(redis_client: redis.Redis) -> PersistenceManager:  # type: ignore[type-arg]
+    """A real PersistenceManager over the flushed-per-test Redis client —
+    the dialogue showcase scenarios' single source of durable cross-faculty
+    state (used by ``tests/integration/test_dialogue_showcase.py``)."""
+    return PersistenceManager(redis_client)
+
+
+@pytest_asyncio.fixture
+async def real_nc(nats_conn: nats_client.NATS) -> nats_client.NATS:
+    """Alias of ``nats_conn`` under the dialogue showcase scenarios' own
+    fixture name — the same real NATS connection ``engine.handle_turn``
+    publishes ``augur.imperator.dialogue.*`` events over."""
+    return nats_conn
+
+
+@pytest.fixture
+def dialogue_cfg() -> AugurConfig:
+    """AugurConfig with dialogue defaults: confirmed-apply ON (the human-
+    confirmed dialogue path), watch-first Imperator II apply OFF (default) —
+    the showcase scenarios exercise only the confirmed path, never the
+    autonomous one."""
+    return AugurConfig()
 
 
 @pytest_asyncio.fixture

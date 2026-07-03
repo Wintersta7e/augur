@@ -39,6 +39,7 @@ MAX_MEMORY_ITEMS: int = 5000  # refuse-at-cap ceiling for Memoria tier sets (Lan
 MAX_IMPERATOR_PROPOSALS: int = (
     200  # newest-first capped append-log for Imperator proposals
 )
+MAX_DIALOGUE_LOG: int = 500  # newest-first capped conversation log
 
 # Default TTL for per-session Redis keys (feedback, correlation graph,
 # reflection report). Prevents indefinite growth beyond the 1000-entry
@@ -523,6 +524,43 @@ class PersistenceManager:
     def is_proposal_applied(self, dedupe_key: str) -> bool:
         """True if a recent (un-expired) apply of this dedupe_key exists."""
         return bool(self._r.exists(f"augur:imperator:applied:{dedupe_key}"))
+
+    def save_dialogue_turn(self, turn: dict) -> None:
+        """Append a conversation turn (newest-first, capped)."""
+        key = "augur:imperator:dialogue:log"
+        self._r.lpush(key, json.dumps(turn))
+        self._r.ltrim(key, 0, MAX_DIALOGUE_LOG - 1)
+
+    def load_dialogue_log(
+        self, *, limit: int = 50, session_id: str | None = None
+    ) -> list[dict]:
+        """Up to *limit* recent turns, newest first. [] on corrupt/absent.
+
+        With *session_id* set, only turns whose stored ``session_id`` matches
+        are returned (still newest-first, still capped at *limit*).
+        """
+        span = (MAX_DIALOGUE_LOG if session_id is not None else limit) - 1
+        raw = self._r.lrange("augur:imperator:dialogue:log", 0, span)
+        try:
+            turns = [json.loads(e) for e in raw]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning("dialogue log contained a corrupt entry; returning []")
+            return []
+        if session_id is not None:
+            turns = [t for t in turns if t.get("session_id") == session_id][:limit]
+        return turns
+
+    def save_dialogue_pending(self, session_id: str, pending: dict, ttl: float) -> None:
+        """Store the single pending-confirmation intent for a session, with TTL."""
+        self._set_json(
+            f"augur:imperator:dialogue:pending:{session_id}", pending, ex=int(ttl)
+        )
+
+    def load_dialogue_pending(self, session_id: str) -> dict | None:
+        return self._get_json(f"augur:imperator:dialogue:pending:{session_id}")
+
+    def clear_dialogue_pending(self, session_id: str) -> None:
+        self._r.delete(f"augur:imperator:dialogue:pending:{session_id}")
 
     # -- Current session --------------------------------------------------
 

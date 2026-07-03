@@ -114,3 +114,11 @@ def test_persistence_gate_silences_key_is_limen():
     r = pm._r
     assert r.keys("augur:limen:*")
     assert not r.keys("augur:gate:*")
+
+
+def test_dialogue_tools_and_subjects_present():
+    src = inspect.getsource(srv)
+    for tool in ("dialogue_turn", "dialogue_history", "dialogue_pending"):
+        assert f"def {tool}(" in src
+    # subjects/keys live under the imperator.dialogue namespace
+    assert "augur.imperator.dialogue." in src or "augur:imperator:dialogue:" in src

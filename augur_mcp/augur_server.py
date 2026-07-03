@@ -819,6 +819,71 @@ def get_proposals(limit: int = 50) -> dict[str, Any]:
         return {"proposals": pm.load_proposals(limit=max(1, min(limit, 200)))}
 
 
+# ---------------------------------------------------------------------------
+# Dialogue tools (Imperator III)
+# ---------------------------------------------------------------------------
+# Subjects: augur.imperator.dialogue.turn
+# Keys: augur:imperator:dialogue:log, augur:imperator:dialogue:pending
+
+
+async def _dialogue_handle_turn(session_id, message, **kw):  # seam for tests
+    """Dispatch to the dialogue engine; patchable for testing."""
+    from imperator.dialogue.engine import handle_turn
+
+    return await handle_turn(session_id, message, **kw)
+
+
+@mcp.tool()
+@_tool_safe
+def dialogue_turn(session_id: str, message: str) -> dict[str, Any]:
+    """Send one conversational turn to Imperator III and return its reply + status.
+
+    Programmatic harness for driving/testing the dialogue engine.
+    """
+    import httpx
+
+    async def _run() -> dict[str, Any]:
+        with _persistence_ctx() as pm:
+            nc = await nats_client.connect(
+                _config.nats_url,
+                connect_timeout=_config.nats_connect_timeout,
+            )
+            http = httpx.AsyncClient()
+            try:
+                turn = await _dialogue_handle_turn(
+                    session_id, message, pm=pm, nc=nc, http_client=http, cfg=_config
+                )
+                return {
+                    "reply": turn.reply,
+                    "intent": turn.intent,
+                    "pending": turn.pending,
+                    "applied": turn.applied,
+                    "needs_clarification": turn.needs_clarification,
+                    "error": turn.error,
+                }
+            finally:
+                await http.aclose()
+                await nc.drain()
+
+    return asyncio.run(_run())
+
+
+@mcp.tool()
+@_tool_safe
+def dialogue_history(session_id: str, limit: int = 20) -> dict[str, Any]:
+    """Recent conversation turns for a session (newest first)."""
+    with _persistence_ctx() as pm:
+        return {"turns": pm.load_dialogue_log(limit=limit, session_id=session_id)}
+
+
+@mcp.tool()
+@_tool_safe
+def dialogue_pending(session_id: str) -> dict[str, Any]:
+    """The pending-confirmation intent for a session, if any."""
+    with _persistence_ctx() as pm:
+        return {"pending": pm.load_dialogue_pending(session_id)}
+
+
 # Re-exported from nexus.matrix_ops so existing imports in tests keep working.
 _VALID_SEVERITIES = matrix_ops._VALID_SEVERITIES
 MAX_ESCALATION_RULES = matrix_ops.MAX_ESCALATION_RULES

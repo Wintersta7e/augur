@@ -29,9 +29,12 @@ Conventions copied from existing suites:
     ``tests/test_dialogue_invariants.py``.
 
 Varied baseline values are not needed here (no anomaly-detector baselines are
-exercised), but every gate ``state_key`` used is unique per scenario so no
-per-channel state bleeds across them (each test also gets a freshly flushed
-Redis via the ``redis_client`` fixture).
+exercised). Gate ``state_key``s are mostly unique per scenario; scenarios 3
+and 7 both reuse ``single:chess:user`` (each independently driving that
+channel to central_tolerance suppression on the same illustrative "chess"
+domain), but no state actually bleeds across them -- each test gets a
+freshly flushed Redis via the ``redis_client`` fixture, so the shared key
+never carries state between scenarios.
 """
 
 from __future__ import annotations
@@ -344,6 +347,12 @@ async def test_semantic_fact_persists_and_shapes_advice(real_pm, real_nc, dialog
         http_client=MagicMock(),
         config=cfg2,
         query_ollama=query_ollama,
+        # redis_client intentionally omitted -- _run defaults it to a
+        # throwaway fakeredis instance (mirrors the unit harness in
+        # tests/test_dialogue_advice_injection.py's _run_and_capture_prompt).
+        # process_message only reads it for active-session lookup + the
+        # prompt builder's own context, unrelated to the taught-fact
+        # injection this assertion checks, which lives entirely on real_pm.
     )
     assert query_ollama.await_count == 1, "advice LLM was not called"
     prompt = query_ollama.await_args.args[0]

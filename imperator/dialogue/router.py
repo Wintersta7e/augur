@@ -34,17 +34,18 @@ def _arm_for_silence(ctx, state_key: str) -> dict:
     suppressed this state_key, per the suppression record's ``arm`` field.
 
     habituation -> reset the habituation floor to 0 (speak up again).
-    central_tolerance/self_tolerance -> drop the permanent self-tolerance
-    dismissal. Anything else -- a different arm, or no matching suppression
-    record at all -- falls back to self_tolerance_remove, the safe universal
-    "make this fireable again" default.
+    central_tolerance -> drop the permanent self-tolerance dismissal (the only
+    deciding_arm value limen/gate.py ever emits for that suppression path).
+    Anything else -- a different arm, or no matching suppression record at
+    all -- falls back to self_tolerance_remove, the safe universal "make this
+    fireable again" default.
     """
     for s in ctx.recent_suppressions:
         if s.get("state_key") == state_key:
             arm = s.get("arm")
             if arm == "habituation":
                 return {"op": "floor_set", "state_key": state_key, "value": 0.0}
-            if arm in {"central_tolerance", "self_tolerance"}:
+            if arm == "central_tolerance":
                 return {"op": "self_tolerance_remove", "state_key": state_key}
             break
     return {"op": "self_tolerance_remove", "state_key": state_key}
@@ -166,6 +167,21 @@ def apply_confirmed(pending: dict, *, pm, cfg, session_id: str) -> dict:
     return {"proposal": p, "status": p["status"], "echo": pending["echo"]}
 
 
+def _undo_proposal(kind: str, target: str, action: dict) -> dict:
+    """Build a normalized undo proposal. Every build_inverse branch below
+    varies kind/target/action, but rationale="undo" and source="dialogue"
+    are constant across all of them."""
+    return P.normalize_klass(
+        P.make_proposal(
+            kind=kind,
+            target=target,
+            action=action,
+            rationale="undo",
+            source="dialogue",
+        )
+    )
+
+
 def build_inverse(applied: dict) -> dict | None:
     """Construct an inverse proposal from an applied record's rollback anchor.
 
@@ -179,44 +195,27 @@ def build_inverse(applied: dict) -> dict | None:
     a = p.get("action") or {}
     kind = p["kind"]
     if kind == "escalation_rule" and a.get("prior_target") is not None:
-        return P.normalize_klass(
-            P.make_proposal(
-                kind="escalation_rule",
-                target=p["target"],
-                action={"target": a["prior_target"]},
-                rationale="undo",
-                source="dialogue",
-            )
+        return _undo_proposal(
+            "escalation_rule", p["target"], {"target": a["prior_target"]}
         )
     if kind == "sigma" and a.get("prior_sigma") is not None:
-        return P.normalize_klass(
-            P.make_proposal(
-                kind="sigma",
-                target=p["target"],
-                action={
-                    "domain": a.get("domain", p["target"]),
-                    "sigma": a["prior_sigma"],
-                },
-                rationale="undo",
-                source="dialogue",
-            )
+        return _undo_proposal(
+            "sigma",
+            p["target"],
+            {"domain": a.get("domain", p["target"]), "sigma": a["prior_sigma"]},
         )
     if kind == "gate_calibration":
         op = cast(str, a.get("op"))
         if op == "floor_set" and "prior" in a:
             prior = a.get("prior") or {}
-            return P.normalize_klass(
-                P.make_proposal(
-                    kind="gate_calibration",
-                    target=p["target"],
-                    action={
-                        "op": "floor_set",
-                        "state_key": a.get("state_key", p["target"]),
-                        "value": prior.get("floor", 0.0),
-                    },
-                    rationale="undo",
-                    source="dialogue",
-                )
+            return _undo_proposal(
+                "gate_calibration",
+                p["target"],
+                {
+                    "op": "floor_set",
+                    "state_key": a.get("state_key", p["target"]),
+                    "value": prior.get("floor", 0.0),
+                },
             )
         inv_op = {
             "self_tolerance_add": "self_tolerance_remove",
@@ -227,27 +226,16 @@ def build_inverse(applied: dict) -> dict | None:
         # self_tolerance_remove changed it iff it WAS a member beforehand.
         changed = "prior" in a and (op == "self_tolerance_add") != bool(a["prior"])
         if inv_op and changed:
-            return P.normalize_klass(
-                P.make_proposal(
-                    kind="gate_calibration",
-                    target=p["target"],
-                    action={"op": inv_op, "state_key": a.get("state_key", p["target"])},
-                    rationale="undo",
-                    source="dialogue",
-                )
+            return _undo_proposal(
+                "gate_calibration",
+                p["target"],
+                {"op": inv_op, "state_key": a.get("state_key", p["target"])},
             )
     if kind == "prompt_strategy" and "prior_text" in a:
-        return P.normalize_klass(
-            P.make_proposal(
-                kind="prompt_strategy",
-                target=p["target"],
-                action={
-                    "domain": a.get("domain", p["target"]),
-                    "text": a["prior_text"],
-                },
-                rationale="undo",
-                source="dialogue",
-            )
+        return _undo_proposal(
+            "prompt_strategy",
+            p["target"],
+            {"domain": a.get("domain", p["target"]), "text": a["prior_text"]},
         )
     if kind == "context_directive":
         # Complete restore semantics (Task 20 decision A), designed once and
@@ -264,25 +252,21 @@ def build_inverse(applied: dict) -> dict | None:
                 # inverse -- undo must report unavailable rather than
                 # re-add fabricated content and claim a false success.
                 return None
-            return P.normalize_klass(
-                P.make_proposal(
-                    kind="context_directive",
-                    target=p["target"],
-                    action={
-                        "directive_id": prior_directive.get(
-                            "directive_id", a.get("directive_id")
-                        ),
-                        "predicate": prior_directive.get("predicate", {}),
-                        "action": prior_directive.get("action", "suppress"),
-                        "scope": prior_directive.get("scope", "all"),
-                        # The directive's OWN rationale, not this undo's audit
-                        # rationale -- a re-add must not lose the original
-                        # user-facing explanation.
-                        "rationale": prior_directive.get("rationale", ""),
-                    },
-                    rationale="undo",
-                    source="dialogue",
-                )
+            return _undo_proposal(
+                "context_directive",
+                p["target"],
+                {
+                    "directive_id": prior_directive.get(
+                        "directive_id", a.get("directive_id")
+                    ),
+                    "predicate": prior_directive.get("predicate", {}),
+                    "action": prior_directive.get("action", "suppress"),
+                    "scope": prior_directive.get("scope", "all"),
+                    # The directive's OWN rationale, not this undo's audit
+                    # rationale -- a re-add must not lose the original
+                    # user-facing explanation.
+                    "rationale": prior_directive.get("rationale", ""),
+                },
             )
         if not a.get("directive_id"):
             # No directive_id anchor means the write never stored anything
@@ -292,30 +276,22 @@ def build_inverse(applied: dict) -> dict | None:
             return None
         if prior_directive is not None:
             # Upsert-with-prior: inverse RESTORES the prior content.
-            return P.normalize_klass(
-                P.make_proposal(
-                    kind="context_directive",
-                    target=p["target"],
-                    action={
-                        "directive_id": a["directive_id"],
-                        "predicate": prior_directive.get("predicate", {}),
-                        "action": prior_directive.get("action", "suppress"),
-                        "scope": prior_directive.get("scope", "all"),
-                        "rationale": prior_directive.get("rationale", ""),
-                    },
-                    rationale="undo",
-                    source="dialogue",
-                )
+            return _undo_proposal(
+                "context_directive",
+                p["target"],
+                {
+                    "directive_id": a["directive_id"],
+                    "predicate": prior_directive.get("predicate", {}),
+                    "action": prior_directive.get("action", "suppress"),
+                    "scope": prior_directive.get("scope", "all"),
+                    "rationale": prior_directive.get("rationale", ""),
+                },
             )
         # Create-with-no-prior: inverse is removal (current behavior).
-        return P.normalize_klass(
-            P.make_proposal(
-                kind="context_directive",
-                target=p["target"],
-                action={"op": "remove", "directive_id": a["directive_id"]},
-                rationale="undo",
-                source="dialogue",
-            )
+        return _undo_proposal(
+            "context_directive",
+            p["target"],
+            {"op": "remove", "directive_id": a["directive_id"]},
         )
     if kind == "semantic_fact":
         # Mirrors the context_directive case above (Task 20 decision A):
@@ -328,14 +304,8 @@ def build_inverse(applied: dict) -> dict | None:
                 # inverse -- undo must report unavailable rather than
                 # re-teach fabricated content and claim a false success.
                 return None
-            return P.normalize_klass(
-                P.make_proposal(
-                    kind="semantic_fact",
-                    target=p["target"],
-                    action={"pattern": prior_fact.get("pattern")},
-                    rationale="undo",
-                    source="dialogue",
-                )
+            return _undo_proposal(
+                "semantic_fact", p["target"], {"pattern": prior_fact.get("pattern")}
             )
         if not a.get("memory_id"):
             return None
@@ -343,24 +313,14 @@ def build_inverse(applied: dict) -> dict | None:
             # Upsert-with-prior (re-teach): inverse RESTORES the prior
             # content by re-teaching it -- itself a review, per decision B:
             # even an undo is forward decay, never a raw state rollback.
-            return P.normalize_klass(
-                P.make_proposal(
-                    kind="semantic_fact",
-                    target=p["target"],
-                    action={"pattern": prior_fact.get("pattern")},
-                    rationale="undo",
-                    source="dialogue",
-                )
+            return _undo_proposal(
+                "semantic_fact", p["target"], {"pattern": prior_fact.get("pattern")}
             )
         # Create-with-no-prior: inverse is removal (current behavior).
-        return P.normalize_klass(
-            P.make_proposal(
-                kind="semantic_fact",
-                target=p["target"],
-                action={"op": "remove", "memory_id": a["memory_id"]},
-                rationale="undo",
-                source="dialogue",
-            )
+        return _undo_proposal(
+            "semantic_fact",
+            p["target"],
+            {"op": "remove", "memory_id": a["memory_id"]},
         )
     return None
 

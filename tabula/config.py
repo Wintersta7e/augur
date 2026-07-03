@@ -215,7 +215,6 @@ class AugurConfig:
     dialogue_context_max_turns: int = 12
     dialogue_context_token_budget: int = 2048
     dialogue_pending_ttl_s: float = 300.0
-    dialogue_log_cap: int = 500
     dialogue_confirmed_apply_enabled: bool = True
 
     def __post_init__(self) -> None:

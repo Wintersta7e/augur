@@ -91,10 +91,14 @@ def _apply_prompt_strategy(pm, p: dict, *, cfg) -> bool:
     archived — the rollback anchor stays intact and no different-text proposal
     for this target can re-apply in-window off an unarmed gate.
 
-    The rollback anchor is recorded in p["action"]["prior_text"] on the success
-    path only. Idempotent: only re-saves (save_prompt archives the prior into
-    rollback history) when the text actually changes — a re-apply of identical
-    text must NOT re-archive and corrupt the rollback anchor.
+    The rollback anchor is recorded in p["action"]["prior_text"] as soon as
+    the gate arms -- not exclusively on a clean return-True: if the
+    subsequent save_prompt call raises, apply_proposal's except-Exception
+    wrapper still logs the proposal (status "logged", not "applied") with
+    the anchor already set. Idempotent: only re-saves (save_prompt archives
+    the prior into rollback history) when the text actually changes — a
+    re-apply of identical text must NOT re-archive and corrupt the rollback
+    anchor.
     """
     action = p.get("action") or {}
     domain, text = action.get("domain", p["target"]), action.get("text", "")

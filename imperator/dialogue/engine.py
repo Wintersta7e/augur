@@ -64,6 +64,45 @@ async def _publish(nc, subject: str, payload: dict) -> None:
         await nc.publish(subject, json.dumps(payload).encode())
 
 
+async def _record_and_publish(pm, nc, record: dict) -> None:
+    """Persist a confirmed-apply/undo audit record and fire the two dialogue
+    events every such record emits (mirrors the reasoner trigger every other
+    faculty's completion publishes). Shared by _resolve_pending and
+    _handle_undo -- both build a differently-shaped record dict, then take
+    this identical audit+publish action on it."""
+    pm.append_dialogue_audit(record)
+    await _publish(nc, "augur.imperator.dialogue.applied", record)
+    await _publish(
+        nc, "augur.imperator.ii.trigger", {"reason": "dialogue", "ts": record["ts"]}
+    )
+
+
+def _save_turn(
+    pm,
+    session_id: str,
+    user_text: str,
+    reply: str,
+    *,
+    ts: float | None = None,
+    applied: bool | None = None,
+) -> None:
+    """Persist a conversation-log turn. ``ts`` lets a confirmed-apply turn
+    share its audit record's timestamp instead of drifting from a second
+    time.time() call; every other caller gets a fresh timestamp. ``applied``
+    is included only when the caller has a truthful apply outcome to report
+    (a confirmed-pending turn) -- omitted elsewhere, matching the original
+    per-branch dict literals."""
+    record = {
+        "ts": ts if ts is not None else time.time(),
+        "session_id": session_id,
+        "user_text": user_text,
+        "reply": reply,
+    }
+    if applied is not None:
+        record["applied"] = applied
+    pm.save_dialogue_turn(record)
+
+
 async def _handle_undo(
     session_id: str, user_text: str, base_reply: str, *, pm, nc, cfg
 ) -> DialogueTurn:
@@ -103,11 +142,7 @@ async def _handle_undo(
         # the triggering utterance itself is the provenance.
         "confirming_text": user_text,
     }
-    pm.append_dialogue_audit(record)
-    await _publish(nc, "augur.imperator.dialogue.applied", record)
-    await _publish(
-        nc, "augur.imperator.ii.trigger", {"reason": "dialogue", "ts": record["ts"]}
-    )
+    await _record_and_publish(pm, nc, record)
     status_reply = {
         "applied": "Reversed.",
         # Surface router's blocked reason once, without stacking negations
@@ -126,6 +161,87 @@ async def _handle_undo(
     return DialogueTurn(reply=reply, applied=record)
 
 
+async def _resolve_pending(
+    pending: dict, session_id: str, user_text: str, *, pm, nc, cfg
+) -> DialogueTurn | None:
+    """Try to resolve an existing pending proposal against this turn's text.
+
+    Returns the completed DialogueTurn if the tier/phrase check passed and
+    the proposal was applied. Returns None if it didn't match -- the pending
+    has already been cleared either way (no double-apply), and the caller
+    should notice-drop it and fall through to treating user_text as a fresh
+    turn.
+    """
+    if pending.get("tier") == "heavy":
+        ok = I.matches_heavy_phrase(user_text, pending.get("confirm_phrase") or "")
+    else:
+        ok = I.is_affirmative(user_text)
+    pm.clear_dialogue_pending(session_id)  # cleared before apply: no double-apply
+    if not ok:
+        return None
+    applied = R.apply_confirmed(pending, pm=pm, cfg=cfg, session_id=session_id)
+    record = {
+        "ts": time.time(),
+        "session_id": session_id,
+        "kind": pending["proposal"]["kind"],
+        "target": pending["proposal"].get("target"),
+        "proposal": applied["proposal"],
+        "status": applied["status"],
+        # Confirmation provenance: who confirmed (session_id) and what turn
+        # confirmed it (the "yes"/heavy-phrase text).
+        "confirming_text": user_text,
+    }
+    await _record_and_publish(pm, nc, record)
+    reply = (
+        f"Done — {applied['echo']} Say 'undo that' to reverse it."
+        if applied["status"] == "applied"
+        else "I couldn't apply that."
+    )
+    turn = DialogueTurn(reply=reply, applied=record)
+    # Truthful: a confirmed apply can still resolve "logged" (kill switch off,
+    # non-safe klass, apply error) -- the conversation log must agree with
+    # the reply and audit, not claim success unconditionally.
+    _save_turn(
+        pm,
+        session_id,
+        user_text,
+        reply,
+        ts=record["ts"],
+        applied=applied["status"] == "applied",
+    )
+    return turn
+
+
+async def _handle_intent(
+    intent: dict, base_reply: str, ctx, session_id: str, user_text: str, *, pm, nc, cfg
+) -> DialogueTurn:
+    """Validate and route a freshly parsed intent: dispatch to undo, route a
+    new pending proposal awaiting confirmation, or fall back to a
+    clarification reply on an invalid intent. Never applies anything itself
+    except via _handle_undo's router.apply_undo."""
+    try:
+        valid = I.validate_intent(intent)
+        if valid["kind"] == "undo":
+            return await _handle_undo(
+                session_id, user_text, base_reply, pm=pm, nc=nc, cfg=cfg
+            )
+        new_pending = R.route(valid, ctx, pm=pm, cfg=cfg)
+        pm.save_dialogue_pending(
+            session_id, new_pending, ttl=cfg.dialogue_pending_ttl_s
+        )
+        ask = (
+            f" Confirm with '{new_pending['confirm_phrase']}'."
+            if new_pending["tier"] == "heavy"
+            else " Confirm? (yes)"
+        )
+        reply = f"{base_reply}\n{new_pending['echo']}{ask}"
+        return DialogueTurn(reply=reply, intent=valid, pending=new_pending)
+    except ValueError as exc:
+        return DialogueTurn(
+            reply=f"I didn't quite follow — {exc}", needs_clarification=True
+        )
+
+
 async def handle_turn(
     session_id: str,
     user_text: str,
@@ -136,6 +252,13 @@ async def handle_turn(
     cfg,
     query_fn: QueryFn = query_dialogue_ollama,
 ) -> DialogueTurn:
+    # cfg.dialogue_enabled is a master kill switch (mirrors imperator_ii_enabled's
+    # runner-level check) -- getattr-defaulted True so callers/tests that stub a
+    # minimal cfg without this field keep today's always-on behavior.
+    if not getattr(cfg, "dialogue_enabled", True):
+        return DialogueTurn(
+            reply="Dialogue is currently disabled.", error="dialogue_disabled"
+        )
     ctx = C.assemble(pm, now=time.time(), cfg=cfg)
     register = persona.register_for_salience(ctx.salience)
     system = persona.build_system_prompt(register, C.render(ctx, cfg), cfg)
@@ -143,51 +266,11 @@ async def handle_turn(
     notice = ""  # prefixed to the fresh-turn reply when a pending was dropped
     pending = pm.load_dialogue_pending(session_id)
     if pending is not None:
-        if pending.get("tier") == "heavy":
-            ok = I.matches_heavy_phrase(user_text, pending.get("confirm_phrase") or "")
-        else:
-            ok = I.is_affirmative(user_text)
-        pm.clear_dialogue_pending(session_id)  # cleared before apply: no double-apply
-        if ok:
-            applied = R.apply_confirmed(pending, pm=pm, cfg=cfg, session_id=session_id)
-            record = {
-                "ts": time.time(),
-                "session_id": session_id,
-                "kind": pending["proposal"]["kind"],
-                "target": pending["proposal"].get("target"),
-                "proposal": applied["proposal"],
-                "status": applied["status"],
-                # Confirmation provenance: who confirmed (session_id) and
-                # what turn confirmed it (the "yes"/heavy-phrase text).
-                "confirming_text": user_text,
-            }
-            pm.append_dialogue_audit(record)
-            await _publish(nc, "augur.imperator.dialogue.applied", record)
-            await _publish(
-                nc,
-                "augur.imperator.ii.trigger",
-                {"reason": "dialogue", "ts": record["ts"]},
-            )
-            reply = (
-                f"Done — {applied['echo']} Say 'undo that' to reverse it."
-                if applied["status"] == "applied"
-                else "I couldn't apply that."
-            )
-            turn = DialogueTurn(reply=reply, applied=record)
-            pm.save_dialogue_turn(
-                {
-                    "ts": record["ts"],
-                    "session_id": session_id,
-                    "user_text": user_text,
-                    "reply": reply,
-                    # Truthful: a confirmed apply can still resolve "logged"
-                    # (kill switch off, non-safe klass, apply error) -- the
-                    # conversation log must agree with the reply and audit,
-                    # not claim success unconditionally.
-                    "applied": applied["status"] == "applied",
-                }
-            )
-            return turn
+        resolved = await _resolve_pending(
+            pending, session_id, user_text, pm=pm, nc=nc, cfg=cfg
+        )
+        if resolved is not None:
+            return resolved
         # Tier/phrase mismatch: fall through and treat user_text as a fresh
         # turn -- but say the pending was dropped rather than silently
         # discarding the user's un-confirmed proposal.
@@ -196,14 +279,7 @@ async def handle_turn(
         # Expired/absent pending on a "yes": don't waste (or be misled by) an
         # LLM call on a bare confirmation gesture with nothing to confirm.
         turn = DialogueTurn(reply="There's nothing pending to confirm.")
-        pm.save_dialogue_turn(
-            {
-                "ts": time.time(),
-                "session_id": session_id,
-                "user_text": user_text,
-                "reply": turn.reply,
-            }
-        )
+        _save_turn(pm, session_id, user_text, turn.reply)
         return turn
 
     try:
@@ -219,58 +295,18 @@ async def handle_turn(
             reply=notice + (obj.get("question") or obj["reply"]),
             needs_clarification=True,
         )
-        pm.save_dialogue_turn(
-            {
-                "ts": time.time(),
-                "session_id": session_id,
-                "user_text": user_text,
-                "reply": turn.reply,
-            }
-        )
+        _save_turn(pm, session_id, user_text, turn.reply)
         return turn
 
     intent = obj.get("intent")
     if intent:
-        try:
-            valid = I.validate_intent(intent)
-            if valid["kind"] == "undo":
-                turn = await _handle_undo(
-                    session_id, user_text, obj["reply"], pm=pm, nc=nc, cfg=cfg
-                )
-            else:
-                new_pending = R.route(valid, ctx, pm=pm, cfg=cfg)
-                pm.save_dialogue_pending(
-                    session_id, new_pending, ttl=cfg.dialogue_pending_ttl_s
-                )
-                ask = (
-                    f" Confirm with '{new_pending['confirm_phrase']}'."
-                    if new_pending["tier"] == "heavy"
-                    else " Confirm? (yes)"
-                )
-                reply = f"{obj['reply']}\n{new_pending['echo']}{ask}"
-                turn = DialogueTurn(reply=reply, intent=valid, pending=new_pending)
-        except ValueError as exc:
-            turn = DialogueTurn(
-                reply=f"I didn't quite follow — {exc}", needs_clarification=True
-            )
-        turn.reply = notice + turn.reply
-        pm.save_dialogue_turn(
-            {
-                "ts": time.time(),
-                "session_id": session_id,
-                "user_text": user_text,
-                "reply": turn.reply,
-            }
+        turn = await _handle_intent(
+            intent, obj["reply"], ctx, session_id, user_text, pm=pm, nc=nc, cfg=cfg
         )
+        turn.reply = notice + turn.reply
+        _save_turn(pm, session_id, user_text, turn.reply)
         return turn
 
     turn = DialogueTurn(reply=notice + obj["reply"])
-    pm.save_dialogue_turn(
-        {
-            "ts": time.time(),
-            "session_id": session_id,
-            "user_text": user_text,
-            "reply": turn.reply,
-        }
-    )
+    _save_turn(pm, session_id, user_text, turn.reply)
     return turn

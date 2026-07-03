@@ -66,3 +66,27 @@ def test_malformed_json_fails_soft():
         )
     )
     assert out.error is not None and out.intent is None  # no guessed mutation
+
+
+def test_dialogue_disabled_short_circuits_before_llm_or_persistence():
+    pm = _PM()
+
+    class _DisabledCfg(_Cfg):
+        dialogue_enabled = False
+
+    async def unreachable_llm(prompt, system, client, cfg):
+        raise AssertionError("LLM must not be called when dialogue is disabled")
+
+    out = asyncio.run(
+        E.handle_turn(
+            "s1",
+            "hello",
+            pm=pm,
+            nc=None,
+            http_client=None,
+            cfg=_DisabledCfg(),
+            query_fn=unreachable_llm,
+        )
+    )
+    assert out.error == "dialogue_disabled"
+    assert not hasattr(pm, "saved")  # no turn logged on the disabled path

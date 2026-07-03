@@ -4,19 +4,7 @@ into plain dicts for the pure compute modules. fakeredis-testable; no asyncio.
 
 from __future__ import annotations
 
-from datetime import datetime
-
-
-def _to_epoch(ts) -> float:
-    """Coerce an ISO-8601 string or numeric epoch to a float epoch (0.0 on failure)."""
-    if ts is None:
-        return 0.0
-    if isinstance(ts, (int, float)):
-        return float(ts)
-    try:
-        return datetime.fromisoformat(str(ts)).timestamp()
-    except (ValueError, TypeError):
-        return 0.0
+from tabula.persistence import _to_epoch
 
 
 def _current_sid(pm) -> str | None:

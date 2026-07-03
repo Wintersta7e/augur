@@ -79,6 +79,75 @@ def test_apply_prompt_requires_existing_current_prompt():
     assert pm.load_prompt("typing") == txt
 
 
+def test_apply_prompt_records_prior_text_anchor():
+    # A successful prompt apply must record the rollback anchor: the pre-apply
+    # stored prompt, under action["prior_text"] — the key rollback reads to restore.
+    pm = _pm()
+    anchor = "Some existing prompt that is long enough to pass."
+    pm.save_prompt("typing", anchor)
+    txt = "Consider developing minor pieces before the queen, calmly."
+    p = _safe(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="typing",
+            action={"domain": "typing", "text": txt},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")
+    assert out["status"] == "applied"
+    assert p["action"]["prior_text"] == anchor
+    assert pm.load_prompt("typing") == txt
+
+
+def test_apply_prompt_loads_current_prompt_exactly_once(monkeypatch):
+    # The precondition check and the rollback-anchor read must share ONE
+    # load_prompt call: a second read is an extra round-trip and a TOCTOU window
+    # where the anchor could be taken from a value that was never validated.
+    pm = _pm()
+    pm.save_prompt("typing", "Some existing prompt that is long enough to pass.")
+    calls = []
+    real_load = pm.load_prompt
+    monkeypatch.setattr(
+        pm, "load_prompt", lambda *a, **k: (calls.append(a), real_load(*a, **k))[1]
+    )
+    txt = "Consider developing minor pieces before the queen, calmly."
+    p = _safe(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="typing",
+            action={"domain": "typing", "text": txt},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")
+    assert out["status"] == "applied"
+    assert len(calls) == 1
+
+
+def test_apply_prompt_unacceptable_text_fails_before_arming():
+    # Unacceptable text (below min_prompt_len) must fail validation BEFORE the
+    # gate arms: status stays 'logged', prompt untouched, no anchor recorded, and
+    # the applied-marker is never set — so a corrected proposal for the same
+    # target can still apply within the staleness window.
+    pm = _pm()
+    anchor = "Some existing prompt that is long enough to pass."
+    pm.save_prompt("typing", anchor)
+    p = _safe(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="typing",
+            action={"domain": "typing", "text": "too short"},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")
+    assert out["status"] == "logged"
+    assert pm.load_prompt("typing") == anchor
+    assert "prior_text" not in p["action"]
+    assert pm.is_proposal_applied(p["dedupe_key"]) is False
+
+
 def test_apply_sigma_is_propose_only():
     pm = _pm()
     p = P.normalize_klass(

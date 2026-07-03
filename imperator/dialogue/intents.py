@@ -81,4 +81,9 @@ def is_affirmative(text: str) -> bool:
 
 
 def matches_heavy_phrase(text: str, phrase: str) -> bool:
+    # An empty/whitespace phrase is always a substring of any text -- fail
+    # CLOSED instead: a missing/blank confirm_phrase must never let an
+    # unrelated turn confirm a heavy (structural) change.
+    if not phrase.strip():
+        return False
     return phrase.lower() in text.lower()

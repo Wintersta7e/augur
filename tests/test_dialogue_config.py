@@ -1,3 +1,5 @@
+import pytest
+
 from tabula.config import AugurConfig
 
 
@@ -16,3 +18,8 @@ def test_dialogue_env_override(monkeypatch):
     c = AugurConfig.from_env()
     assert c.dialogue_enabled is False
     assert c.dialogue_num_predict == 256
+
+
+def test_dialogue_context_token_budget_bound():
+    with pytest.raises(ValueError):
+        AugurConfig(dialogue_context_token_budget=0)

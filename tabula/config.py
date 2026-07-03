@@ -438,6 +438,8 @@ class AugurConfig:
             raise ValueError("dialogue_pending_ttl_s must be > 0")
         if self.dialogue_context_max_turns < 0:
             raise ValueError("dialogue_context_max_turns must be >= 0")
+        if self.dialogue_context_token_budget < 1:
+            raise ValueError("dialogue_context_token_budget must be >= 1")
 
     # ── Constructors ───────────────────────────────────────────────────────
 

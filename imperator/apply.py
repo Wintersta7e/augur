@@ -266,9 +266,8 @@ def _apply_context_directive(pm, p: dict, *, cfg) -> bool:
       dispatched apply (self_tolerance_remove arms too). The rollback anchor
       p["action"]["prior_directive"] records the FULL directive content read
       BEFORE the delete (None if the id never existed), so a follow-on undo
-      can re-add the exact removed content -- Task 20 decision A's restore
-      semantics (replacing the earlier "unavailable" stopgap wherever a prior
-      is actually available).
+      can re-add the exact removed content instead of reporting "unavailable"
+      whenever a real prior exists (spec §8's rollback-anchor table).
     - create/upsert (default): validates the directive's inner "action" field
       against the suppress|downgrade enum (False if neither, no arm -- fail
       closed like every other enum/range check in this module), mints a
@@ -341,22 +340,22 @@ def _apply_semantic_fact(pm, p: dict, *, cfg, session_id: str | None) -> bool:
       pm.apply_memory_sweep's prune handling). The rollback anchor
       p["action"]["prior_fact"] records the FULL pre-removal state read
       BEFORE the flip (None if the id never existed), so a follow-on undo can
-      re-teach the exact removed content -- Task 20 decision A's restore
-      semantics (replacing the earlier "unavailable" stopgap wherever a prior
-      is actually available).
+      re-teach the exact removed content instead of reporting "unavailable"
+      whenever a real prior exists (spec §8's rollback-anchor table).
     - create/upsert (default): requires a pattern with kind="semantic" (False
       otherwise, no arm -- defense-in-depth mirror of the persistence-layer
       check in create_user_taught_memory, kept here so the SAME validate-then-
       arm ordering as every other handler holds even though the write would
       also refuse). Arms the gate, then creates OR FSRS-reviews the taught
-      memory via pm.create_user_taught_memory (Task 20 decision B:
-      re-teaching an EXISTING fact strengthens it via a real recurrence
-      review -- it never resets decay progress, and reactivates a previously
-      -archived fact). The rollback anchor p["action"]["prior_fact"] records
-      the FULL pre-apply state read BEFORE the write (None for a brand-new
-      memory_id), so an undo of a re-teach restores the prior CONTENT via the
-      same create/upsert path -- itself a review, per decision B: even an
-      undo is forward decay, never a raw state rollback.
+      memory via pm.create_user_taught_memory: re-teaching an EXISTING fact
+      strengthens it via a real recurrence review -- it never resets decay
+      progress, and reactivates a previously-archived fact (Memoria's FSRS
+      decay model, tabula/persistence.py's create_user_taught_memory). The
+      rollback anchor p["action"]["prior_fact"] records the FULL pre-apply
+      state read BEFORE the write (None for a brand-new memory_id), so an
+      undo of a re-teach restores the prior CONTENT via the same
+      create/upsert path -- itself a review: even an undo is forward decay,
+      never a raw state rollback.
 
     Self-validating and SELF-ARMING (validate -> arm -> write), matching every
     other _dispatch_confirmed handler's contract.
@@ -421,8 +420,8 @@ def _apply_confirmed(pm, p: dict, *, cfg, session_id: str | None) -> dict:
 
 
 def _dispatch_confirmed(pm, p: dict, *, cfg, session_id: str | None = None) -> bool:
-    """Route a confirmed proposal to its kind helper, honoring each helper's arming
-    contract (Task 9): escalation_rule does NOT self-arm, so this caller arms the
+    """Route a confirmed proposal to its kind helper, honoring each helper's own
+    arming contract: escalation_rule does NOT self-arm, so this caller arms the
     anti-thrash gate before invoking it, same as the autonomous path -- a failed
     arm aborts before the matrix write ever runs. prompt_strategy is
     self-validating and self-arming, so it is called directly.
@@ -431,8 +430,7 @@ def _dispatch_confirmed(pm, p: dict, *, cfg, session_id: str | None = None) -> b
     self-validating and SELF-ARMING (validate -> arm -> write inside the
     handler), so a validation failure never leaves the dedupe marker set.
     semantic_fact is the only handler that reads session_id (threaded through
-    to pm.create_user_taught_memory's FSRS review on re-teach, Task 20
-    decision B)."""
+    to pm.create_user_taught_memory's FSRS review on re-teach)."""
     kind = p["kind"]
     if kind == "escalation_rule":
         if not _arm_gate(pm, p, cfg=cfg):

@@ -46,6 +46,15 @@ def test_dialogue_pending_roundtrip_and_clear():
     assert pm.load_dialogue_pending("s1") is None
 
 
+def test_dialogue_pending_sub_second_ttl_does_not_crash():
+    """A sub-second ttl (e.g. 0.5) must not truncate to EX 0 -- Redis SET
+    rejects a zero expiry outright, so this used to raise instead of storing
+    a (very briefly) trackable pending."""
+    pm = _pm()
+    pm.save_dialogue_pending("s2", {"tier": "light", "echo": "do Y"}, ttl=0.5)
+    assert pm.load_dialogue_pending("s2")["echo"] == "do Y"
+
+
 def test_dialogue_audit_append_and_load():
     pm = _pm()
     pm.append_dialogue_audit({"ts": 1.0, "kind": "sigma"})

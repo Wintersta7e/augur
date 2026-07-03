@@ -41,6 +41,11 @@ def test_affirmative_and_heavy():
     assert not I.is_affirmative("no")
     assert I.matches_heavy_phrase("yes, change the matrix", "change the matrix")
     assert not I.matches_heavy_phrase("yes", "change the matrix")
+    # Fail closed: an empty/whitespace phrase must never match ANY text (it
+    # would otherwise be a substring of everything, confirming a heavy
+    # change on an unrelated turn).
+    assert not I.matches_heavy_phrase("anything at all", "")
+    assert not I.matches_heavy_phrase("anything at all", "   ")
 
 
 # ── numeric-field validation (sigma + habituation floor) ─────────────────────

@@ -822,7 +822,8 @@ def get_proposals(limit: int = 50) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Dialogue tools (Imperator III)
 # ---------------------------------------------------------------------------
-# Subjects: augur.imperator.dialogue.turn
+# Subjects published by imperator.dialogue.engine on a confirmed apply/undo:
+# augur.imperator.dialogue.applied, augur.imperator.ii.trigger.
 # Keys: augur:imperator:dialogue:log, augur:imperator:dialogue:pending
 
 
@@ -871,7 +872,13 @@ def dialogue_turn(session_id: str, message: str) -> dict[str, Any]:
 @mcp.tool()
 @_tool_safe
 def dialogue_history(session_id: str, limit: int = 20) -> dict[str, Any]:
-    """Recent conversation turns for a session (newest first)."""
+    """Recent conversation turns for a session (newest first).
+
+    A plain PersistenceManager read -- intentionally stays readable even when
+    ``cfg.dialogue_enabled`` is False: that kill switch only gates
+    ``dialogue_turn``'s call into ``handle_turn`` (new turns), not inspection
+    of history already on disk.
+    """
     with _persistence_ctx() as pm:
         return {"turns": pm.load_dialogue_log(limit=limit, session_id=session_id)}
 
@@ -879,7 +886,11 @@ def dialogue_history(session_id: str, limit: int = 20) -> dict[str, Any]:
 @mcp.tool()
 @_tool_safe
 def dialogue_pending(session_id: str) -> dict[str, Any]:
-    """The pending-confirmation intent for a session, if any."""
+    """The pending-confirmation intent for a session, if any.
+
+    A plain PersistenceManager read -- intentionally stays readable even when
+    ``cfg.dialogue_enabled`` is False, same as ``dialogue_history``.
+    """
     with _persistence_ctx() as pm:
         return {"pending": pm.load_dialogue_pending(session_id)}
 

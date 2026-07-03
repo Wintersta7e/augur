@@ -597,9 +597,16 @@ class PersistenceManager:
         return turns
 
     def save_dialogue_pending(self, session_id: str, pending: dict, ttl: float) -> None:
-        """Store the single pending-confirmation intent for a session, with TTL."""
+        """Store the single pending-confirmation intent for a session, with TTL.
+
+        ``ex=max(1, int(ttl))``: a sub-second ``ttl`` (e.g. 0.5) truncates to
+        0 under plain ``int()``, and Redis SET rejects ``EX 0`` outright --
+        clamp to the minimum valid 1-second expiry instead of crashing.
+        """
         self._set_json(
-            f"augur:imperator:dialogue:pending:{session_id}", pending, ex=int(ttl)
+            f"augur:imperator:dialogue:pending:{session_id}",
+            pending,
+            ex=max(1, int(ttl)),
         )
 
     def load_dialogue_pending(self, session_id: str) -> dict | None:
@@ -668,7 +675,8 @@ class PersistenceManager:
         """Return a single stored context directive by id, or None if absent
         or corrupt. Used by apply.py to read the PRIOR content of a directive
         BEFORE a create/upsert or remove overwrites/deletes it, so the write
-        can record a true restore anchor (Task 20 decision A)."""
+        can record a true restore anchor (apply.py's rollback-anchor
+        discipline, spec §8)."""
         raw = self._r.hget("augur:imperator:dialogue:directives", directive_id)
         if raw is None:
             return None

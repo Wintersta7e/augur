@@ -584,7 +584,14 @@ class PersistenceManager:
 
         With *session_id* set, only turns whose stored ``session_id`` matches
         are returned (still newest-first, still capped at *limit*).
+
+        A non-positive *limit* returns [] -- never the whole list: without a
+        session filter the LRANGE stop index would be ``limit - 1 == -1``,
+        which Redis reads as "through the last element" (the entire log),
+        inverting limit=0 ("no history") into "all history".
         """
+        if limit <= 0:
+            return []
         span = (MAX_DIALOGUE_LOG if session_id is not None else limit) - 1
         raw = self._r.lrange("augur:imperator:dialogue:log", 0, span)
         try:
@@ -622,7 +629,13 @@ class PersistenceManager:
         self._r.ltrim(key, 0, MAX_DIALOGUE_LOG - 1)
 
     def load_dialogue_audit(self, *, limit: int = 50) -> list[dict]:
-        """Up to *limit* recent audit records, newest first. [] on corrupt/absent."""
+        """Up to *limit* recent audit records, newest first. [] on corrupt/absent.
+
+        A non-positive *limit* returns [] -- the LRANGE stop index would be
+        ``limit - 1 == -1`` (the whole list) otherwise.
+        """
+        if limit <= 0:
+            return []
         raw = self._r.lrange("augur:imperator:dialogue:audit", 0, limit - 1)
         try:
             return [json.loads(e) for e in raw]
@@ -1082,11 +1095,19 @@ class PersistenceManager:
     def load_all_memory_states(self) -> list[dict]:
         out: list[dict] = []
         for tier in ("warm", "cold"):
-            for mid in self._r.smembers(f"augur:memoria:tier:{tier}"):
-                mid = mid.decode() if isinstance(mid, bytes) else mid
-                raw = self._r.get(f"augur:memoria:dsr:{mid}")
-                if raw is not None:
-                    out.append(json.loads(raw))
+            mids = [
+                m.decode() if isinstance(m, bytes) else m
+                for m in self._r.smembers(f"augur:memoria:tier:{tier}")
+            ]
+            if not mids:
+                continue
+            # Batch the per-member reads into one MGET instead of a synchronous
+            # GET per id: the taught-facts advice injection (advisor.py) reaches
+            # this on the advice hot path, where one round-trip per memory scaled
+            # linearly with total memory count. MGET preserves key order, and
+            # each value is decoded independently, so the result is identical.
+            raws = self._r.mget([f"augur:memoria:dsr:{mid}" for mid in mids])
+            out.extend(json.loads(raw) for raw in raws if raw is not None)
         return out
 
     def load_archived_memory(self, memory_id: str) -> dict | None:

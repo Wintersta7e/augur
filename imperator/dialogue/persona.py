@@ -58,4 +58,11 @@ An intent object is:
   "target": "<domain|channel|app|rule_key>",
   "action": {{...kind-specific...}},
   "rationale": "<one short sentence in the user's intent>"}}
+
+For "stay quiet / be less noisy while I'm in this app" requests, use kind "teach_context_directive" with
+action {{"action": "suppress"|"downgrade", "scope": "all" or ["<domain>", ...]}}. The app it applies to is
+filled in automatically from the app you are CURRENTLY focused on (shown as focused_app in CONTEXT) — do not
+invent an app name. If the user means an app other than the current focused_app, set needs_clarification=true
+and ask them to switch to that app first. Use scope "all" to silence everything there, or list specific domains.
+
 Use intent=null for pure questions. If a teaching request is ambiguous, set needs_clarification=true and ask."""

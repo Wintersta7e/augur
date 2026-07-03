@@ -259,20 +259,64 @@ def test_tune_rule_is_heavy():
 
 
 def test_teach_context_directive_routes():
+    # The predicate.match is filled server-side from the live focused app
+    # (spec §7.2), not from the LLM -- so route needs a focused_app in context.
     pending = R.route(
         {
             "kind": "teach_context_directive",
             "target": "night_mode",
-            "action": {"op": "add"},
+            "action": {"action": "suppress", "scope": "all"},
             "rationale": "quiet at night",
         },
-        C.DialogueContext(),
+        C.DialogueContext(focused_app="deepwork.exe"),
         pm=None,
         cfg=_Cfg(),
     )
     assert pending["tier"] == "light"
     assert pending["proposal"]["kind"] == "context_directive"
-    assert pending["proposal"]["action"] == {"op": "add"}
+    assert pending["proposal"]["target"] == "deepwork.exe"
+    assert pending["proposal"]["action"]["predicate"] == {
+        "context": "focused_app",
+        "match": "deepwork.exe",
+    }
+    assert pending["proposal"]["action"]["action"] == "suppress"
+    assert pending["proposal"]["action"]["scope"] == "all"
+
+
+def test_teach_context_directive_no_focused_app_rejects():
+    # No live focused app -> route must refuse (raise) rather than store a
+    # directive that can never match while the engine replies "Done — applied".
+    import pytest
+
+    with pytest.raises(ValueError, match="which app"):
+        R.route(
+            {
+                "kind": "teach_context_directive",
+                "target": "editor",
+                "action": {"action": "suppress", "scope": "all"},
+                "rationale": "quiet here",
+            },
+            C.DialogueContext(focused_app=None),
+            pm=None,
+            cfg=_Cfg(),
+        )
+
+
+def test_teach_context_directive_normalizes_bare_string_scope():
+    # A bare-string scope must narrow to a single-domain list, never widen to
+    # "all" (over-suppression is the unsafe direction).
+    pending = R.route(
+        {
+            "kind": "teach_context_directive",
+            "target": "editor",
+            "action": {"action": "suppress", "scope": "typing"},
+            "rationale": "only typing",
+        },
+        C.DialogueContext(focused_app="editor.exe"),
+        pm=None,
+        cfg=_Cfg(),
+    )
+    assert pending["proposal"]["action"]["scope"] == ["typing"]
 
 
 def test_teach_semantic_fact_routes():

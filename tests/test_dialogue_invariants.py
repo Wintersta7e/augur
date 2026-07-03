@@ -360,11 +360,11 @@ def test_route_is_pure_no_state_writes():
     matrix_before = pm.load_escalation_matrix()
     thresholds_before = pm.load_thresholds("typing")
 
-    ctx = type("Ctx", (), {"recent_suppressions": []})()
+    ctx = type("Ctx", (), {"recent_suppressions": [], "focused_app": "test_app"})()
     intent = {
         "kind": "teach_context_directive",
         "target": "test_directive",
-        "action": {"op": "add", "condition": "test"},
+        "action": {"action": "suppress", "scope": "all"},
         "rationale": "teaching test",
     }
     pending = R.route(intent, ctx, pm=pm, cfg=_Cfg())
@@ -431,10 +431,28 @@ def test_I4_is_auto_applicable_membership():
     `AssertionError: sigma must not be auto-applicable`. Reverted.
     """
     auto = {"escalation_rule", "prompt_strategy"}
-    for kind, klass in P._KIND_KLASS.items():
+    # Independent expected-klass table (NOT derived from P._KIND_KLASS): the
+    # prior `assert p["klass"] == klass` compared two values both read from
+    # _KIND_KLASS, so it could never catch a wrong classification. This pins
+    # normalize_klass against a hardcoded ground truth instead.
+    expected_klass = {
+        "escalation_rule": "safe",
+        "prompt_strategy": "safe",
+        "sigma": "safe",
+        "gate_calibration": "safe",
+        "observe_more": "safe",
+        "context_directive": "safe",
+        "semantic_fact": "safe",
+        "code": "gated",
+        "structural": "gated",
+    }
+    assert set(P._KIND_KLASS) == set(expected_klass), (
+        "taxonomy changed — update the independent expected_klass table"
+    )
+    for kind, want_klass in expected_klass.items():
         p = P.make_proposal(kind=kind, target="t", action={}, rationale="r")
         P.normalize_klass(p)
-        assert p["klass"] == klass  # taxonomy sanity
+        assert p["klass"] == want_klass, f"{kind} klass regressed"
         if kind in auto:
             assert P.is_auto_applicable(p), f"{kind} must be auto-applicable"
         else:

@@ -92,6 +92,26 @@ def _arm_for_silence(ctx, state_key: str) -> tuple[str, dict]:
     return "gate_calibration", {"op": "self_tolerance_remove", "state_key": state_key}
 
 
+def _normalize_scope(scope: Any) -> Any:
+    """Canonicalize a taught directive's ``scope`` to ``"all"`` or a cleaned
+    list of domain strings (spec §7.2), so a malformed value can never reach
+    the gate and silently widen suppression to every domain.
+
+    - a list -> its string, non-empty members (an all-empty list becomes "all")
+    - "all" / None / absent -> "all" (silence everything in the app)
+    - a bare domain string ("typing") -> ["typing"], honoring the narrow intent
+      the user expressed rather than widening it to every domain
+    - anything else (dict, number, bool) -> "all"; the gate's fail-closed
+      _directive_scope_allows is the backstop for anything unexpected.
+    """
+    if isinstance(scope, list):
+        cleaned = [d for d in scope if isinstance(d, str) and d.strip()]
+        return cleaned or "all"
+    if isinstance(scope, str) and scope != "all" and scope.strip():
+        return [scope.strip()]
+    return "all"
+
+
 def route(intent: dict, ctx, *, pm, cfg) -> dict:
     """Translate a validated teaching intent into a pending proposal awaiting
     confirmation. Returns {proposal, tier, echo, confirm_phrase, inverse}.
@@ -146,14 +166,37 @@ def route(intent: dict, ctx, *, pm, cfg) -> dict:
         echo = f"I'll set rule {target} → {action.get('target')}."
         confirm_phrase = "change the matrix"
     elif kind == "teach_context_directive":
+        # Server-authoritative predicate (spec §7.2): the gate matches a
+        # directive only when predicate.match == the LIVE focused app, so match
+        # is filled from ctx.focused_app (the same load_focused_app source the
+        # gate reads), NOT trusted from the LLM -- the model is never given the
+        # app string, so a guessed predicate would never match. No current
+        # focused app -> reject truthfully rather than store a directive that
+        # can never fire while replying "Done — applied" (invariant 7).
+        focused = getattr(ctx, "focused_app", None)
+        if not focused:
+            raise ValueError("I can't tell which app you're in right now")
+        directive_action = action.get("action", "suppress")
+        if directive_action not in ("suppress", "downgrade"):
+            raise ValueError(
+                "a context directive must suppress or downgrade, "
+                f"not {directive_action!r}"
+            )
+        scope = _normalize_scope(action.get("scope"))
         p = P.make_proposal(
             kind="context_directive",
-            target=target,
-            action=action,
+            target=focused,
+            action={
+                "predicate": {"context": "focused_app", "match": focused},
+                "action": directive_action,
+                "scope": scope,
+            },
             rationale=rationale,
             source="dialogue",
         )
-        echo = f"I'll stay quiet when {target} applies."
+        verb = "stay quiet" if directive_action == "suppress" else "speak more softly"
+        where = "" if scope == "all" else f" about {', '.join(scope)}"
+        echo = f"I'll {verb}{where} while you're in {focused}."
     elif kind == "teach_semantic_fact":
         pattern = action.get("pattern") or {
             "kind": "semantic",

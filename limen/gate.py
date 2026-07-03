@@ -273,13 +273,18 @@ def _directive_scope_allows(scope: Any, domain: str) -> bool:
     """True when a taught directive's ``scope`` covers ``domain`` (spec §7.2).
 
     The schema is ``"scope": "all" | ["<domain>", ...]``: a non-empty list
-    restricts the taught silence to those domains; anything else — absent,
-    ``"all"``, or an empty list — covers every domain.  For a correlation the
-    caller passes the primary anomaly's domain.
+    restricts the taught silence to those domains; ``"all"``, ``None``, or an
+    empty list covers every domain.  Any OTHER shape (a bare non-``"all"``
+    string, a dict, a number) is treated as NOT covering the domain -- fail
+    closed, because over-suppression (silencing a domain the user never named)
+    is the unsafe direction.  ``router.route`` normalizes scope to ``"all"`` or
+    a cleaned list before it is ever stored, so this branch only guards
+    legacy/malformed records.  For a correlation the caller passes the primary
+    anomaly's domain.
     """
-    if isinstance(scope, list) and scope:
-        return domain in scope
-    return True
+    if isinstance(scope, list):
+        return domain in scope if scope else True
+    return scope is None or scope == "all"
 
 
 class Gate:

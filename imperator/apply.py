@@ -85,20 +85,21 @@ def _apply_prompt_strategy(pm, p: dict, *, cfg) -> bool:
     Self-validating with a SINGLE load_prompt read shared by the precondition
     check and the rollback anchor (a second read would open a TOCTOU window
     where the anchor comes from a value that was never validated). Ordering is
-    validate -> arm -> save: a validation failure must not arm the gate (a
-    corrected proposal for the same target can still apply in-window), and a
-    marker failure aborts BEFORE save_prompt runs, so the prior text is never
-    archived — the rollback anchor stays intact and no different-text proposal
-    for this target can re-apply in-window off an unarmed gate.
+    validate -> arm -> save -> record anchor: a validation failure must not arm
+    the gate (a corrected proposal for the same target can still apply
+    in-window), and a marker failure aborts BEFORE save_prompt runs, so the
+    prior text is never archived — the rollback anchor stays intact and no
+    different-text proposal for this target can re-apply in-window off an
+    unarmed gate.
 
-    The rollback anchor is recorded in p["action"]["prior_text"] as soon as
-    the gate arms -- not exclusively on a clean return-True: if the
-    subsequent save_prompt call raises, apply_proposal's except-Exception
-    wrapper still logs the proposal (status "logged", not "applied") with
-    the anchor already set. Idempotent: only re-saves (save_prompt archives
-    the prior into rollback history) when the text actually changes — a
-    re-apply of identical text must NOT re-archive and corrupt the rollback
-    anchor.
+    The rollback anchor p["action"]["prior_text"] is recorded only AFTER the
+    (possible) save_prompt returns without raising: if the write raises,
+    apply_proposal's except-Exception wrapper logs the proposal (status
+    "logged", not "applied") with NO anchor, so a follow-on "undo that" cannot
+    invert a rewrite that never persisted and reply a false "Reversed."
+    (invariant 7). Idempotent: only re-saves (save_prompt archives the prior
+    into rollback history) when the text actually changes — a re-apply of
+    identical text must NOT re-archive and corrupt the rollback anchor.
     """
     action = p.get("action") or {}
     domain, text = action.get("domain", p["target"]), action.get("text", "")
@@ -107,9 +108,9 @@ def _apply_prompt_strategy(pm, p: dict, *, cfg) -> bool:
         return False
     if not _arm_gate(pm, p, cfg=cfg):
         return False
-    action["prior_text"] = current  # rollback anchor
     if current != text:
         pm.save_prompt(domain, text)
+    action["prior_text"] = current  # rollback anchor, after the write lands
     return True
 
 
@@ -163,11 +164,13 @@ def _apply_gate_calibration(pm, p: dict, *, cfg) -> bool:
       untouched — per-field HSET), records the prior entry
 
     Self-validating and SELF-ARMING (this handler arms; the caller must not):
-    ordering is validate -> arm -> write, so a validation failure (unknown op;
-    missing, non-numeric, non-finite, or out-of-range floor value) never arms
-    the anti-thrash gate — fail closed, no write. The prior state (membership
-    bool or prior floor entry) is recorded in p["action"]["prior"] as the
-    rollback anchor.
+    ordering is validate -> arm -> write -> record anchor, so a validation
+    failure (unknown op; missing, non-numeric, non-finite, or out-of-range floor
+    value) never arms the anti-thrash gate — fail closed, no write. The prior
+    state (membership bool or prior floor entry) is recorded in p["action"]
+    ["prior"] as the rollback anchor ONLY after the write returns without
+    raising: a write that raises ends the proposal "logged" with no anchor, so a
+    follow-on "undo that" cannot invert a change that never landed (invariant 7).
     All Redis writes go through PersistenceManager.
     """
     a = p.get("action") or {}
@@ -176,11 +179,11 @@ def _apply_gate_calibration(pm, p: dict, *, cfg) -> bool:
         prior = pm.is_self_tolerant(sk)
         if not _arm_gate(pm, p, cfg=cfg):
             return False
-        a["prior"] = prior
         if op == "self_tolerance_add":
             pm.add_self_tolerance(sk)
         else:
             pm.remove_self_tolerance(sk)
+        a["prior"] = prior  # anchor after the write lands (invariant 7)
         return True
     if op == "floor_set":
         # Reject bools before conversion: float(False) == 0.0 is in-range and
@@ -199,9 +202,9 @@ def _apply_gate_calibration(pm, p: dict, *, cfg) -> bool:
         prior_entry = pm.load_habituation_floor(sk) or {}
         if not _arm_gate(pm, p, cfg=cfg):
             return False
-        a["prior"] = prior_entry
         new_entry = {**prior_entry, "floor": value, "last_ts": time.time()}
         pm.save_gate_tuning_state(floors={sk: new_entry})
+        a["prior"] = prior_entry  # anchor after the write lands (invariant 7)
         return True
     return False
 
@@ -411,6 +414,16 @@ def _apply_confirmed(pm, p: dict, *, cfg, session_id: str | None) -> dict:
     try:
         ok = _dispatch_confirmed(pm, p, cfg=cfg, session_id=session_id)
     except Exception:
+        # Fail to "logged" (truthful: the caller reports "I couldn't apply
+        # that."), but LOG the cause -- otherwise a swallowed ConnectionError, a
+        # handler KeyError, and an ordinary validation rejection all produce the
+        # same silent "logged" with no operator signal (matches _arm_gate).
+        log.warning(
+            "confirmed apply failed for kind=%s target=%s; failing to logged",
+            p.get("kind"),
+            p.get("target"),
+            exc_info=True,
+        )
         p["status"] = "logged"
         return p
     p["status"] = "applied" if ok else "logged"

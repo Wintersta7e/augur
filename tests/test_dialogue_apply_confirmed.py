@@ -135,3 +135,50 @@ def test_confirmed_refuses_gated_klass_on_confirmable_kind():
     assert out["status"] == "logged"
     assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"  # no write
     assert pm.is_proposal_applied(p["dedupe_key"]) is False  # never armed
+
+
+def test_confirmed_matrix_write_failure_logs_and_leaves_matrix_unchanged(monkeypatch):
+    """F11 regression: a matrix CAS-contention failure on the confirmed path
+    ends the proposal "logged" (truthful) with the matrix UNCHANGED and NO
+    rollback anchor -- pins the reversibility/truthfulness surface against a
+    primary-write failure the confirmed path previously had no test for."""
+    pm, cfg = _pm(), _Cfg()  # _pm seeds LOW+LOW -> LOW
+    monkeypatch.setattr(
+        A.matrix_ops, "apply_matrix_update", lambda *a, **k: {"error": "contention"}
+    )
+    p = P.make_proposal(
+        kind="escalation_rule",
+        target="LOW+LOW",
+        action={"target": "MEDIUM"},
+        rationale="taught",
+        source="dialogue",
+    )
+    out = A.apply_proposal(pm, p, cfg=cfg, session_id="d1", confirmed=True)
+    assert out["status"] == "logged"
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"  # unchanged
+    assert "prior_target" not in out["action"]  # no anchor -> undo can't fake it
+
+
+def test_confirmed_apply_logs_swallowed_exception(monkeypatch, caplog):
+    """F8 regression: a handler exception on the confirmed path fails to
+    "logged" (truthful) AND is now logged, so operators can tell an infra fault
+    from an ordinary validation rejection."""
+    import logging
+
+    pm, cfg = _pm(), _Cfg()
+
+    def _boom(*a, **k):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(A, "_dispatch_confirmed", _boom)
+    p = P.make_proposal(
+        kind="gate_calibration",
+        target="k1",
+        action={"op": "self_tolerance_add", "state_key": "k1"},
+        rationale="r",
+        source="dialogue",
+    )
+    with caplog.at_level(logging.WARNING):
+        out = A.apply_proposal(pm, p, cfg=cfg, session_id="d1", confirmed=True)
+    assert out["status"] == "logged"
+    assert any("confirmed apply failed" in r.message for r in caplog.records)

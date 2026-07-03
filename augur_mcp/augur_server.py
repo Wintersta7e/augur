@@ -880,7 +880,11 @@ def dialogue_history(session_id: str, limit: int = 20) -> dict[str, Any]:
     of history already on disk.
     """
     with _persistence_ctx() as pm:
-        return {"turns": pm.load_dialogue_log(limit=limit, session_id=session_id)}
+        return {
+            "turns": pm.load_dialogue_log(
+                limit=max(1, min(limit, 200)), session_id=session_id
+            )
+        }
 
 
 @mcp.tool()

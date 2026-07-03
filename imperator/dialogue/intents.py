@@ -81,9 +81,21 @@ def is_affirmative(text: str) -> bool:
 
 
 def matches_heavy_phrase(text: str, phrase: str) -> bool:
-    # An empty/whitespace phrase is always a substring of any text -- fail
-    # CLOSED instead: a missing/blank confirm_phrase must never let an
-    # unrelated turn confirm a heavy (structural) change.
-    if not phrase.strip():
+    """True iff ``text`` is a standalone confirmation of ``phrase`` (spec §9's
+    heavy tier).  A bare substring test is unsafe: an unrelated or NEGATED turn
+    ("why did you change the matrix?", "no, don't change the matrix") contains
+    the phrase and would wrongly confirm a structural change.  Require the
+    message to BE the phrase, optionally preceded by a single affirmative word
+    ("yes, change the matrix") -- matching the exact-confirmation discipline the
+    light tier already uses via ``is_affirmative``.
+
+    An empty/whitespace phrase is never a valid confirmation (a missing/blank
+    confirm_phrase must never let an unrelated turn confirm a heavy change).
+    """
+    phrase = phrase.strip().lower()
+    if not phrase:
         return False
-    return phrase.lower() in text.lower()
+    normalized = " ".join(text.lower().replace(",", " ").split()).rstrip(".!?").strip()
+    if normalized == phrase:
+        return True
+    return any(normalized == f"{aff} {phrase}" for aff in _AFFIRMATIVES)

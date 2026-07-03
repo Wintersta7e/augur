@@ -73,3 +73,22 @@ def test_dialogue_history_scopes_to_session():
         result = srv.dialogue_history(session_id="A")
     assert [t["user_text"] for t in result["turns"]] == ["a2", "a1"]
     assert all(t["session_id"] == "A" for t in result["turns"])
+
+
+def test_dialogue_history_clamps_limit():
+    """F10 regression: dialogue_history clamps limit like get_proposals -- a
+    negative limit must not slice from the end and return an oversized wrong
+    subset."""
+    pm = PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
+    for i in range(6):
+        pm.save_dialogue_turn({"ts": float(i), "session_id": "A", "user_text": f"a{i}"})
+
+    @contextmanager
+    def fake_ctx():
+        yield pm
+
+    with patch.object(srv, "_persistence_ctx", fake_ctx):
+        neg = srv.dialogue_history(session_id="A", limit=-2)
+        big = srv.dialogue_history(session_id="A", limit=9999)
+    assert len(neg["turns"]) == 1  # clamped to 1, not "all-but-2"
+    assert len(big["turns"]) == 6  # clamped to 200, so all 6 stored

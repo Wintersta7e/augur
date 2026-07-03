@@ -37,6 +37,30 @@ def test_dialogue_log_filters_by_session_id():
     assert [t["user_text"] for t in everything] == ["a3", "a2", "b1", "a1"]
 
 
+def test_load_dialogue_log_nonpositive_limit_returns_empty():
+    """F4 regression: limit<=0 returns [] -- otherwise the unfiltered LRANGE
+    stop index is limit-1 == -1 (the whole list), inverting 'no history'."""
+    pm = _pm()
+    for i in range(5):
+        pm.save_dialogue_turn(
+            {"ts": float(i), "session_id": "s", "user_text": f"t{i}", "reply": "r"}
+        )
+    assert pm.load_dialogue_log(limit=0) == []
+    assert pm.load_dialogue_log(limit=-3) == []
+    assert len(pm.load_dialogue_log(limit=2)) == 2
+
+
+def test_load_dialogue_audit_nonpositive_limit_returns_empty():
+    """F9 regression: same LRANGE stop-index guard for the audit log."""
+    pm = _pm()
+    for i in range(4):
+        pm.append_dialogue_audit(
+            {"ts": float(i), "kind": "k", "status": "applied", "proposal": {}}
+        )
+    assert pm.load_dialogue_audit(limit=0) == []
+    assert len(pm.load_dialogue_audit(limit=2)) == 2
+
+
 def test_dialogue_pending_roundtrip_and_clear():
     pm = _pm()
     assert pm.load_dialogue_pending("s1") is None

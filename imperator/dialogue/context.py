@@ -16,6 +16,7 @@ class DialogueContext:
     directives: list[dict] = field(default_factory=list)
     taught_facts: list[dict] = field(default_factory=list)
     recent_turns: list[dict] = field(default_factory=list)
+    focused_app: str | None = None
 
 
 def assemble(pm, now: float, cfg) -> DialogueContext:
@@ -30,6 +31,12 @@ def assemble(pm, now: float, cfg) -> DialogueContext:
         directives=(getattr(pm, "load_dialogue_directives", lambda: [])() or []),
         taught_facts=(getattr(pm, "load_taught_facts", lambda: [])() or []),
         recent_turns=pm.load_dialogue_log(limit=cfg.dialogue_context_max_turns) or [],
+        # The live focused app (same source the Limen gate reads) so the LLM can
+        # name it when the user asks to "stay quiet in this app": a
+        # teach_context_directive's predicate.match is filled from this ground
+        # truth, not guessed by the model (spec §7.2). getattr-guarded for stub
+        # PMs that predate the field.
+        focused_app=(getattr(pm, "load_focused_app", lambda: None)() or None),
     )
 
 
@@ -41,6 +48,8 @@ def render(ctx: DialogueContext, cfg) -> str:
         f"utility={(sm.get('utility') or {}).get('value')}",
         f"blind_spots={[b.get('kind') for b in (sm.get('blind_spots') or {}).get('value') or []]}",
     ]
+    if ctx.focused_app:
+        lines.append(f"focused_app={ctx.focused_app}")
     if ctx.recent_suppressions:
         lines.append("recent_suppressions:")
         for s in ctx.recent_suppressions[:5]:

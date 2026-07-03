@@ -48,6 +48,20 @@ def test_affirmative_and_heavy():
     assert not I.matches_heavy_phrase("anything at all", "   ")
 
 
+def test_matches_heavy_phrase_rejects_question_and_negation():
+    """F7 regression: a heavy confirm phrase is a STANDALONE confirmation, not a
+    substring -- an unrelated question or an explicit negation that merely
+    contains the phrase must not confirm a structural change."""
+    ph = "change the matrix"
+    assert not I.matches_heavy_phrase("why did you change the matrix earlier?", ph)
+    assert not I.matches_heavy_phrase("no, don't change the matrix", ph)
+    assert not I.matches_heavy_phrase("remind me how to change the matrix", ph)
+    # Exact and leading-affirmative forms still confirm.
+    assert I.matches_heavy_phrase("change the matrix", ph)
+    assert I.matches_heavy_phrase("change the matrix.", ph)
+    assert I.matches_heavy_phrase("yes, change the matrix", ph)
+
+
 # ── numeric-field validation (sigma + habituation floor) ─────────────────────
 # Bounds mirror Disciplina's own tuning writer: sigma clamped into
 # [sigma_min=1.5, sigma_max=5.0], habituation floor into [0.0, GATE_FLOOR_MAX=0.6].

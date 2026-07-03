@@ -102,6 +102,12 @@ async def test_stay_silent_in_appx_then_undo(real_pm, real_nc, dialogue_cfg):
             '"action":"suppress","scope":"all"},"rationale":"deep work"}}'
         )
 
+    # appX is the real focused app AT TEACH TIME (Redis-backed activity
+    # history): route() now fills the directive's predicate.match from the LIVE
+    # focused app (spec §7.2 / F14), so it must be present before the teach turn
+    # -- otherwise the teach is truthfully refused ("I can't tell which app...").
+    _focus_app(real_pm, "appX", "2026-07-02T00:00:00+00:00")
+
     t1 = await E.handle_turn(
         "sc1",
         "stay quiet in appX",
@@ -123,9 +129,6 @@ async def test_stay_silent_in_appx_then_undo(real_pm, real_nc, dialogue_cfg):
         query_fn=teach,
     )
     assert t2.applied is not None and t2.applied["status"] == "applied"
-
-    # appX is now the real focused app (Redis-backed activity history).
-    _focus_app(real_pm, "appX", "2026-07-02T00:00:00+00:00")
 
     dec = G.Gate().evaluate(
         _sig(SINGLE_MEDIUM_TYPING), real_pm, dialogue_cfg, now=100.0

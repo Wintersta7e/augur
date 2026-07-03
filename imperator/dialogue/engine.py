@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import time
 from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable
 
 from imperator.dialogue import context as C, intents as I, persona, router as R
+
+log = logging.getLogger(__name__)
 
 
 def _cfg_with_num_predict(cfg: Any, num_predict: int) -> Any:
@@ -65,8 +68,13 @@ async def query_dialogue_ollama(prompt: str, system: str, client, cfg) -> str:
 
 def _parse(raw: str) -> dict:
     obj = json.loads(raw)
-    if not isinstance(obj, dict) or "reply" not in obj:
-        raise ValueError("LLM output missing 'reply'")
+    if not isinstance(obj, dict) or not isinstance(obj.get("reply"), str):
+        # The LLM is called with format:json (valid JSON, but no schema), so a
+        # model that teaches silently can emit {"reply": null, ...}. Require a
+        # string reply here so handle_turn's fail-truthful branch catches it,
+        # rather than a later `notice + reply` raising TypeError (lost turn) or
+        # a literal "None" leaking into a confirmation prompt (invariant 7).
+        raise ValueError("LLM output missing a string 'reply'")
     return obj
 
 
@@ -74,14 +82,19 @@ QueryFn = Callable[[str, str, Any, Any], Awaitable[str]]
 
 
 async def _publish(nc, subject: str, payload: dict) -> None:
-    """Fire a dialogue event on NATS. No try/except here: a publish failure
-    is an infra failure (same class as Redis down), and every other
-    faculty's nc.publish call is unguarded too -- it
-    propagates out of handle_turn for the surface (console per-turn
-    try/except, MCP @_tool_safe) to catch and report truthfully. Only the
-    LLM-call/parse path below fails soft inside the engine."""
-    if nc is not None:
+    """Fire a dialogue event on NATS. Best-effort: a publish failure is logged
+    and swallowed, NEVER propagated. This runs only from _record_and_publish --
+    i.e. AFTER the confirmed apply/undo has already committed to Redis and its
+    audit record is persisted. Letting a NATS blip propagate here would surface
+    a committed, truthful change as "turn failed" (a real success reported as a
+    failure -- invariant 7 in reverse). The events are downstream triggers (the
+    reasoner re-runs next cycle regardless), so dropping one is harmless."""
+    if nc is None:
+        return
+    try:
         await nc.publish(subject, json.dumps(payload).encode())
+    except Exception as exc:
+        log.warning("dialogue event publish failed on %s: %s", subject, exc)
 
 
 async def _record_and_publish(pm, nc, record: dict) -> None:
@@ -152,12 +165,18 @@ async def _handle_undo(
     way.
     """
     audit = pm.load_dialogue_audit(limit=1)
-    if not audit or not audit[0].get("proposal"):
-        # Either no audit trail at all, or the most recent entry is itself a
-        # prior undo attempt that never produced a proposal (unavailable/
-        # never-applied) -- router.build_inverse requires a real proposal
-        # dict to invert, so a chained "undo that" on such an entry has
-        # nothing to invert either. Same truthful reply for both.
+    if (
+        not audit
+        or not audit[0].get("proposal")
+        or audit[0].get("status") != "applied"
+    ):
+        # Nothing committed to reverse: no audit trail at all; a prior undo
+        # attempt that never produced a proposal; OR a confirmed apply that
+        # ended "logged" (e.g. a transient write raised after the rollback
+        # anchor was recorded) and so wrote nothing. Undoing a non-"applied"
+        # record would invert a rollback anchor for a write that never landed
+        # and reply a false "Reversed." (invariant 7). router.build_inverse also
+        # requires a real proposal dict to invert. Same truthful reply for all.
         return DialogueTurn(reply="There's nothing recent to undo.")
     prior = audit[0]
     echo = _undo_echo(prior)

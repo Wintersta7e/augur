@@ -392,8 +392,11 @@ def test_invariant_apply_disabled_never_applies(kind):
 def test_apply_never_raises_on_unexpected_write_error(monkeypatch):
     # The outer fail-safe: an unexpected exception from the committing write must
     # be swallowed into 'logged' (apply must never raise), and no matrix change
-    # may land. The gate was armed first, but with no commit there is nothing to
-    # thrash and the same proposal is reconsidered next window.
+    # may land. The gate is armed BEFORE the committing write, so after a failed
+    # write the anti-thrash marker is left SET: the autonomous path SKIPS
+    # re-proposing this (kind, target) until the staleness window expires -- it is
+    # NOT reconsidered next cycle. (A human re-teach still applies: the confirmed
+    # path deliberately bypasses the is_proposal_applied pre-check.)
     pm = _pm()
     p = _safe(
         P.make_proposal(
@@ -412,3 +415,6 @@ def test_apply_never_raises_on_unexpected_write_error(monkeypatch):
     assert out["status"] == "logged"
     assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"  # unchanged
     assert "prior_target" not in p["action"]
+    # Gate armed-before-write -> marker left set after the failed write; pins the
+    # documented anti-thrash behavior so a reorder to write-then-arm is caught.
+    assert pm.is_proposal_applied(p["dedupe_key"])

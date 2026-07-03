@@ -114,6 +114,104 @@ def test_teach_then_confirm_applies_and_audits():
     assert len(pm.load_dialogue_audit(limit=5)) == 1  # no new audit entry
 
 
+def test_null_reply_from_llm_fails_truthful_not_crash():
+    """F5 regression: an LLM emitting {"reply": null} (valid JSON, no schema)
+    must be caught by the fail-truthful path -- not crash the turn with a
+    TypeError nor leak the literal "None" into the reply (invariant 7)."""
+    pm, nc = _pm(), _NC()
+
+    async def llm_null(prompt, system, client, cfg):
+        return (
+            '{"reply": null, "intent": null, "needs_clarification": false,'
+            ' "question": null}'
+        )
+
+    turn = asyncio.run(
+        E.handle_turn(
+            "s1", "hi", pm=pm, nc=nc, http_client=None, cfg=_Cfg(), query_fn=llm_null
+        )
+    )
+    assert turn.error is not None
+    assert "None" not in turn.reply
+    assert turn.reply == "I can't reason about that right now."
+
+
+def test_publish_failure_after_commit_still_reports_applied():
+    """F16 regression: a NATS publish failure AFTER a confirmed apply commits
+    must not surface the committed change as "turn failed" (invariant 7 in
+    reverse). The apply is truthful; the dropped event is logged, not fatal."""
+
+    class _FailNC:
+        async def publish(self, subj, data=b""):
+            raise RuntimeError("nats down")
+
+    pm = _pm()
+    pm.save_escalation_matrix({"version": "v", "rules": {"LOW+LOW": "LOW"}})
+
+    async def llm_tune(prompt, system, client, cfg):
+        return (
+            '{"reply": "ok", "intent": {"kind": "tune_rule", "target": "LOW+LOW",'
+            ' "action": {"target": "MEDIUM"}}, "needs_clarification": false,'
+            ' "question": null}'
+        )
+
+    asyncio.run(
+        E.handle_turn(
+            "s1", "treat low+low as medium", pm=pm, nc=_NC(), http_client=None,
+            cfg=_Cfg(), query_fn=llm_tune,
+        )
+    )
+    turn = asyncio.run(
+        E.handle_turn(
+            "s1", "change the matrix", pm=pm, nc=_FailNC(), http_client=None,
+            cfg=_Cfg(), query_fn=llm_tune,
+        )
+    )
+    assert turn.error is None
+    assert turn.applied is not None and turn.applied["status"] == "applied"
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "MEDIUM"
+
+
+def test_undo_of_failed_confirm_reports_nothing_to_undo():
+    """F1 regression: a confirmed apply that ended "logged" (nothing written)
+    must NOT be offered for undo -- undoing it would reply a false "Reversed."
+    for a change that never happened (invariant 7)."""
+    pm, nc = _pm(), _NC()
+    pm.append_dialogue_audit(
+        {
+            "ts": 1.0,
+            "session_id": "s1",
+            "kind": "gate_calibration",
+            "target": "single:typing:user",
+            "proposal": {
+                "kind": "gate_calibration",
+                "target": "single:typing:user",
+                "action": {
+                    "op": "self_tolerance_add",
+                    "state_key": "single:typing:user",
+                    "prior": False,
+                },
+            },
+            "status": "logged",
+        }
+    )
+
+    async def llm_undo(prompt, system, client, cfg):
+        return (
+            '{"reply": "sure", "intent": {"kind": "undo"},'
+            ' "needs_clarification": false, "question": null}'
+        )
+
+    turn = asyncio.run(
+        E.handle_turn(
+            "s1", "undo that", pm=pm, nc=nc, http_client=None, cfg=_Cfg(),
+            query_fn=llm_undo,
+        )
+    )
+    assert turn.reply == "There's nothing recent to undo."
+    assert turn.pending is None
+
+
 def test_correct_silence_reverses_taught_directive_and_gate_stops_suppressing():
     """A silence caused by a taught directive (limen/gate.py's Stage-0.5
     pre-check) is reversible via correct_silence: teach -> confirm removes

@@ -327,3 +327,58 @@ def test_directive_missing_focused_app_does_not_suppress(fake_pm, cfg):
     g = G.Gate()
     dec = g.evaluate(_sig(exempt=False), fake_pm, cfg, now=100.0)
     assert dec.deciding_arm != "taught_directive"
+
+
+def test_teach_to_gate_end_to_end_directive_matches(fake_pm, cfg):
+    """Flagship F14 regression: a taught context directive routed with the LIVE
+    focused app, confirmed-applied, produces a stored directive the gate
+    actually matches -- no false "applied" for an inert directive (invariant 7).
+
+    Drives the real seam: assemble (fills ctx.focused_app from load_focused_app)
+    -> route (fills predicate.match from ctx.focused_app) -> apply_confirmed
+    (stores it) -> Gate.evaluate (matches on the SAME load_focused_app value).
+    """
+    from imperator.dialogue import context as C, router as R
+
+    fake_pm.load_focused_app = lambda: "deepwork.exe"
+    ctx = C.assemble(fake_pm, now=100.0, cfg=cfg)
+    assert ctx.focused_app == "deepwork.exe"
+    pending = R.route(
+        {
+            "kind": "teach_context_directive",
+            "target": "deep work",
+            "action": {"action": "suppress", "scope": "all"},
+            "rationale": "stay silent in deep work",
+        },
+        ctx,
+        pm=fake_pm,
+        cfg=cfg,
+    )
+    applied = R.apply_confirmed(pending, pm=fake_pm, cfg=cfg, session_id="s1")
+    assert applied["status"] == "applied"
+    stored = fake_pm.load_dialogue_directives()
+    assert len(stored) == 1
+    assert stored[0]["predicate"] == {
+        "context": "focused_app",
+        "match": "deepwork.exe",
+    }
+    dec = G.Gate().evaluate(_sig(exempt=False), fake_pm, cfg, now=200.0)
+    assert dec.action == "suppress"
+    assert dec.deciding_arm == "taught_directive"
+
+
+def test_directive_bare_string_scope_fails_closed(fake_pm, cfg):
+    """F2 regression: a stored directive whose scope is a bare non-"all" string
+    (a malformed/legacy record) must NOT widen suppression to a domain it does
+    not name. _directive_scope_allows fails closed."""
+    fake_pm.load_focused_app = lambda: "appX"
+    fake_pm.add_dialogue_directive(
+        {
+            "directive_id": "d1",
+            "predicate": {"context": "focused_app", "match": "appX"},
+            "action": "suppress",
+            "scope": "chess",  # bare string, NOT a list -> must not cover typing
+        }
+    )
+    dec = G.Gate().evaluate(_sig(exempt=False), fake_pm, cfg, now=100.0)
+    assert dec.deciding_arm != "taught_directive"

@@ -1,0 +1,326 @@
+"""Route a validated intent to a reversible faculty surface.
+
+Pure translation layer between Task 12's intent taxonomy and the sanctioned
+apply surface (imperator/apply.py, imperator/proposals.py): a validated
+teaching intent becomes a *pending* proposal awaiting user confirmation
+(route), a confirmed pending becomes an applied record (apply_confirmed),
+and an applied record can be inverted back to its prior state (build_inverse,
+apply_undo). No direct Redis access -- all durable writes go through
+apply_proposal's sanctioned paths.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any, cast
+
+from imperator import apply as A, proposals as P
+
+_HEAVY_KINDS = {"tune_rule"}
+
+# Numeric bounds mirrored from imperator/apply.py and imperator/dialogue/
+# intents.py -- the sources of truth for what the apply layer will actually
+# accept. A rollback anchor recorded before those bounds tightened (e.g. a
+# historical prior_sigma from a wider [sigma_min, sigma_max] window) would
+# otherwise just fail closed inside apply_proposal with the same generic
+# "logged" status as any other rejected proposal; apply_undo() checks the
+# same bounds up front so it can report a truthful, distinct reason instead.
+_SIGMA_MIN, _SIGMA_MAX = 1.5, 5.0
+_FLOOR_MIN, _FLOOR_MAX = 0.0, 0.6
+
+
+def _arm_for_silence(ctx, state_key: str) -> dict:
+    """Pick the gate_calibration op that reverses whichever arm most recently
+    suppressed this state_key, per the suppression record's ``arm`` field.
+
+    habituation -> reset the habituation floor to 0 (speak up again).
+    central_tolerance/self_tolerance -> drop the permanent self-tolerance
+    dismissal. Anything else -- a different arm, or no matching suppression
+    record at all -- falls back to self_tolerance_remove, the safe universal
+    "make this fireable again" default.
+    """
+    for s in ctx.recent_suppressions:
+        if s.get("state_key") == state_key:
+            arm = s.get("arm")
+            if arm == "habituation":
+                return {"op": "floor_set", "state_key": state_key, "value": 0.0}
+            if arm in {"central_tolerance", "self_tolerance"}:
+                return {"op": "self_tolerance_remove", "state_key": state_key}
+            break
+    return {"op": "self_tolerance_remove", "state_key": state_key}
+
+
+def route(intent: dict, ctx, *, pm, cfg) -> dict:
+    """Translate a validated teaching intent into a pending proposal awaiting
+    confirmation. Returns {proposal, tier, echo, confirm_phrase, inverse}.
+
+    ``pm``/``cfg`` are accepted for interface symmetry with the rest of the
+    confirm/apply/undo surface; this deterministic mapping needs neither --
+    all state comes from ``ctx`` (recent_suppressions).
+    """
+    kind = intent["kind"]
+    # Cast (not assert): _REQUIRE_TARGET-gated kinds always carry a target by
+    # the time a validated intent reaches route() (Task 12's validate_intent);
+    # kinds that don't require one (query/undo) never dispatch past the
+    # `else: raise ValueError` branch below, so they never read this value.
+    target = cast(str, intent.get("target"))
+    action = intent.get("action", {})
+    rationale = intent.get("rationale", "")
+    tier = "heavy" if kind in _HEAVY_KINDS else "light"
+    confirm_phrase = None
+
+    if kind == "correct_silence":
+        p = P.make_proposal(
+            kind="gate_calibration",
+            target=target,
+            action=_arm_for_silence(ctx, target),
+            rationale=rationale,
+            source="dialogue",
+        )
+        echo = f"I'll speak up for {target} next time."
+    elif kind == "correct_noise":
+        p = P.make_proposal(
+            kind="gate_calibration",
+            target=target,
+            action={"op": "self_tolerance_add", "state_key": target},
+            rationale=rationale,
+            source="dialogue",
+        )
+        echo = f"I'll stop flagging {target}."
+    elif kind == "tune_rule":
+        p = P.make_proposal(
+            kind="escalation_rule",
+            target=target,
+            action={"target": action.get("target")},
+            rationale=rationale,
+            source="dialogue",
+        )
+        echo = f"I'll set rule {target} → {action.get('target')}."
+        confirm_phrase = "change the matrix"
+    elif kind == "teach_context_directive":
+        p = P.make_proposal(
+            kind="context_directive",
+            target=target,
+            action=action,
+            rationale=rationale,
+            source="dialogue",
+        )
+        echo = f"I'll stay quiet when {target} applies."
+    elif kind == "teach_semantic_fact":
+        p = P.make_proposal(
+            kind="semantic_fact",
+            target=target,
+            action=action,
+            rationale=rationale,
+            source="dialogue",
+        )
+        echo = f"I'll remember: {rationale}."
+    elif kind == "correct_advice_quality":
+        # light: credibility down (gate_calibration); heavy variant (prompt
+        # rewrite) routed only when the intent explicitly asks for a rewrite.
+        if action.get("rewrite"):
+            tier, confirm_phrase = "heavy", "rewrite the prompt"
+            p = P.make_proposal(
+                kind="prompt_strategy",
+                target=target,
+                action=action,
+                rationale=rationale,
+                source="dialogue",
+            )
+            echo = f"I'll rewrite the {target} prompt."
+        else:
+            p = P.make_proposal(
+                kind="gate_calibration",
+                target=target,
+                action={"op": "self_tolerance_add", "state_key": target},
+                rationale=rationale,
+                source="dialogue",
+            )
+            echo = f"I'll trust advice on {target} less."
+    else:
+        raise ValueError(f"router cannot route kind {kind}")
+
+    P.normalize_klass(p)
+    return {
+        "proposal": p,
+        "tier": tier,
+        "echo": echo,
+        "confirm_phrase": confirm_phrase,
+        "inverse": None,
+    }
+
+
+def apply_confirmed(pending: dict, *, pm, cfg, session_id: str) -> dict:
+    """Apply a user-confirmed pending proposal via the sanctioned confirmed
+    path (apply.apply_proposal(..., confirmed=True)) and report a small
+    result shaped for the dialogue reply."""
+    p = A.apply_proposal(
+        pm, pending["proposal"], cfg=cfg, session_id=session_id, confirmed=True
+    )
+    return {"proposal": p, "status": p["status"], "echo": pending["echo"]}
+
+
+def build_inverse(applied: dict) -> dict | None:
+    """Construct an inverse proposal from an applied record's rollback anchor.
+
+    None means "not (safely) invertible": either the apply left no real prior
+    to restore (e.g. self_tolerance_add on an already-tolerant target, or a
+    brand-new escalation rule/sigma domain with no prior value at all -- the
+    apply layer has no "remove" op for those, only "set"), or the kind
+    carries no rollback anchor to begin with.
+    """
+    p = applied["proposal"]
+    a = p.get("action") or {}
+    kind = p["kind"]
+    if kind == "escalation_rule" and a.get("prior_target") is not None:
+        return P.normalize_klass(
+            P.make_proposal(
+                kind="escalation_rule",
+                target=p["target"],
+                action={"target": a["prior_target"]},
+                rationale="undo",
+                source="dialogue",
+            )
+        )
+    if kind == "sigma" and a.get("prior_sigma") is not None:
+        return P.normalize_klass(
+            P.make_proposal(
+                kind="sigma",
+                target=p["target"],
+                action={
+                    "domain": a.get("domain", p["target"]),
+                    "sigma": a["prior_sigma"],
+                },
+                rationale="undo",
+                source="dialogue",
+            )
+        )
+    if kind == "gate_calibration":
+        op = cast(str, a.get("op"))
+        if op == "floor_set" and "prior" in a:
+            prior = a.get("prior") or {}
+            return P.normalize_klass(
+                P.make_proposal(
+                    kind="gate_calibration",
+                    target=p["target"],
+                    action={
+                        "op": "floor_set",
+                        "state_key": a.get("state_key", p["target"]),
+                        "value": prior.get("floor", 0.0),
+                    },
+                    rationale="undo",
+                    source="dialogue",
+                )
+            )
+        inv_op = {
+            "self_tolerance_add": "self_tolerance_remove",
+            "self_tolerance_remove": "self_tolerance_add",
+        }.get(op)
+        # Only invert if membership actually changed: self_tolerance_add
+        # changed the state iff it was NOT already a member beforehand;
+        # self_tolerance_remove changed it iff it WAS a member beforehand.
+        changed = "prior" in a and (op == "self_tolerance_add") != bool(a["prior"])
+        if inv_op and changed:
+            return P.normalize_klass(
+                P.make_proposal(
+                    kind="gate_calibration",
+                    target=p["target"],
+                    action={"op": inv_op, "state_key": a.get("state_key", p["target"])},
+                    rationale="undo",
+                    source="dialogue",
+                )
+            )
+    if kind == "prompt_strategy" and "prior_text" in a:
+        return P.normalize_klass(
+            P.make_proposal(
+                kind="prompt_strategy",
+                target=p["target"],
+                action={
+                    "domain": a.get("domain", p["target"]),
+                    "text": a["prior_text"],
+                },
+                rationale="undo",
+                source="dialogue",
+            )
+        )
+    if kind == "context_directive":
+        return P.normalize_klass(
+            P.make_proposal(
+                kind="context_directive",
+                target=p["target"],
+                action={"op": "remove", "directive_id": a.get("directive_id")},
+                rationale="undo",
+                source="dialogue",
+            )
+        )
+    if kind == "semantic_fact":
+        return P.normalize_klass(
+            P.make_proposal(
+                kind="semantic_fact",
+                target=p["target"],
+                action={"op": "remove", "memory_id": a.get("memory_id")},
+                rationale="undo",
+                source="dialogue",
+            )
+        )
+    return None
+
+
+def _inverse_out_of_bounds(inv: dict, cfg) -> bool:
+    """True iff applying ``inv`` would try to restore a numeric that violates
+    the CURRENT bounds imperator/apply.py enforces -- i.e. a rollback anchor
+    recorded before those bounds tightened. Checked up front so the caller
+    can report a truthful, distinct reason instead of letting the apply fail
+    generically."""
+    a = inv.get("action") or {}
+    if inv["kind"] == "sigma":
+        try:
+            sigma = float(cast(Any, a.get("sigma")))
+        except (TypeError, ValueError):
+            return True
+        lo = getattr(cfg, "sigma_min", _SIGMA_MIN)
+        hi = getattr(cfg, "sigma_max", _SIGMA_MAX)
+        return not (math.isfinite(sigma) and lo <= sigma <= hi)
+    if inv["kind"] == "gate_calibration" and a.get("op") == "floor_set":
+        try:
+            value = float(cast(Any, a.get("value")))
+        except (TypeError, ValueError):
+            return True
+        return not (math.isfinite(value) and _FLOOR_MIN <= value <= _FLOOR_MAX)
+    return False
+
+
+def apply_undo(applied: dict, *, pm, cfg, session_id: str) -> dict:
+    """Build and apply the inverse of an applied dialogue proposal, via the
+    same sanctioned confirmed path as apply_confirmed. Returns
+    {proposal, status, reason} with a truthful, distinct reason for every
+    non-applied outcome:
+
+    - status="unavailable": build_inverse found no safe inverse to construct.
+    - status="blocked": an inverse exists but would restore a value the
+      CURRENT apply-layer bounds reject (e.g. a prior_sigma recorded before
+      the configured [sigma_min, sigma_max] window narrowed) -- reported
+      before even attempting the apply, distinct from a generic apply
+      failure.
+    - status="logged": the inverse was attempted but apply_proposal did not
+      report "applied" (dialogue_confirmed_apply_enabled off, non-safe
+      klass, kind outside _CONFIRMED_APPLY_KINDS, or an internal apply
+      error) -- apply.py's own generic terminal status, surfaced as-is.
+    - status="applied": the undo succeeded.
+    """
+    inv = build_inverse(applied)
+    if inv is None:
+        return {
+            "proposal": None,
+            "status": "unavailable",
+            "reason": "cannot undo: no inverse available for this change",
+        }
+    if _inverse_out_of_bounds(inv, cfg):
+        return {
+            "proposal": inv,
+            "status": "blocked",
+            "reason": "cannot restore: prior value outside current bounds",
+        }
+    out = A.apply_proposal(pm, inv, cfg=cfg, session_id=session_id, confirmed=True)
+    reason = None if out["status"] == "applied" else "could not apply undo"
+    return {"proposal": out, "status": out["status"], "reason": reason}

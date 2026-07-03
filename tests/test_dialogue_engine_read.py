@@ -18,6 +18,9 @@ class _PM:
     def load_dialogue_log(self, limit=12):
         return []
 
+    def load_dialogue_pending(self, session_id):
+        return None
+
     def save_dialogue_turn(self, turn):
         self.saved = turn
 

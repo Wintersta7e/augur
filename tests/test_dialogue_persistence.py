@@ -41,3 +41,9 @@ def test_dialogue_pending_roundtrip_and_clear():
     assert pm.load_dialogue_pending("s1")["echo"] == "do X"
     pm.clear_dialogue_pending("s1")
     assert pm.load_dialogue_pending("s1") is None
+
+
+def test_dialogue_audit_append_and_load():
+    pm = _pm()
+    pm.append_dialogue_audit({"ts": 1.0, "kind": "sigma"})
+    assert pm.load_dialogue_audit(limit=5)[0]["kind"] == "sigma"

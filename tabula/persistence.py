@@ -562,6 +562,21 @@ class PersistenceManager:
     def clear_dialogue_pending(self, session_id: str) -> None:
         self._r.delete(f"augur:imperator:dialogue:pending:{session_id}")
 
+    def append_dialogue_audit(self, record: dict) -> None:
+        """Append a confirmed-apply/undo audit record (newest-first, capped)."""
+        key = "augur:imperator:dialogue:audit"
+        self._r.lpush(key, json.dumps(record))
+        self._r.ltrim(key, 0, MAX_DIALOGUE_LOG - 1)
+
+    def load_dialogue_audit(self, *, limit: int = 50) -> list[dict]:
+        """Up to *limit* recent audit records, newest first. [] on corrupt/absent."""
+        raw = self._r.lrange("augur:imperator:dialogue:audit", 0, limit - 1)
+        try:
+            return [json.loads(e) for e in raw]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning("dialogue audit log contained a corrupt entry; returning []")
+            return []
+
     # -- Current session --------------------------------------------------
 
     def load_current_session(self) -> dict | None:

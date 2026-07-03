@@ -107,10 +107,16 @@ def route(intent: dict, ctx, *, pm, cfg) -> dict:
         )
         echo = f"I'll stay quiet when {target} applies."
     elif kind == "teach_semantic_fact":
+        pattern = action.get("pattern") or {
+            "kind": "semantic",
+            "domains": action.get("domains", []),
+            "rule_key": action.get("rule_key"),
+            "severity": action.get("severity", "LOW"),
+        }
         p = P.make_proposal(
             kind="semantic_fact",
             target=target,
-            action=action,
+            action={"pattern": pattern},
             rationale=rationale,
             source="dialogue",
         )
@@ -244,21 +250,114 @@ def build_inverse(applied: dict) -> dict | None:
             )
         )
     if kind == "context_directive":
+        # Complete restore semantics (Task 20 decision A), designed once and
+        # mirrored by the semantic_fact case below: a create/upsert apply
+        # records the FULL pre-write content as prior_directive (None for a
+        # brand-new id); an applied remove records the FULL pre-delete
+        # content the same way. Whichever direction has a real prior
+        # restores it; the "no prior" case falls back to the simpler
+        # create-inverts-to-remove / remove-with-nothing-to-restore shape.
+        prior_directive = a.get("prior_directive")
+        if a.get("op") == "remove":
+            if prior_directive is None:
+                # No prior recorded (id never existed when removed): no
+                # inverse -- undo must report unavailable rather than
+                # re-add fabricated content and claim a false success.
+                return None
+            return P.normalize_klass(
+                P.make_proposal(
+                    kind="context_directive",
+                    target=p["target"],
+                    action={
+                        "directive_id": prior_directive.get(
+                            "directive_id", a.get("directive_id")
+                        ),
+                        "predicate": prior_directive.get("predicate", {}),
+                        "action": prior_directive.get("action", "suppress"),
+                        "scope": prior_directive.get("scope", "all"),
+                        # The directive's OWN rationale, not this undo's audit
+                        # rationale -- a re-add must not lose the original
+                        # user-facing explanation.
+                        "rationale": prior_directive.get("rationale", ""),
+                    },
+                    rationale="undo",
+                    source="dialogue",
+                )
+            )
+        if not a.get("directive_id"):
+            # No directive_id anchor means the write never stored anything
+            # (e.g. refused at cap): no inverse -- undo must report
+            # unavailable rather than hdel/re-add a never-stored id and
+            # claim a false success.
+            return None
+        if prior_directive is not None:
+            # Upsert-with-prior: inverse RESTORES the prior content.
+            return P.normalize_klass(
+                P.make_proposal(
+                    kind="context_directive",
+                    target=p["target"],
+                    action={
+                        "directive_id": a["directive_id"],
+                        "predicate": prior_directive.get("predicate", {}),
+                        "action": prior_directive.get("action", "suppress"),
+                        "scope": prior_directive.get("scope", "all"),
+                        "rationale": prior_directive.get("rationale", ""),
+                    },
+                    rationale="undo",
+                    source="dialogue",
+                )
+            )
+        # Create-with-no-prior: inverse is removal (current behavior).
         return P.normalize_klass(
             P.make_proposal(
                 kind="context_directive",
                 target=p["target"],
-                action={"op": "remove", "directive_id": a.get("directive_id")},
+                action={"op": "remove", "directive_id": a["directive_id"]},
                 rationale="undo",
                 source="dialogue",
             )
         )
     if kind == "semantic_fact":
+        # Mirrors the context_directive case above (Task 20 decision A):
+        # prior_fact is the FULL memory state read before the write, on
+        # BOTH the create/upsert and remove sides.
+        prior_fact = a.get("prior_fact")
+        if a.get("op") == "remove":
+            if prior_fact is None:
+                # No prior recorded (id never existed when removed): no
+                # inverse -- undo must report unavailable rather than
+                # re-teach fabricated content and claim a false success.
+                return None
+            return P.normalize_klass(
+                P.make_proposal(
+                    kind="semantic_fact",
+                    target=p["target"],
+                    action={"pattern": prior_fact.get("pattern")},
+                    rationale="undo",
+                    source="dialogue",
+                )
+            )
+        if not a.get("memory_id"):
+            return None
+        if prior_fact is not None:
+            # Upsert-with-prior (re-teach): inverse RESTORES the prior
+            # content by re-teaching it -- itself a review, per decision B:
+            # even an undo is forward decay, never a raw state rollback.
+            return P.normalize_klass(
+                P.make_proposal(
+                    kind="semantic_fact",
+                    target=p["target"],
+                    action={"pattern": prior_fact.get("pattern")},
+                    rationale="undo",
+                    source="dialogue",
+                )
+            )
+        # Create-with-no-prior: inverse is removal (current behavior).
         return P.normalize_klass(
             P.make_proposal(
                 kind="semantic_fact",
                 target=p["target"],
-                action={"op": "remove", "memory_id": a.get("memory_id")},
+                action={"op": "remove", "memory_id": a["memory_id"]},
                 rationale="undo",
                 source="dialogue",
             )

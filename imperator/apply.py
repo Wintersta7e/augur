@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 import math
 import time
+import uuid as _uuid
 
 from consilium.prompt_safety import is_prompt_acceptable
+from memoria.fsrs import make_memory_id
 from nexus import matrix_ops
 from imperator import proposals as P
 
@@ -16,6 +18,11 @@ log = logging.getLogger("imperator.apply")
 # [0.0, GATE_FLOOR_MAX=0.6] (disciplina/reflection_engine.py — not imported:
 # that module pulls in httpx/nats and mutates sys.path at import time).
 _FLOOR_MIN, _FLOOR_MAX = 0.0, 0.6
+
+# Valid values for a context directive's inner "action" field (what the
+# directive does when its predicate matches -- distinct from the outer
+# proposal's p["action"] dict, which carries this among other keys).
+_DIRECTIVE_ACTIONS = ("suppress", "downgrade")
 
 
 def _arm_gate(pm, p: dict, *, cfg) -> bool:
@@ -244,6 +251,139 @@ def apply_proposal(
     return p
 
 
+def _apply_context_directive(pm, p: dict, *, cfg) -> bool:
+    """Apply a context_directive proposal: validate, arm the gate, write, and
+    record the rollback anchor. Returns True on success, False if validation
+    fails, the gate cannot be armed, or the store refuses a NEW id at cap.
+
+    Handles two operations:
+    - op="remove": validates directive_id (False if missing/empty, no arm),
+      arms the gate, then removes the directive. Removal arms like every other
+      dispatched apply (self_tolerance_remove arms too). The rollback anchor
+      p["action"]["prior_directive"] records the FULL directive content read
+      BEFORE the delete (None if the id never existed), so a follow-on undo
+      can re-add the exact removed content -- Task 20 decision A's restore
+      semantics (replacing the earlier "unavailable" stopgap wherever a prior
+      is actually available).
+    - create/upsert (default): validates the directive's inner "action" field
+      against the suppress|downgrade enum (False if neither, no arm -- fail
+      closed like every other enum/range check in this module), mints a
+      directive_id (uuid4 hex) if not provided, arms the gate, then stores via
+      add_dialogue_directive and propagates its bool: True = written (upserts
+      of existing ids succeed even at cap), False = NEW id refused at
+      MAX_DIALOGUE_DIRECTIVES, nothing stored. An at-cap refusal is a truthful
+      failure -- the proposal ends "logged" (armed-but-refused is acceptable,
+      like the arm-then-save-raises path in _apply_prompt_strategy). The
+      rollback anchor p["action"]["prior_directive"] records the FULL
+      pre-existing content read BEFORE the write (None for a brand-new
+      directive_id), recorded ONLY when the write actually stored the
+      directive: an anchor on a refused write would let a follow-on undo
+      hdel/re-add off a never-stored id and report a false success.
+
+    Self-validating and SELF-ARMING (validate -> arm -> write), so a validation
+    failure never arms the gate.
+    """
+    a = p.get("action") or {}
+    if a.get("op") == "remove":
+        # Removal path: validate directive_id -> read prior -> arm -> remove
+        directive_id = a.get("directive_id")
+        if not directive_id:
+            return False
+        prior = pm.get_dialogue_directive(directive_id)  # rollback anchor, pre-delete
+        if not _arm_gate(pm, p, cfg=cfg):
+            return False
+        pm.remove_dialogue_directive(directive_id)
+        a["prior_directive"] = prior
+        return True
+    # Creation path: validate the directive action enum -> mint directive_id if
+    # not provided -> read prior -> arm -> write
+    directive_action = a.get("action", "suppress")
+    if directive_action not in _DIRECTIVE_ACTIONS:
+        return False
+    directive_id = a.get("directive_id") or _uuid.uuid4().hex
+    directive = {
+        "directive_id": directive_id,
+        "predicate": a.get("predicate") or {},
+        "action": directive_action,
+        "scope": a.get("scope", "all"),
+        # A restore inverse carries the ORIGINAL directive's own rationale in
+        # the action payload (so a re-add doesn't overwrite it with the
+        # outer proposal's generic "undo" audit rationale); the normal teach
+        # path never sets a["rationale"], so it falls back to the proposal's.
+        "rationale": a.get("rationale", p.get("rationale", "")),
+    }
+    prior = pm.get_dialogue_directive(directive_id)  # rollback anchor, pre-write
+    if not _arm_gate(pm, p, cfg=cfg):
+        return False
+    # Propagate the write's bool (True = written, False = NEW id refused at cap);
+    # record the rollback anchor only when the directive was actually stored.
+    result = pm.add_dialogue_directive(directive)
+    if result:
+        a["directive_id"] = directive_id
+        a["prior_directive"] = prior
+    return result
+
+
+def _apply_semantic_fact(pm, p: dict, *, cfg, session_id: str | None) -> bool:
+    """Apply a semantic_fact proposal: teach (create/re-teach) a taught memory,
+    or archive one for undo. Returns True on success, False if validation
+    fails or the gate cannot be armed.
+
+    Handles two operations:
+    - op="remove": validates memory_id (False if missing, no arm), arms the
+      gate, then archives via a status flip on the live augur:memoria:dsr
+      record (mirrors the sweep's archive path; a fuller sweep-integrated
+      move to the separate archive namespace is out of scope here -- see
+      pm.apply_memory_sweep's prune handling). The rollback anchor
+      p["action"]["prior_fact"] records the FULL pre-removal state read
+      BEFORE the flip (None if the id never existed), so a follow-on undo can
+      re-teach the exact removed content -- Task 20 decision A's restore
+      semantics (replacing the earlier "unavailable" stopgap wherever a prior
+      is actually available).
+    - create/upsert (default): requires a pattern with kind="semantic" (False
+      otherwise, no arm -- defense-in-depth mirror of the persistence-layer
+      check in create_user_taught_memory, kept here so the SAME validate-then-
+      arm ordering as every other handler holds even though the write would
+      also refuse). Arms the gate, then creates OR FSRS-reviews the taught
+      memory via pm.create_user_taught_memory (Task 20 decision B:
+      re-teaching an EXISTING fact strengthens it via a real recurrence
+      review -- it never resets decay progress, and reactivates a previously
+      -archived fact). The rollback anchor p["action"]["prior_fact"] records
+      the FULL pre-apply state read BEFORE the write (None for a brand-new
+      memory_id), so an undo of a re-teach restores the prior CONTENT via the
+      same create/upsert path -- itself a review, per decision B: even an
+      undo is forward decay, never a raw state rollback.
+
+    Self-validating and SELF-ARMING (validate -> arm -> write), matching every
+    other _dispatch_confirmed handler's contract.
+    """
+    a = p.get("action") or {}
+    if a.get("op") == "remove":
+        mid = a.get("memory_id")
+        if not mid:
+            return False
+        prior = pm.load_memory_state(mid)  # rollback anchor, read before the flip
+        if not _arm_gate(pm, p, cfg=cfg):
+            return False
+        if prior is not None:
+            pm.save_memory_state(mid, {**prior, "status": "archived"})
+        a["prior_fact"] = prior
+        return True
+    pattern = a.get("pattern")
+    if not pattern or pattern.get("kind") != "semantic":
+        return False
+    mid = make_memory_id(pattern)
+    prior = pm.load_memory_state(mid)  # rollback anchor, read before the write
+    if not _arm_gate(pm, p, cfg=cfg):
+        return False
+    pm.create_user_taught_memory(
+        pattern, source="dialogue", protect=True, session_id=session_id, cfg=cfg
+    )
+    a["memory_id"] = mid
+    a["prior_fact"] = prior
+    return True
+
+
 def _apply_confirmed(pm, p: dict, *, cfg, session_id: str | None) -> dict:
     """Human-confirmed reversible apply (dialogue teaching). Gated independently by
     cfg.dialogue_confirmed_apply_enabled (default True) -- NOT by
@@ -256,8 +396,9 @@ def _apply_confirmed(pm, p: dict, *, cfg, session_id: str | None) -> dict:
     not subject to the anti-thrash staleness window that exists to stop the LLM
     reasoner from re-proposing the same target unattended. The per-kind helper
     still records its own reversibility anchor (prior_target/prior_window/
-    prior_text) so a confirmed change remains rollback-able like any other.
-    Sets terminal status. Never raises."""
+    prior_text/prior_sigma/prior for gate_calibration/prior_directive for
+    context_directive/prior_fact for semantic_fact) so a confirmed change
+    remains rollback-able like any other. Sets terminal status. Never raises."""
     if not getattr(cfg, "dialogue_confirmed_apply_enabled", False):
         p["status"] = "logged"
         return p
@@ -265,7 +406,7 @@ def _apply_confirmed(pm, p: dict, *, cfg, session_id: str | None) -> dict:
         p["status"] = "logged"
         return p
     try:
-        ok = _dispatch_confirmed(pm, p, cfg=cfg)
+        ok = _dispatch_confirmed(pm, p, cfg=cfg, session_id=session_id)
     except Exception:
         p["status"] = "logged"
         return p
@@ -275,17 +416,19 @@ def _apply_confirmed(pm, p: dict, *, cfg, session_id: str | None) -> dict:
     return p
 
 
-def _dispatch_confirmed(pm, p: dict, *, cfg) -> bool:
+def _dispatch_confirmed(pm, p: dict, *, cfg, session_id: str | None = None) -> bool:
     """Route a confirmed proposal to its kind helper, honoring each helper's arming
     contract (Task 9): escalation_rule does NOT self-arm, so this caller arms the
     anti-thrash gate before invoking it, same as the autonomous path -- a failed
     arm aborts before the matrix write ever runs. prompt_strategy is
     self-validating and self-arming, so it is called directly.
 
-    sigma and gate_calibration are likewise self-validating and SELF-ARMING
-    (validate -> arm -> write inside the handler), so a validation failure never
-    leaves the dedupe marker set. (context_directive, semantic_fact land in
-    later tasks)"""
+    sigma, gate_calibration, context_directive, and semantic_fact are likewise
+    self-validating and SELF-ARMING (validate -> arm -> write inside the
+    handler), so a validation failure never leaves the dedupe marker set.
+    semantic_fact is the only handler that reads session_id (threaded through
+    to pm.create_user_taught_memory's FSRS review on re-teach, Task 20
+    decision B)."""
     kind = p["kind"]
     if kind == "escalation_rule":
         if not _arm_gate(pm, p, cfg=cfg):
@@ -297,4 +440,8 @@ def _dispatch_confirmed(pm, p: dict, *, cfg) -> bool:
         return _apply_sigma(pm, p, cfg=cfg)
     if kind == "gate_calibration":
         return _apply_gate_calibration(pm, p, cfg=cfg)
+    if kind == "context_directive":
+        return _apply_context_directive(pm, p, cfg=cfg)
+    if kind == "semantic_fact":
+        return _apply_semantic_fact(pm, p, cfg=cfg, session_id=session_id)
     return False

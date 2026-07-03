@@ -10,9 +10,23 @@ from typing import Any  # noqa: F401  (used only in deferred annotations; PEP-56
 
 import redis
 
+from memoria.fsrs import make_memory_id
 from tabula.contracts import PerceptionEvent
 
 log = logging.getLogger("persistence")
+
+
+def _to_epoch(ts: Any) -> float:
+    """Coerce an ISO-8601 string or numeric epoch to a float epoch (0.0 on failure)."""
+    if ts is None:
+        return 0.0
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        return datetime.fromisoformat(str(ts)).timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
 
 HISTORY_MAX = 1000
 PROMPT_HISTORY_MAX = 100
@@ -40,6 +54,13 @@ MAX_IMPERATOR_PROPOSALS: int = (
     200  # newest-first capped append-log for Imperator proposals
 )
 MAX_DIALOGUE_LOG: int = 500  # newest-first capped conversation log
+# Cap on taught context directives. The whole hash is HGETALL'd into the
+# dialogue context on every turn, so this bounds per-turn load latency the
+# same way MAX_APP_DESCRIPTORS bounds get_app_descriptors. Directives are
+# hand-taught (one per explicit user instruction), so 200 — matching
+# MAX_IMPERATOR_PROPOSALS — is already far beyond realistic use. New ids
+# beyond the cap are refused; existing ids keep updating.
+MAX_DIALOGUE_DIRECTIVES: int = 200
 
 # Default TTL for per-session Redis keys (feedback, correlation graph,
 # reflection report). Prevents indefinite growth beyond the 1000-entry
@@ -147,6 +168,31 @@ class PersistenceManager:
         key = f"augur:vigil:history:{domain}"
         raw_list = self._r.lrange(key, 0, limit - 1)
         return [json.loads(entry) for entry in raw_list]
+
+    def load_focused_app(self) -> str | None:
+        """Newest focused-app value across the two activity Sensus streams.
+
+        The single source of truth for "what app is the user in right now":
+        newest of ``activity_focus`` (``context.new_app``) and
+        ``activity_intensity`` (``context.focused_app``), read from the
+        ``augur:vigil:history:*`` keys via ``get_history``. Consumed by both
+        Imperator's ``activity`` read-model field
+        (``imperator/sources.py::gather``) and the Limen taught-directive
+        pre-check (``limen/gate.py::Gate.evaluate``).
+        """
+        focus_hist = self.get_history("activity_focus", limit=1)
+        intens_hist = self.get_history("activity_intensity", limit=1)
+        focus = focus_hist[0] if focus_hist else None
+        intens = intens_hist[0] if intens_hist else None
+        f_ts = _to_epoch(focus.get("timestamp")) if focus else float("-inf")
+        i_ts = _to_epoch(intens.get("timestamp")) if intens else float("-inf")
+        if intens and i_ts >= f_ts:
+            return (intens.get("context") or {}).get("focused_app") or intens.get(
+                "entity"
+            )
+        if focus:
+            return (focus.get("context") or {}).get("new_app") or focus.get("entity")
+        return None
 
     # -- Feedback storage ----------------------------------------------------
 
@@ -577,6 +623,60 @@ class PersistenceManager:
             log.warning("dialogue audit log contained a corrupt entry; returning []")
             return []
 
+    def add_dialogue_directive(self, directive: dict) -> bool:
+        """Store a context directive in the augur:imperator:dialogue:directives hash.
+
+        *directive* must include a non-empty "directive_id" key (ValueError
+        otherwise). The entire dict is JSON-encoded and stored under that key;
+        re-adding an existing id overwrites it (upsert).
+
+        Refuse-at-cap (via _hash_save): returns True if written, False if a
+        NEW id would exceed MAX_DIALOGUE_DIRECTIVES — existing ids keep
+        updating even at cap. Callers must check the return value to report
+        a truthful failure to the user.
+        """
+        directive_id = directive.get("directive_id")
+        if not directive_id:
+            raise ValueError("directive must include a non-empty 'directive_id'")
+        return self._hash_save(
+            "augur:imperator:dialogue:directives",
+            directive_id,
+            directive,
+            cap=MAX_DIALOGUE_DIRECTIVES,
+        )
+
+    def remove_dialogue_directive(self, directive_id: str) -> None:
+        """Remove a context directive by directive_id."""
+        self._r.hdel("augur:imperator:dialogue:directives", directive_id)
+
+    def load_dialogue_directives(self) -> list[dict]:
+        """Return all stored context directives. [] on corrupt/absent.
+
+        Each stored directive is JSON-decoded. Corrupt entries are skipped
+        with a warning, and the method returns what it could decode.
+        """
+        raw = self._r.hgetall("augur:imperator:dialogue:directives")
+        out = []
+        for v in raw.values():
+            try:
+                out.append(json.loads(v))
+            except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                continue
+        return out
+
+    def get_dialogue_directive(self, directive_id: str) -> dict | None:
+        """Return a single stored context directive by id, or None if absent
+        or corrupt. Used by apply.py to read the PRIOR content of a directive
+        BEFORE a create/upsert or remove overwrites/deletes it, so the write
+        can record a true restore anchor (Task 20 decision A)."""
+        raw = self._r.hget("augur:imperator:dialogue:directives", directive_id)
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            return None
+
     # -- Current session --------------------------------------------------
 
     def load_current_session(self) -> dict | None:
@@ -741,16 +841,22 @@ class PersistenceManager:
     #
     # habituation and habituation_floor are SEPARATE Redis keys (spec §6).
 
-    def _hash_save(self, redis_key: str, field: str, entry: dict) -> bool:
-        """Per-field HSET with refuse-at-cap. Returns True if written."""
-        if (
-            not self._r.hexists(redis_key, field)
-            and self._r.hlen(redis_key) >= MAX_GATE_STATE_KEYS
-        ):
+    def _hash_save(
+        self, redis_key: str, field: str, entry: dict, *, cap: int | None = None
+    ) -> bool:
+        """Per-field HSET with refuse-at-cap. Returns True if written.
+
+        *cap* defaults to MAX_GATE_STATE_KEYS (the gate hash stores) — resolved
+        at call time so tests can monkeypatch the module constant; other
+        hash-backed stores (e.g. dialogue directives) pass their own cap.
+        """
+        if cap is None:
+            cap = MAX_GATE_STATE_KEYS
+        if not self._r.hexists(redis_key, field) and self._r.hlen(redis_key) >= cap:
             log.warning(
-                "gate hash %s full (%d); dropping new field %s",
+                "hash %s full (%d); dropping new field %s",
                 redis_key,
-                MAX_GATE_STATE_KEYS,
+                cap,
                 field,
             )
             return False
@@ -1050,3 +1156,123 @@ class PersistenceManager:
                     # concurrent commit of THIS session is caught by the
                     # sismember re-check on retry.
                     continue
+
+    def create_user_taught_memory(
+        self,
+        pattern: dict,
+        *,
+        source: str,
+        protect: bool = True,
+        session_id: str | None = None,
+        cfg: Any = None,
+    ) -> str:
+        """Create OR re-teach a user-taught semantic memory with FSRS decay.
+
+        Pattern must include: kind="semantic", domains, rule_key, severity
+        (ValueError if kind is not "semantic" -- this API owns semantic facts
+        only).  Returns the memory_id (deterministic from pattern).
+
+        Re-teaching an EXISTING taught fact -- the pattern hashes to the same
+        deterministic memory_id, per make_memory_id's "recurrence == review"
+        contract -- is a real FSRS recurrence review via memoria.fsrs.review,
+        the SAME path Disciplina's memory sweep uses (memoria/tiers.py
+        plan_sweep / tabula/persistence.py record_memory_review): S
+        strengthens and last_review_session advances, never resetting decay
+        progress. The stored pattern/taught_by/origin_severity are refreshed
+        to the newly-taught values (content is updatable even though only
+        pattern's identity fields -- kind/domains/rule_key/severity -- affect
+        the memory_id), and status is reactivated to "active" (undoes the
+        status-flip archival apply.py's semantic_fact remove handler uses). A
+        brand-new pattern is created fresh, exactly as before.
+
+        Args:
+            pattern: dict with {kind: "semantic", domains, rule_key, severity}
+            source: who taught this memory (e.g., "user")
+            protect: if True, set origin_severity="HIGH"; else use pattern.severity
+            session_id: dialogue session id, passed to the FSRS review on
+                re-teach (idempotent per session, mirroring record_memory_review)
+            cfg: AugurConfig for the review's FSRS knobs (memory_s_growth_factor,
+                memory_s_max) -- only read on re-teach; defaults to
+                AugurConfig.from_env() when not supplied
+
+        Returns:
+            memory_id (SHA-256 of canonical pattern)
+        """
+        if pattern.get("kind") != "semantic":
+            raise ValueError(
+                "taught memory pattern must be kind='semantic', got "
+                f"{pattern.get('kind')!r}"
+            )
+        mid = make_memory_id(pattern)
+        existing = self.load_memory_state(mid)
+        active = self.active_session_count()
+        origin_severity = "HIGH" if protect else pattern.get("severity", "LOW")
+        if existing is not None:
+            from memoria.fsrs import review
+
+            if cfg is None:
+                from tabula.config import AugurConfig
+
+                cfg = AugurConfig.from_env()
+            reviewed = review(existing, active, session_id or "", cfg)
+            reviewed = {
+                **reviewed,
+                "pattern": pattern,
+                "taught_by": source,
+                "origin_severity": origin_severity,
+                "status": "active",
+            }
+            self.save_memory_state(mid, reviewed)
+            return mid
+        state: dict[str, Any] = {
+            "memory_id": mid,
+            "pattern": pattern,
+            "S": 1.0,
+            "D": 5.0,
+            "last_review_session": active,
+            "tier": "warm",
+            "status": "active",
+            "origin_severity": origin_severity,
+            "memory_kind": "semantic",
+            "source_sessions": [],
+            "taught_by": source,
+        }
+        self.save_memory_state(mid, state)
+        return mid
+
+    def load_taught_facts(self) -> list[dict]:
+        """Load all ACTIVE taught semantic memories.
+
+        Filters all memory states for pattern.kind == "semantic" AND
+        status == "active" (a missing status key counts as active, for
+        taught facts stored before the field existed). Archived facts --
+        apply.py's semantic_fact remove handler flips status on the live
+        record -- must NOT surface here: the dialogue context feeds this
+        list verbatim into what the LLM sees, so a user-confirmed
+        "forget X" has to actually drop X from every subsequent turn.
+        Returns a list of memory dicts (from both warm and cold tiers).
+        """
+        return [
+            m
+            for m in self.load_all_memory_states()
+            if (m.get("pattern") or {}).get("kind") == "semantic"
+            and m.get("status", "active") == "active"
+        ]
+
+    def load_taught_facts_for_domains(self, domains: list[str]) -> list[dict]:
+        """Load ACTIVE taught semantic memories matching any domain
+        (inherits load_taught_facts' status filter).
+
+        Args:
+            domains: list of domain names to filter by (case-insensitive)
+
+        Returns:
+            list of memory dicts whose pattern.domains overlap with the input list
+        """
+        want = {d.lower() for d in domains}
+        out = []
+        for m in self.load_taught_facts():
+            mdoms = {d.lower() for d in (m.get("pattern") or {}).get("domains", [])}
+            if mdoms & want:
+                out.append(m)
+        return out

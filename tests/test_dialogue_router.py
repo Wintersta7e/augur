@@ -20,6 +20,10 @@ class _Cfg:
     sigma_max = 5.0
     min_prompt_len = 20
     prompt_forbidden_patterns = ()
+    # FSRS review knobs, read only on a semantic_fact re-teach (matches
+    # tabula.config.AugurConfig's defaults).
+    memory_s_growth_factor = 0.5
+    memory_s_max = 365
 
 
 # ── route(): tier + kind mapping, reason-aware correct_silence ─────────────
@@ -198,7 +202,11 @@ def test_teach_semantic_fact_routes():
         {
             "kind": "teach_semantic_fact",
             "target": "user",
-            "action": {},
+            "action": {
+                "domains": ["typing"],
+                "rule_key": "HIGH",
+                "severity": "MEDIUM",
+            },
             "rationale": "left-handed",
         },
         C.DialogueContext(),
@@ -207,6 +215,58 @@ def test_teach_semantic_fact_routes():
     )
     assert pending["proposal"]["kind"] == "semantic_fact"
     assert "left-handed" in pending["echo"]
+    # route() builds a pattern dict from the intent's action fields.
+    assert pending["proposal"]["action"] == {
+        "pattern": {
+            "kind": "semantic",
+            "domains": ["typing"],
+            "rule_key": "HIGH",
+            "severity": "MEDIUM",
+        }
+    }
+
+
+def test_teach_semantic_fact_routes_defaults_with_empty_action():
+    pending = R.route(
+        {
+            "kind": "teach_semantic_fact",
+            "target": "user",
+            "action": {},
+            "rationale": "left-handed",
+        },
+        C.DialogueContext(),
+        pm=None,
+        cfg=_Cfg(),
+    )
+    assert pending["proposal"]["action"] == {
+        "pattern": {
+            "kind": "semantic",
+            "domains": [],
+            "rule_key": None,
+            "severity": "LOW",
+        }
+    }
+
+
+def test_teach_semantic_fact_routes_passes_through_explicit_pattern():
+    explicit = {
+        "kind": "semantic",
+        "domains": ["chess"],
+        "rule_key": None,
+        "severity": "LOW",
+    }
+    pending = R.route(
+        {
+            "kind": "teach_semantic_fact",
+            "target": "user",
+            "action": {"pattern": explicit},
+            "rationale": "castling habit",
+        },
+        C.DialogueContext(),
+        pm=None,
+        cfg=_Cfg(),
+    )
+    assert pending["proposal"]["action"] == {"pattern": explicit}
 
 
 def test_correct_advice_quality_light_without_rewrite():
@@ -778,3 +838,224 @@ def test_roundtrip_prompt_strategy_undo_restores_text():
     )
     assert out["status"] == "applied"
     assert pm.load_prompt("typing") == old_text
+
+
+def test_roundtrip_context_directive_undo_of_undo_restores_directive():
+    # teach -> confirm-apply (create) -> undo (removes, records the removed
+    # content as prior_directive) -> undo of THAT undo re-adds it: Task 20
+    # decision A's complete restore semantics replaces the earlier
+    # "unavailable" stopgap for a removal that captured a real prior.
+    pm = _pm()
+    forward = P.make_proposal(
+        kind="context_directive",
+        target="appX",
+        action={
+            "predicate": {"context": "focused_app", "match": "appX"},
+            "action": "suppress",
+            "scope": "all",
+        },
+        rationale="deep work",
+        source="dialogue",
+    )
+    applied = R.apply_confirmed(
+        {"proposal": forward, "echo": "e"}, pm=pm, cfg=_Cfg(), session_id="d1"
+    )
+    assert applied["status"] == "applied"
+    assert len(pm.load_dialogue_directives()) == 1
+    did = applied["proposal"]["action"]["directive_id"]
+
+    undo = R.apply_undo(
+        {"proposal": applied["proposal"]}, pm=pm, cfg=_Cfg(), session_id="d1"
+    )
+    assert undo["status"] == "applied"
+    assert pm.load_dialogue_directives() == []
+    # The removed content was captured as the restore anchor.
+    assert undo["proposal"]["action"]["prior_directive"]["directive_id"] == did
+
+    # The audited record of the undo is an applied REMOVE-WITH-PRIOR: its
+    # inverse re-adds the exact removed content.
+    inv = R.build_inverse({"proposal": undo["proposal"]})
+    assert inv is not None
+    assert inv["action"] == {
+        "directive_id": did,
+        "predicate": {"context": "focused_app", "match": "appX"},
+        "action": "suppress",
+        "scope": "all",
+        "rationale": "deep work",
+    }
+
+    out = R.apply_undo(
+        {"proposal": undo["proposal"]}, pm=pm, cfg=_Cfg(), session_id="d1"
+    )
+    assert out["status"] == "applied"
+    restored = pm.load_dialogue_directives()
+    assert len(restored) == 1
+    assert restored[0]["directive_id"] == did
+    assert restored[0]["predicate"] == {"context": "focused_app", "match": "appX"}
+    # The original user-facing rationale is restored too, not overwritten
+    # with the generic "undo" audit rationale.
+    assert restored[0]["rationale"] == "deep work"
+
+
+def test_roundtrip_context_directive_upsert_undo_restores_prior_content():
+    # teach directive A -> apply (fresh create, no prior) -> teach directive A
+    # AGAIN with the SAME directive_id but a DIFFERENT predicate (upsert) ->
+    # apply records the pre-upsert content as prior_directive -> undo
+    # RESTORES that prior content (Task 20 decision A), rather than deleting
+    # the directive outright.
+    pm = _pm()
+    first = P.make_proposal(
+        kind="context_directive",
+        target="appX",
+        action={
+            "predicate": {"context": "focused_app", "match": "appX"},
+            "action": "suppress",
+            "scope": "all",
+        },
+        rationale="deep work",
+        source="dialogue",
+    )
+    applied1 = R.apply_confirmed(
+        {"proposal": first, "echo": "e"}, pm=pm, cfg=_Cfg(), session_id="d1"
+    )
+    assert applied1["status"] == "applied"
+    did = applied1["proposal"]["action"]["directive_id"]
+
+    second = P.make_proposal(
+        kind="context_directive",
+        target="appX",
+        action={
+            "directive_id": did,
+            "predicate": {"context": "focused_app", "match": "appX_v2"},
+            "action": "downgrade",
+            "scope": "single",
+        },
+        rationale="narrower scope",
+        source="dialogue",
+    )
+    applied2 = R.apply_confirmed(
+        {"proposal": second, "echo": "e"}, pm=pm, cfg=_Cfg(), session_id="d1"
+    )
+    assert applied2["status"] == "applied"
+    assert applied2["proposal"]["action"]["prior_directive"]["predicate"] == {
+        "context": "focused_app",
+        "match": "appX",
+    }
+    current = pm.load_dialogue_directives()
+    assert len(current) == 1
+    assert current[0]["predicate"] == {"context": "focused_app", "match": "appX_v2"}
+
+    out = R.apply_undo(
+        {"proposal": applied2["proposal"]}, pm=pm, cfg=_Cfg(), session_id="d1"
+    )
+    assert out["status"] == "applied"
+    restored = pm.load_dialogue_directives()
+    assert len(restored) == 1  # restored in place, NOT deleted
+    assert restored[0]["directive_id"] == did
+    assert restored[0]["predicate"] == {"context": "focused_app", "match": "appX"}
+    assert restored[0]["action"] == "suppress"
+    assert restored[0]["scope"] == "all"
+    assert restored[0]["rationale"] == "deep work"
+
+
+def test_roundtrip_semantic_fact_remove_undo_readds_content():
+    # teach -> confirm-apply (fresh create) -> undo (archives, records the
+    # pre-archive state as prior_fact) -> undo of THAT undo re-teaches the
+    # removed content (Task 20 decision A), reactivating it.
+    pm = _pm()
+    pattern = {
+        "kind": "semantic",
+        "domains": ["chess", "typing"],
+        "rule_key": "HIGH+HIGH",
+        "severity": "MEDIUM",
+    }
+    forward = P.make_proposal(
+        kind="semantic_fact",
+        target="chess+typing",
+        action={"pattern": pattern},
+        rationale="taught",
+        source="dialogue",
+    )
+    applied = R.apply_confirmed(
+        {"proposal": forward, "echo": "e"}, pm=pm, cfg=_Cfg(), session_id="d1"
+    )
+    assert applied["status"] == "applied"
+    mid = applied["proposal"]["action"]["memory_id"]
+    assert applied["proposal"]["action"]["prior_fact"] is None  # fresh create
+    assert pm.load_memory_state(mid)["status"] == "active"
+
+    undo = R.apply_undo(
+        {"proposal": applied["proposal"]}, pm=pm, cfg=_Cfg(), session_id="d1"
+    )
+    assert undo["status"] == "applied"
+    assert pm.load_memory_state(mid)["status"] == "archived"
+    assert undo["proposal"]["action"]["prior_fact"] is not None  # captured
+
+    inv = R.build_inverse({"proposal": undo["proposal"]})
+    assert inv is not None and inv["action"] == {"pattern": pattern}
+
+    readd = R.apply_undo(
+        {"proposal": undo["proposal"]}, pm=pm, cfg=_Cfg(), session_id="d1"
+    )
+    assert readd["status"] == "applied"
+    assert pm.load_memory_state(mid)["status"] == "active"  # reactivated
+    assert mid in [f["memory_id"] for f in pm.load_taught_facts()]
+
+
+def test_roundtrip_semantic_fact_reteach_undo_restores_prior_pattern():
+    # A re-teach (upsert-with-prior) undo restores the PRIOR pattern content
+    # by re-teaching it -- itself a review, per decision B: even an undo is
+    # forward decay, never a raw state rollback.
+    pm = _pm()
+    pattern = {
+        "kind": "semantic",
+        "domains": ["typing"],
+        "rule_key": None,
+        "severity": "LOW",
+    }
+    first = P.make_proposal(
+        kind="semantic_fact",
+        target="typing",
+        action={"pattern": pattern},
+        rationale="left-handed",
+        source="dialogue",
+    )
+    applied1 = R.apply_confirmed(
+        {"proposal": first, "echo": "e"}, pm=pm, cfg=_Cfg(), session_id="d1"
+    )
+    assert applied1["status"] == "applied"
+    mid = applied1["proposal"]["action"]["memory_id"]
+    first_state = pm.load_memory_state(mid)
+    assert first_state["S"] == 1.0
+
+    # Re-teach the SAME pattern (upsert-with-prior: same deterministic id).
+    second = P.make_proposal(
+        kind="semantic_fact",
+        target="typing",
+        action={"pattern": pattern},
+        rationale="left-handed again",
+        source="dialogue",
+    )
+    applied2 = R.apply_confirmed(
+        {"proposal": second, "echo": "e"}, pm=pm, cfg=_Cfg(), session_id="d1"
+    )
+    assert applied2["status"] == "applied"
+    assert applied2["proposal"]["action"]["prior_fact"]["S"] == 1.0
+    strengthened = pm.load_memory_state(mid)
+    assert strengthened["S"] > first_state["S"]
+
+    inv = R.build_inverse({"proposal": applied2["proposal"]})
+    assert inv is not None and inv["action"] == {"pattern": pattern}
+
+    # A different session for the undo: review()'s idempotency is per
+    # session, so re-using "d1" here would be a no-op review, not a
+    # meaningful demonstration of forward-only decay.
+    out = R.apply_undo(
+        {"proposal": applied2["proposal"]}, pm=pm, cfg=_Cfg(), session_id="d2"
+    )
+    assert out["status"] == "applied"
+    # The undo itself re-teaches (reviews) the prior pattern -- S strengthens
+    # further rather than rolling back to the pre-re-teach value; this is the
+    # intended decision-B semantics (forward-only decay, even on undo).
+    assert pm.load_memory_state(mid)["S"] > strengthened["S"]
+    assert pm.load_memory_state(mid)["pattern"] == pattern

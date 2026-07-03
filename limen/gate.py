@@ -269,6 +269,19 @@ def build_signature(payload: dict[str, Any]) -> Signature:
     )
 
 
+def _directive_scope_allows(scope: Any, domain: str) -> bool:
+    """True when a taught directive's ``scope`` covers ``domain`` (spec §7.2).
+
+    The schema is ``"scope": "all" | ["<domain>", ...]``: a non-empty list
+    restricts the taught silence to those domains; anything else — absent,
+    ``"all"``, or an empty list — covers every domain.  For a correlation the
+    caller passes the primary anomaly's domain.
+    """
+    if isinstance(scope, list) and scope:
+        return domain in scope
+    return True
+
+
 class Gate:
     """The advisor receptivity/burden gate (spec §3/§4).
 
@@ -330,6 +343,15 @@ class Gate:
         * danger exemption (``signature.exempt``) →
           ``FIRE("exempt_high_correlated")`` performing **no** state read (§2 B).
 
+        Stage 0.5 — taught-directive pre-check (spec §7.2): reads only
+        ``pm.load_dialogue_directives()`` + ``pm.load_focused_app()``. A
+        ``"suppress"`` directive matching the current focused app whose
+        ``scope`` covers the event's domain (see
+        :func:`_directive_scope_allows`) returns
+        ``SUPPRESS("taught_directive:<id>")`` immediately, bypassing the
+        biological arm pipeline entirely (by design — see the inline comment
+        at the call site).
+
         Otherwise gate state is loaded up front (read-only) and the **two-phase**
         pipeline runs (spec §5):
 
@@ -352,6 +374,35 @@ class Gate:
             return GateDecision.fire(
                 "exempt_high_correlated", deciding_arm="danger_exemption"
             )
+
+        # Imperator III taught-directive pre-check (read-only, spec §7.2). Runs
+        # AFTER the exempt fast-exit, so high+correlated advice (invariant B)
+        # is never silenced by a directive, and BEFORE any other gate state is
+        # read/loaded. A matching "suppress" directive short-circuits the
+        # entire biological arm pipeline (including anti-starvation/Arm 9 and
+        # the cap-fail-open check below) — deliberately: a taught directive is
+        # a known, reversible, user-authored policy ("stay silent in app X"),
+        # not a learned/behavioral suppression, so it is exempt from the
+        # anti-starvation release that exists to catch the *system* silencing
+        # a channel unknowably (spec §7.2 "honoring the spirit of invariant D").
+        directives: list[dict[str, Any]] = getattr(
+            pm, "load_dialogue_directives", lambda: []
+        )()
+        if directives:
+            focused = getattr(pm, "load_focused_app", lambda: None)()
+            for d in directives:
+                pred = d.get("predicate") or {}
+                if (
+                    pred.get("context") == "focused_app"
+                    and focused is not None
+                    and pred.get("match") == focused
+                    and d.get("action") == "suppress"
+                    and _directive_scope_allows(d.get("scope"), signature.domain)
+                ):
+                    return GateDecision.suppress(
+                        f"taught_directive:{d.get('directive_id')}",
+                        deciding_arm="taught_directive",
+                    )
 
         if signature.ungateable:
             # §5 missing-entity rule: a single event with a missing/"?"/empty

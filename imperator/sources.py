@@ -242,19 +242,6 @@ def _latest_value(history):
     return history[0].get("value") if history else None
 
 
-def _latest_activity(focus_hist, intens_hist):
-    """Newest of the two Sensus streams: focus context.new_app or intensity focused_app."""
-    focus = focus_hist[0] if focus_hist else None
-    intens = intens_hist[0] if intens_hist else None
-    f_ts = _to_epoch(focus.get("timestamp")) if focus else float("-inf")
-    i_ts = _to_epoch(intens.get("timestamp")) if intens else float("-inf")
-    if intens and i_ts >= f_ts:
-        return (intens.get("context") or {}).get("focused_app") or intens.get("entity")
-    if focus:
-        return (focus.get("context") or {}).get("new_app") or focus.get("entity")
-    return None
-
-
 def gather(pm, stream_state: dict, now: float, cfg) -> dict:
     """Assemble the full input dict for compute_auspices + compute_self_model."""
     report = resolve_latest_reflection(pm)
@@ -282,13 +269,12 @@ def gather(pm, stream_state: dict, now: float, cfg) -> dict:
     advice_rate = pm.load_advice_rate() if hasattr(pm, "load_advice_rate") else None
     dismissal = advice_rate.get("rate_ewma") if isinstance(advice_rate, dict) else None
 
-    focus_hist = pm.get_history("activity_focus", limit=1)
     intens_hist = pm.get_history("activity_intensity", limit=1)
 
     rollup = _rollup_health(health)
     return {
         "session_id": _current_sid(pm),
-        "activity": _latest_activity(focus_hist, intens_hist),
+        "activity": pm.load_focused_app(),
         "intensity_ewma": _latest_value(intens_hist),
         "anomaly_load": stream_state.get("anomaly_load"),
         "escalation_tier": stream_state.get("escalation_tier"),

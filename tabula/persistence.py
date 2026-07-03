@@ -169,7 +169,9 @@ class PersistenceManager:
         raw_list = self._r.lrange(key, 0, limit - 1)
         return [json.loads(entry) for entry in raw_list]
 
-    def load_focused_app(self) -> str | None:
+    def load_focused_app(
+        self, *, now: float | None = None, max_age_s: float | None = None
+    ) -> str | None:
         """Newest focused-app value across the two activity Sensus streams.
 
         The single source of truth for "what app is the user in right now":
@@ -179,6 +181,15 @@ class PersistenceManager:
         Imperator's ``activity`` read-model field
         (``imperator/sources.py::gather``) and the Limen taught-directive
         pre-check (``limen/gate.py::Gate.evaluate``).
+
+        When both *now* and *max_age_s* are given, a focus/intensity entry
+        older than ``now - max_age_s`` is treated as ABSENT. A stalled activity
+        Sensor would otherwise keep reporting the last-seen app forever, so a
+        taught "stay quiet in app X" directive could keep matching -- and a new
+        teach could be pinned to -- an app the user left long ago. Returning
+        None on a stale read makes the Limen pre-check fall through toward FIRE
+        (the safe direction) and the dialogue teach path refuse truthfully.
+        Omitting the bounds (the default) preserves the raw newest-entry read.
         """
         focus_hist = self.get_history("activity_focus", limit=1)
         intens_hist = self.get_history("activity_intensity", limit=1)
@@ -186,6 +197,12 @@ class PersistenceManager:
         intens = intens_hist[0] if intens_hist else None
         f_ts = _to_epoch(focus.get("timestamp")) if focus else float("-inf")
         i_ts = _to_epoch(intens.get("timestamp")) if intens else float("-inf")
+        if now is not None and max_age_s is not None:
+            cutoff = now - max_age_s
+            if focus is not None and f_ts < cutoff:
+                focus, f_ts = None, float("-inf")
+            if intens is not None and i_ts < cutoff:
+                intens, i_ts = None, float("-inf")
         if intens and i_ts >= f_ts:
             return (intens.get("context") or {}).get("focused_app") or intens.get(
                 "entity"

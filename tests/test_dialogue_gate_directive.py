@@ -86,7 +86,7 @@ class _PM:
     def __init__(self, app, directives):
         self._app, self._d = app, directives
 
-    def load_focused_app(self):
+    def load_focused_app(self, **_k):
         return self._app
 
     def load_dialogue_directives(self):
@@ -162,7 +162,7 @@ def test_directive_predicate_mismatch_does_not_suppress(fake_pm, cfg):
     does NOT short-circuit, so evaluate() falls through into the full
     biological pipeline, which needs the full PersistenceManager surface.
     """
-    fake_pm.load_focused_app = lambda: "appY"
+    fake_pm.load_focused_app = lambda **_k: "appY"
     fake_pm.add_dialogue_directive(
         {
             "directive_id": "d1",
@@ -179,7 +179,7 @@ def test_directive_predicate_mismatch_does_not_suppress(fake_pm, cfg):
 def test_directive_unknown_action_does_not_suppress(fake_pm, cfg):
     """Only action in {"suppress", "downgrade"} is consulted by this
     pre-check; any other value (a future/unrecognized action) is a no-op."""
-    fake_pm.load_focused_app = lambda: "appX"
+    fake_pm.load_focused_app = lambda **_k: "appX"
     fake_pm.add_dialogue_directive(
         {
             "directive_id": "d1",
@@ -241,7 +241,7 @@ def test_directive_downgrade_never_overrides_exempt_high_correlated():
 def test_directive_downgrade_scoped_to_other_domain_does_not_downgrade(fake_pm, cfg):
     """A downgrade directive scoped to ["chess"] must not touch a typing
     anomaly even when the focused-app predicate matches."""
-    fake_pm.load_focused_app = lambda: "appX"
+    fake_pm.load_focused_app = lambda **_k: "appX"
     fake_pm.add_dialogue_directive(
         {
             "directive_id": "d1",
@@ -280,7 +280,7 @@ def test_directive_scoped_to_other_domain_does_not_suppress(fake_pm, cfg):
     """A directive scoped to ["chess"] must NOT silence a typing anomaly even
     when the focused-app predicate matches — scope restricts the domains the
     taught silence covers. Falls through to the real pipeline ⇒ real fake_pm."""
-    fake_pm.load_focused_app = lambda: "appX"
+    fake_pm.load_focused_app = lambda **_k: "appX"
     fake_pm.add_dialogue_directive(
         {
             "directive_id": "d1",
@@ -340,7 +340,7 @@ def test_teach_to_gate_end_to_end_directive_matches(fake_pm, cfg):
     """
     from imperator.dialogue import context as C, router as R
 
-    fake_pm.load_focused_app = lambda: "deepwork.exe"
+    fake_pm.load_focused_app = lambda **_k: "deepwork.exe"
     ctx = C.assemble(fake_pm, now=100.0, cfg=cfg)
     assert ctx.focused_app == "deepwork.exe"
     pending = R.route(
@@ -371,7 +371,7 @@ def test_directive_bare_string_scope_fails_closed(fake_pm, cfg):
     """F2 regression: a stored directive whose scope is a bare non-"all" string
     (a malformed/legacy record) must NOT widen suppression to a domain it does
     not name. _directive_scope_allows fails closed."""
-    fake_pm.load_focused_app = lambda: "appX"
+    fake_pm.load_focused_app = lambda **_k: "appX"
     fake_pm.add_dialogue_directive(
         {
             "directive_id": "d1",
@@ -381,4 +381,63 @@ def test_directive_bare_string_scope_fails_closed(fake_pm, cfg):
         }
     )
     dec = G.Gate().evaluate(_sig(exempt=False), fake_pm, cfg, now=100.0)
+    assert dec.deciding_arm != "taught_directive"
+
+
+def test_load_focused_app_stale_read_returns_none(fake_pm):
+    """F3 residual: a focus/intensity event older than max_age_s is treated as
+    absent, so a stalled activity Sensor can't keep reporting an app the user
+    left. Omitting the bounds preserves the raw newest-entry read."""
+    from tabula.persistence import _to_epoch
+
+    ts = "2026-06-14T00:00:00+00:00"
+    fake_pm.append_event(
+        PerceptionEvent(
+            domain="activity_intensity",
+            stream_id="activity_intensity",
+            entity="ide",
+            event_type="intensity_tick",
+            value=88.0,
+            unit="pct",
+            context={"focused_app": "ide"},
+            timestamp=ts,
+            session_id="s1",
+        )
+    )
+    epoch = _to_epoch(ts)
+    assert fake_pm.load_focused_app(now=epoch + 100.0, max_age_s=300.0) == "ide"
+    assert fake_pm.load_focused_app(now=epoch + 400.0, max_age_s=300.0) is None
+    assert fake_pm.load_focused_app() == "ide"  # no bound -> unfiltered
+
+
+def test_directive_stale_focused_app_does_not_suppress(fake_pm, cfg):
+    """F3 residual at the gate: when the last focus event is stale (older than
+    cfg.focused_app_max_age_s) load_focused_app returns None, the taught
+    directive stops matching, and the gate falls through (fails toward FIRE)."""
+    from tabula.persistence import _to_epoch
+
+    ts = "2026-06-14T00:00:00+00:00"
+    fake_pm.append_event(
+        PerceptionEvent(
+            domain="activity_intensity",
+            stream_id="activity_intensity",
+            entity="appX",
+            event_type="intensity_tick",
+            value=50.0,
+            unit="pct",
+            context={"focused_app": "appX"},
+            timestamp=ts,
+            session_id="s1",
+        )
+    )
+    fake_pm.add_dialogue_directive(
+        {
+            "directive_id": "d1",
+            "predicate": {"context": "focused_app", "match": "appX"},
+            "action": "suppress",
+            "scope": "all",
+        }
+    )
+    stale_now = _to_epoch(ts) + cfg.focused_app_max_age_s + 100.0
+    dec = G.Gate().evaluate(_sig(exempt=False), fake_pm, cfg, now=stale_now)
     assert dec.deciding_arm != "taught_directive"

@@ -262,7 +262,9 @@ def gather(pm, stream_state: dict, now: float, cfg) -> dict:
     rollup = _rollup_health(health)
     return {
         "session_id": _current_sid(pm),
-        "activity": pm.load_focused_app(),
+        "activity": pm.load_focused_app(
+            now=now, max_age_s=getattr(cfg, "focused_app_max_age_s", 300.0)
+        ),
         "intensity_ewma": _latest_value(intens_hist),
         "anomaly_load": stream_state.get("anomaly_load"),
         "escalation_tier": stream_state.get("escalation_tier"),

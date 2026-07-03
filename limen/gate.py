@@ -398,7 +398,10 @@ class Gate:
             pm, "load_dialogue_directives", lambda: []
         )()
         if directives:
-            focused = getattr(pm, "load_focused_app", lambda: None)()
+            focused = getattr(pm, "load_focused_app", lambda **_k: None)(
+                now=now,
+                max_age_s=getattr(config, "focused_app_max_age_s", 300.0),
+            )
             for d in directives:
                 pred = d.get("predicate") or {}
                 if not (

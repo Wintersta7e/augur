@@ -158,7 +158,7 @@ async def test_suppress_records_one_silence_and_publishes_suppressed(
 async def test_taught_directive_suppression_records_and_publishes(
     fake_pm, cfg, nc, http_client, lane
 ) -> None:
-    fake_pm.load_focused_app = lambda: "appX"
+    fake_pm.load_focused_app = lambda **_k: "appX"
     fake_pm.add_dialogue_directive(
         {
             "directive_id": "d1",

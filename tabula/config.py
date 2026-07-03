@@ -216,6 +216,12 @@ class AugurConfig:
     dialogue_context_token_budget: int = 2048
     dialogue_pending_ttl_s: float = 300.0
     dialogue_confirmed_apply_enabled: bool = True
+    # Max age (seconds) for the activity Sensus focused-app read: a focus/
+    # intensity event older than this is treated as "no current app", so a
+    # stalled activity Sensor cannot keep a taught directive matching (or pin a
+    # new one to) an app the user left. Consumed by the Limen taught-directive
+    # pre-check, the dialogue teach path, and Imperator-I's activity read-model.
+    focused_app_max_age_s: float = 300.0
 
     def __post_init__(self) -> None:
         """Validate bounds on tuning fields. Raises ValueError on out-of-range.
@@ -440,6 +446,8 @@ class AugurConfig:
             raise ValueError("dialogue_context_max_turns must be >= 0")
         if self.dialogue_context_token_budget < 1:
             raise ValueError("dialogue_context_token_budget must be >= 1")
+        if self.focused_app_max_age_s <= 0:
+            raise ValueError("focused_app_max_age_s must be > 0")
 
     # ── Constructors ───────────────────────────────────────────────────────
 

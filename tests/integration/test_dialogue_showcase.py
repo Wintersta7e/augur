@@ -62,14 +62,24 @@ def _sig(payload: dict) -> G.Signature:
     return G.build_signature(payload)
 
 
-def _focus_app(pm, app: str, ts: str) -> None:
+def _focus_app(pm, app: str, ts: str | None = None) -> None:
     """Seed the real activity-focus stream ``load_focused_app`` reads (spec
     §7.2) — mirrors ``tests/test_dialogue_gate_directive.py``'s
     ``test_load_focused_app_falls_back_to_focus_stream``. Avoids the
     nonexistent ``pm.save_focused_app`` the task brief's sketch hedges around
-    with ``hasattr``: no such method exists, so this is the real write path."""
+    with ``hasattr``: no such method exists, so this is the real write path.
+
+    ``ts`` defaults to the current UTC time so the focus reads as FRESH under
+    load_focused_app's staleness bound (``focused_app_max_age_s``): the teach
+    path assembles context with wall-clock ``now``, so a fixed past timestamp
+    would be treated as a stale (absent) focus. Pass an explicit ts only when a
+    test deliberately needs a specific age."""
+    from datetime import datetime, timezone
+
     from tabula.contracts import PerceptionEvent
 
+    if ts is None:
+        ts = datetime.now(timezone.utc).isoformat()
     pm.append_event(
         PerceptionEvent(
             domain="activity_focus",
@@ -106,7 +116,9 @@ async def test_stay_silent_in_appx_then_undo(real_pm, real_nc, dialogue_cfg):
     # history): route() now fills the directive's predicate.match from the LIVE
     # focused app (spec §7.2 / F14), so it must be present before the teach turn
     # -- otherwise the teach is truthfully refused ("I can't tell which app...").
-    _focus_app(real_pm, "appX", "2026-07-02T00:00:00+00:00")
+    # Fresh timestamp (default): the teach assembles context with wall-clock now,
+    # so the focus must be recent to pass load_focused_app's staleness bound.
+    _focus_app(real_pm, "appX")
 
     t1 = await E.handle_turn(
         "sc1",

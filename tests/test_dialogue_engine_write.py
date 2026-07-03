@@ -218,7 +218,7 @@ def test_correct_silence_reverses_taught_directive_and_gate_stops_suppressing():
     the directive, and a subsequent gate evaluation on the same channel no
     longer suppresses via that directive."""
     pm, nc = _pm(), _NC()
-    pm.load_focused_app = lambda: "appX"
+    pm.load_focused_app = lambda **_k: "appX"
     pm.add_dialogue_directive(
         {
             "directive_id": "d1",

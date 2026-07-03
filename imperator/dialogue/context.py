@@ -36,7 +36,12 @@ def assemble(pm, now: float, cfg) -> DialogueContext:
         # teach_context_directive's predicate.match is filled from this ground
         # truth, not guessed by the model (spec §7.2). getattr-guarded for stub
         # PMs that predate the field.
-        focused_app=(getattr(pm, "load_focused_app", lambda: None)() or None),
+        focused_app=(
+            getattr(pm, "load_focused_app", lambda **_k: None)(
+                now=now, max_age_s=getattr(cfg, "focused_app_max_age_s", 300.0)
+            )
+            or None
+        ),
     )
 
 

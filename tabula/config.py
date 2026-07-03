@@ -207,6 +207,17 @@ class AugurConfig:
     imperator_ii_dedupe_staleness_s: float = 86400.0
     min_prompt_len: int = 20
 
+    # ── Imperator III: Dialogue (spec 2026-06-20) ────────────────────────────
+    dialogue_enabled: bool = True
+    dialogue_model: str = "qwen2.5:32b"
+    dialogue_num_predict: int = 512
+    dialogue_temperature: float = 0.6
+    dialogue_context_max_turns: int = 12
+    dialogue_context_token_budget: int = 2048
+    dialogue_pending_ttl_s: float = 300.0
+    dialogue_log_cap: int = 500
+    dialogue_confirmed_apply_enabled: bool = True
+
     def __post_init__(self) -> None:
         """Validate bounds on tuning fields. Raises ValueError on out-of-range.
 
@@ -419,6 +430,15 @@ class AugurConfig:
             raise ValueError("imperator_ii_dedupe_staleness_s outside [1, 31536000]")
         if not (1 <= self.min_prompt_len <= 500):
             raise ValueError("min_prompt_len outside [1, 500]")
+        # ── Imperator III: Dialogue bounds ────────────────────────────────────
+        if not (0.0 <= self.dialogue_temperature <= 2.0):
+            raise ValueError("dialogue_temperature must be in [0.0, 2.0]")
+        if self.dialogue_num_predict < 16:
+            raise ValueError("dialogue_num_predict must be >= 16")
+        if self.dialogue_pending_ttl_s <= 0:
+            raise ValueError("dialogue_pending_ttl_s must be > 0")
+        if self.dialogue_context_max_turns < 0:
+            raise ValueError("dialogue_context_max_turns must be >= 0")
 
     # ── Constructors ───────────────────────────────────────────────────────
 

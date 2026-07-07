@@ -61,6 +61,9 @@ MAX_DIALOGUE_LOG: int = 500  # newest-first capped conversation log
 # MAX_IMPERATOR_PROPOSALS — is already far beyond realistic use. New ids
 # beyond the cap are refused; existing ids keep updating.
 MAX_DIALOGUE_DIRECTIVES: int = 200
+# Conscientia gated-review verdicts + screen-violation records (spec 2026-07-07)
+MAX_CONSCIENTIA_VERDICTS: int = 200
+MAX_CONSCIENTIA_VIOLATIONS: int = 500
 
 # Default TTL for per-session Redis keys (feedback, correlation graph,
 # reflection report). Prevents indefinite growth beyond the 1000-entry
@@ -666,6 +669,34 @@ class PersistenceManager:
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
             log.warning("dialogue audit log contained a corrupt entry; returning []")
             return []
+
+    # ── Conscientia — verdicts + violations (spec 2026-07-07) ──────────────
+
+    def save_conscientia_verdict(self, record: dict) -> None:
+        """Append a gated-review verdict (newest-first, capped)."""
+        self._r.lpush("augur:conscientia:verdicts", json.dumps(record, default=str))
+        self._r.ltrim("augur:conscientia:verdicts", 0, MAX_CONSCIENTIA_VERDICTS - 1)
+
+    def load_conscientia_verdicts(self, *, limit: int = 50) -> list[dict]:
+        """Newest-first verdict records (limit clamped to >=1)."""
+        raw = cast(
+            list[Any],
+            self._r.lrange("augur:conscientia:verdicts", 0, max(limit, 1) - 1),
+        )
+        return [json.loads(x) for x in raw]
+
+    def save_conscientia_violation(self, record: dict) -> None:
+        """Append a screen-violation record (newest-first, capped)."""
+        self._r.lpush("augur:conscientia:violations", json.dumps(record, default=str))
+        self._r.ltrim("augur:conscientia:violations", 0, MAX_CONSCIENTIA_VIOLATIONS - 1)
+
+    def load_conscientia_violations(self, *, limit: int = 50) -> list[dict]:
+        """Newest-first violation records (limit clamped to >=1)."""
+        raw = cast(
+            list[Any],
+            self._r.lrange("augur:conscientia:violations", 0, max(limit, 1) - 1),
+        )
+        return [json.loads(x) for x in raw]
 
     def add_dialogue_directive(self, directive: dict) -> bool:
         """Store a context directive in the augur:imperator:dialogue:directives hash.

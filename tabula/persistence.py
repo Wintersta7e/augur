@@ -674,29 +674,45 @@ class PersistenceManager:
 
     def save_conscientia_verdict(self, record: dict) -> None:
         """Append a gated-review verdict (newest-first, capped)."""
-        self._r.lpush("augur:conscientia:verdicts", json.dumps(record, default=str))
+        self._r.lpush("augur:conscientia:verdicts", json.dumps(record))
         self._r.ltrim("augur:conscientia:verdicts", 0, MAX_CONSCIENTIA_VERDICTS - 1)
 
     def load_conscientia_verdicts(self, *, limit: int = 50) -> list[dict]:
-        """Newest-first verdict records (limit clamped to >=1)."""
+        """Newest-first verdict records. A non-positive limit returns []."""
+        if limit <= 0:
+            return []
         raw = cast(
             list[Any],
-            self._r.lrange("augur:conscientia:verdicts", 0, max(limit, 1) - 1),
+            self._r.lrange("augur:conscientia:verdicts", 0, limit - 1),
         )
-        return [json.loads(x) for x in raw]
+        try:
+            return [json.loads(x) for x in raw]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning(
+                "augur:conscientia:verdicts contained a corrupt entry; returning []"
+            )
+            return []
 
     def save_conscientia_violation(self, record: dict) -> None:
         """Append a screen-violation record (newest-first, capped)."""
-        self._r.lpush("augur:conscientia:violations", json.dumps(record, default=str))
+        self._r.lpush("augur:conscientia:violations", json.dumps(record))
         self._r.ltrim("augur:conscientia:violations", 0, MAX_CONSCIENTIA_VIOLATIONS - 1)
 
     def load_conscientia_violations(self, *, limit: int = 50) -> list[dict]:
-        """Newest-first violation records (limit clamped to >=1)."""
+        """Newest-first violation records. A non-positive limit returns []."""
+        if limit <= 0:
+            return []
         raw = cast(
             list[Any],
-            self._r.lrange("augur:conscientia:violations", 0, max(limit, 1) - 1),
+            self._r.lrange("augur:conscientia:violations", 0, limit - 1),
         )
-        return [json.loads(x) for x in raw]
+        try:
+            return [json.loads(x) for x in raw]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning(
+                "augur:conscientia:violations contained a corrupt entry; returning []"
+            )
+            return []
 
     def add_dialogue_directive(self, directive: dict) -> bool:
         """Store a context directive in the augur:imperator:dialogue:directives hash.

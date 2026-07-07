@@ -15,6 +15,9 @@ class _Cfg:
     prompt_forbidden_patterns = ()
     imperator_ii_apply_enabled = True
     imperator_ii_dedupe_staleness_s = 86400.0
+    # read by the pre-arm escalation patch validation (window range check)
+    correlation_window_min_s = 5.0
+    correlation_window_max_s = 120.0
 
 
 def _safe(p):
@@ -77,6 +80,75 @@ def test_apply_prompt_requires_existing_current_prompt():
         == "applied"
     )
     assert pm.load_prompt("typing") == txt
+
+
+def test_apply_prompt_records_prior_text_anchor():
+    # A successful prompt apply must record the rollback anchor: the pre-apply
+    # stored prompt, under action["prior_text"] — the key rollback reads to restore.
+    pm = _pm()
+    anchor = "Some existing prompt that is long enough to pass."
+    pm.save_prompt("typing", anchor)
+    txt = "Consider developing minor pieces before the queen, calmly."
+    p = _safe(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="typing",
+            action={"domain": "typing", "text": txt},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")
+    assert out["status"] == "applied"
+    assert p["action"]["prior_text"] == anchor
+    assert pm.load_prompt("typing") == txt
+
+
+def test_apply_prompt_loads_current_prompt_exactly_once(monkeypatch):
+    # The precondition check and the rollback-anchor read must share ONE
+    # load_prompt call: a second read is an extra round-trip and a TOCTOU window
+    # where the anchor could be taken from a value that was never validated.
+    pm = _pm()
+    pm.save_prompt("typing", "Some existing prompt that is long enough to pass.")
+    calls = []
+    real_load = pm.load_prompt
+    monkeypatch.setattr(
+        pm, "load_prompt", lambda *a, **k: (calls.append(a), real_load(*a, **k))[1]
+    )
+    txt = "Consider developing minor pieces before the queen, calmly."
+    p = _safe(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="typing",
+            action={"domain": "typing", "text": txt},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")
+    assert out["status"] == "applied"
+    assert len(calls) == 1
+
+
+def test_apply_prompt_unacceptable_text_fails_before_arming():
+    # Unacceptable text (below min_prompt_len) must fail validation BEFORE the
+    # gate arms: status stays 'logged', prompt untouched, no anchor recorded, and
+    # the applied-marker is never set — so a corrected proposal for the same
+    # target can still apply within the staleness window.
+    pm = _pm()
+    anchor = "Some existing prompt that is long enough to pass."
+    pm.save_prompt("typing", anchor)
+    p = _safe(
+        P.make_proposal(
+            kind="prompt_strategy",
+            target="typing",
+            action={"domain": "typing", "text": "too short"},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s1")
+    assert out["status"] == "logged"
+    assert pm.load_prompt("typing") == anchor
+    assert "prior_text" not in p["action"]
+    assert pm.is_proposal_applied(p["dedupe_key"]) is False
 
 
 def test_apply_sigma_is_propose_only():
@@ -261,7 +333,10 @@ def test_apply_escalation_window_branch_anchors_prior_from_cas():
 
 def test_apply_invalid_matrix_patch_failsafe():
     # An invalid matrix patch (severity not in LOW/MEDIUM/HIGH) must fail safe:
-    # apply_matrix_update returns an error -> status stays 'logged', matrix unchanged.
+    # refused by the pre-arm validation -> status stays 'logged', matrix
+    # unchanged, and (validate -> arm -> write) the anti-thrash marker is NOT
+    # armed — a validation failure commits nothing, so it must not consume
+    # the (kind, target) dedupe slot.
     pm = _pm()
     p = _safe(
         P.make_proposal(
@@ -275,6 +350,82 @@ def test_apply_invalid_matrix_patch_failsafe():
     assert out["status"] == "logged"
     assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"  # unchanged
     assert "prior_target" not in p["action"]  # no anchor on a failed write
+    assert pm.is_proposal_applied(p["dedupe_key"]) is False  # gate NOT armed
+
+
+def test_corrected_retry_applies_after_invalid_patch():
+    # The corrected proposal for the SAME (kind, target) must apply in-window:
+    # the malformed predecessor never armed the gate.
+    pm = _pm()
+    bad = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "BANANA"},
+            rationale="r",
+        )
+    )
+    assert A.apply_proposal(pm, bad, cfg=_Cfg(), session_id="s1")["status"] == "logged"
+    good = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "MEDIUM"},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, good, cfg=_Cfg(), session_id="s1")
+    assert out["status"] == "applied"
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "MEDIUM"
+    assert good["action"]["prior_target"] == "LOW"
+    assert pm.is_proposal_applied(good["dedupe_key"]) is True
+
+
+def test_invalid_window_patch_leaves_gate_unarmed():
+    # Window variant: an out-of-range window is refused before arming, and the
+    # corrected window for the same target still applies in-window.
+    pm = _pm()
+    bad = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"window": 9999.0},  # outside [5, 120]
+            rationale="r",
+        )
+    )
+    assert A.apply_proposal(pm, bad, cfg=_Cfg(), session_id="s1")["status"] == "logged"
+    assert pm.is_proposal_applied(bad["dedupe_key"]) is False
+    good = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"window": 60.0},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, good, cfg=_Cfg(), session_id="s1")
+    assert out["status"] == "applied"
+    assert pm.load_escalation_matrix()["rule_windows"]["LOW+LOW"] == 60.0
+
+
+def test_confirmed_invalid_escalation_patch_leaves_gate_unarmed():
+    # The human-confirmed path shares the validate -> arm -> write ordering:
+    # a malformed confirmed patch is refused (logged) without arming.
+    pm = _pm()
+    cfg = _Cfg()
+    cfg.dialogue_confirmed_apply_enabled = True
+    p = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "BANANA"},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, p, cfg=cfg, session_id="s1", confirmed=True)
+    assert out["status"] == "logged"
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"
+    assert pm.is_proposal_applied(p["dedupe_key"]) is False
 
 
 def test_apply_unknown_kind_failsafe(monkeypatch):
@@ -323,8 +474,11 @@ def test_invariant_apply_disabled_never_applies(kind):
 def test_apply_never_raises_on_unexpected_write_error(monkeypatch):
     # The outer fail-safe: an unexpected exception from the committing write must
     # be swallowed into 'logged' (apply must never raise), and no matrix change
-    # may land. The gate was armed first, but with no commit there is nothing to
-    # thrash and the same proposal is reconsidered next window.
+    # may land. The gate is armed BEFORE the committing write, so after a failed
+    # write the anti-thrash marker is left SET: the autonomous path SKIPS
+    # re-proposing this (kind, target) until the staleness window expires -- it is
+    # NOT reconsidered next cycle. (A human re-teach still applies: the confirmed
+    # path deliberately bypasses the is_proposal_applied pre-check.)
     pm = _pm()
     p = _safe(
         P.make_proposal(
@@ -343,3 +497,6 @@ def test_apply_never_raises_on_unexpected_write_error(monkeypatch):
     assert out["status"] == "logged"
     assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"  # unchanged
     assert "prior_target" not in p["action"]
+    # Gate armed-before-write -> marker left set after the failed write; pins the
+    # documented anti-thrash behavior so a reorder to write-then-arm is caught.
+    assert pm.is_proposal_applied(p["dedupe_key"])

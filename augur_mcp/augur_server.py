@@ -554,13 +554,20 @@ def get_last_anomaly(domain: str | None = None) -> dict[str, Any]:
 @mcp.tool()
 @_tool_safe
 def get_last_advice(domain: str | None = None) -> dict[str, Any]:
-    """Read the last LLM advice from Redis (ARCH-07: via PersistenceManager)."""
+    """Read the last LLM advice from Redis (ARCH-07: via PersistenceManager).
+
+    Correlated advice is stored with domain="multi"; a domain filter matches
+    those records through their involved_domains so callers asking for the
+    last typing advice still see a typing+activity correlation.
+    """
     with _persistence_ctx() as pm:
         data = pm.load_last_advice()
     if data is None:
         return {"error": "not found"}
     if domain is not None and data.get("domain") != domain:
-        return {"error": "not found", "requested_domain": domain}
+        involved = data.get("involved_domains") or []
+        if not (data.get("domain") == "multi" and domain in involved):
+            return {"error": "not found", "requested_domain": domain}
     return data
 
 
@@ -817,6 +824,86 @@ def get_proposals(limit: int = 50) -> dict[str, Any]:
     """Imperator II's self-improvement proposals, newest first (read-only inspection)."""
     with _persistence_ctx() as pm:
         return {"proposals": pm.load_proposals(limit=max(1, min(limit, 200)))}
+
+
+# ---------------------------------------------------------------------------
+# Dialogue tools (Imperator III)
+# ---------------------------------------------------------------------------
+# Subjects published by imperator.dialogue.engine on a confirmed apply/undo:
+# augur.imperator.dialogue.applied, augur.imperator.ii.trigger.
+# Keys: augur:imperator:dialogue:log, augur:imperator:dialogue:pending
+
+
+async def _dialogue_handle_turn(session_id, message, **kw):  # seam for tests
+    """Dispatch to the dialogue engine; patchable for testing."""
+    from imperator.dialogue.engine import handle_turn
+
+    return await handle_turn(session_id, message, **kw)
+
+
+@mcp.tool()
+@_tool_safe
+def dialogue_turn(session_id: str, message: str) -> dict[str, Any]:
+    """Send one conversational turn to Imperator III and return its reply + status.
+
+    Programmatic harness for driving/testing the dialogue engine.
+    """
+    import httpx
+
+    async def _run() -> dict[str, Any]:
+        with _persistence_ctx() as pm:
+            nc = await nats_client.connect(
+                _config.nats_url,
+                connect_timeout=_config.nats_connect_timeout,
+            )
+            http = httpx.AsyncClient()
+            try:
+                turn = await _dialogue_handle_turn(
+                    session_id, message, pm=pm, nc=nc, http_client=http, cfg=_config
+                )
+                return {
+                    "reply": turn.reply,
+                    "intent": turn.intent,
+                    "pending": turn.pending,
+                    "applied": turn.applied,
+                    "needs_clarification": turn.needs_clarification,
+                    "error": turn.error,
+                }
+            finally:
+                await http.aclose()
+                await nc.drain()
+
+    return asyncio.run(_run())
+
+
+@mcp.tool()
+@_tool_safe
+def dialogue_history(session_id: str, limit: int = 20) -> dict[str, Any]:
+    """Recent conversation turns for a session (newest first).
+
+    A plain PersistenceManager read -- intentionally stays readable even when
+    ``cfg.dialogue_enabled`` is False: that kill switch only gates
+    ``dialogue_turn``'s call into ``handle_turn`` (new turns), not inspection
+    of history already on disk.
+    """
+    with _persistence_ctx() as pm:
+        return {
+            "turns": pm.load_dialogue_log(
+                limit=max(1, min(limit, 200)), session_id=session_id
+            )
+        }
+
+
+@mcp.tool()
+@_tool_safe
+def dialogue_pending(session_id: str) -> dict[str, Any]:
+    """The pending-confirmation intent for a session, if any.
+
+    A plain PersistenceManager read -- intentionally stays readable even when
+    ``cfg.dialogue_enabled`` is False, same as ``dialogue_history``.
+    """
+    with _persistence_ctx() as pm:
+        return {"pending": pm.load_dialogue_pending(session_id)}
 
 
 # Re-exported from nexus.matrix_ops so existing imports in tests keep working.

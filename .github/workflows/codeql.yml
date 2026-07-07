@@ -24,13 +24,19 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
           languages: python
-          queries: security-extended,security-and-quality
+          # security-extended = full security coverage, incl. lower-severity
+          # security queries. The security-and-quality suite is intentionally
+          # dropped: its maintainability/style queries (empty-except, unused
+          # variables, unreachable/ineffectual statements, import-and-import-from)
+          # duplicate ruff -- this repo's linter -- and only produced note-level
+          # noise, not security findings.
+          queries: security-extended
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4

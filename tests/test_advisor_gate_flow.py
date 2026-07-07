@@ -146,6 +146,60 @@ async def test_suppress_records_one_silence_and_publishes_suppressed(
     assert len(suppressed) == 1
 
 
+# ── Taught-directive suppression → composition-seam invariant A check ────────
+# (Imperator III, spec §7.2) -- the REAL Gate (no stubbed arm) driven through
+# a real taught directive + focused app, all the way through process_message,
+# so record_suppression bookkeeping and the suppressed-event publish are
+# proven at the seam where limen/gate.py's directive pre-check actually meets
+# consilium/advisor.py -- not just at gate.evaluate() in isolation (see
+# tests/test_dialogue_gate_directive.py for that unit-level coverage).
+
+
+async def test_taught_directive_suppression_records_and_publishes(
+    fake_pm, cfg, nc, http_client, lane
+) -> None:
+    fake_pm.load_focused_app = lambda **_k: "appX"
+    fake_pm.add_dialogue_directive(
+        {
+            "directive_id": "d1",
+            "predicate": {"context": "focused_app", "match": "appX"},
+            "action": "suppress",
+            "scope": "all",
+        }
+    )
+    gate = Gate(config=cfg)  # the real arm pipeline, not a stubbed arm
+    query_ollama = AsyncMock(return_value=("advice text", 12.3))
+    await _run(
+        payload=SINGLE_MEDIUM_TYPING,
+        gate=gate,
+        scheduler=_scheduler(),
+        pm=fake_pm,
+        nc=nc,
+        http_client=http_client,
+        config=cfg,
+        lane=lane,
+        query_ollama=query_ollama,
+    )
+
+    assert query_ollama.await_count == 0  # suppressed -> the LLM is never called
+
+    # invariant A: record_suppression's authoritative silence write happened.
+    silences = fake_pm.load_silence_records(limit=10)
+    assert len(silences) == 1
+    assert silences[0]["arm"] == "taught_directive"
+    assert silences[0]["reason"] == "taught_directive:d1"
+
+    # invariant A: the suppressed event was published, tagged the same way.
+    from consilium.advisor import PUBLISH_SUBJECT, SUBJECT_SUPPRESSED
+
+    subjects = _published_subjects(nc)
+    assert PUBLISH_SUBJECT not in subjects
+    suppressed = _published_on(nc, SUBJECT_SUPPRESSED)
+    assert len(suppressed) == 1
+    assert suppressed[0]["arm"] == "taught_directive"
+    assert suppressed[0]["reason"] == "taught_directive:d1"
+
+
 async def test_suppressed_event_carries_full_payload(
     fake_pm, cfg, nc, http_client, lane
 ) -> None:

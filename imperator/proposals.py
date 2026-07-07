@@ -13,10 +13,23 @@ _KIND_KLASS = {
     "sigma": "safe",
     "gate_calibration": "safe",
     "observe_more": "safe",
+    "context_directive": "safe",
+    "semantic_fact": "safe",
     "code": "gated",
     "structural": "gated",
 }
 _AUTO_APPLY_KINDS = {"escalation_rule", "prompt_strategy"}
+
+# Kinds a human-confirmed dialogue act may apply (all SAFE, actionable kinds).
+# observe_more is safe but a no-op suggestion; gated kinds are excluded by design.
+_CONFIRMED_APPLY_KINDS = {
+    "escalation_rule",
+    "prompt_strategy",
+    "sigma",
+    "gate_calibration",
+    "context_directive",
+    "semantic_fact",
+}
 
 
 def dedupe_key(kind: str, target: str) -> str:
@@ -41,6 +54,7 @@ def make_proposal(
     klass: str = "safe",
     rank: int = 100,
     source_blind_spot=None,
+    source: str = "imperator_ii",
     now: float = 0.0,
 ) -> dict:
     return {
@@ -56,6 +70,7 @@ def make_proposal(
         "status": "logged",
         "applied_session": None,
         "source_blind_spot": source_blind_spot,
+        "source": source,
     }
 
 

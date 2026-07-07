@@ -114,3 +114,20 @@ def test_persistence_gate_silences_key_is_limen():
     r = pm._r
     assert r.keys("augur:limen:*")
     assert not r.keys("augur:gate:*")
+
+
+def test_dialogue_tools_and_subjects_present():
+    src = inspect.getsource(srv)
+    for tool in ("dialogue_turn", "dialogue_history", "dialogue_pending"):
+        assert f"def {tool}(" in src
+    # The dialogue subjects are published by imperator.dialogue.engine, not
+    # augur_server -- pin the ENGINE's real publish-call source (not just a
+    # comment in augur_server, which drifted from the real subject once
+    # before) so a future rename that misses the comment still fails here.
+    from imperator.dialogue import engine as dialogue_engine
+
+    engine_src = inspect.getsource(dialogue_engine)
+    assert "augur.imperator.dialogue.applied" in engine_src
+    assert "augur.imperator.ii.trigger" in engine_src
+    # Keys live under the imperator.dialogue namespace via PersistenceManager.
+    assert "augur:imperator:dialogue:" in inspect.getsource(PersistenceManager)

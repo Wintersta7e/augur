@@ -62,6 +62,38 @@ log = logging.getLogger("augur_advisor")
 SUBSCRIBE_SUBJECT = "augur.nexus.detected"
 PUBLISH_SUBJECT = "augur.consilium.advice"
 
+
+# ---------------------------------------------------------------------------
+# Taught facts formatting
+# ---------------------------------------------------------------------------
+
+# Injection caps: a heavily-taught domain must not grow the advisor prompt
+# unboundedly (the memory store holds thousands of entries). Take the first
+# MAX_INJECTED_TAUGHT_FACTS facts, then hard-truncate the formatted block to
+# a char budget (same idiom as the dialogue context's char-budget truncate) —
+# ~200 chars per fact line keeps the block proportional to the advisor's
+# existing prompt scale (~1-2k chars).
+MAX_INJECTED_TAUGHT_FACTS = 12
+TAUGHT_FACTS_CHAR_BUDGET = 2400
+
+
+def format_taught_facts(facts: list[dict]) -> str:
+    """Format taught facts into a block to inject into advice prompts.
+
+    Returns empty string if facts list is empty. Caps at
+    MAX_INJECTED_TAUGHT_FACTS facts and TAUGHT_FACTS_CHAR_BUDGET chars.
+    """
+    if not facts:
+        return ""
+    lines = ["Known facts (taught by the user):"]
+    for f in facts[:MAX_INJECTED_TAUGHT_FACTS]:
+        pat = f.get("pattern") or {}
+        doms = "+".join(pat.get("domains") or [])
+        note = f.get("rationale") or pat.get("rule_key") or ""
+        lines.append(f"- {doms}: {note}")
+    return "\n".join(lines)[:TAUGHT_FACTS_CHAR_BUDGET]
+
+
 # Gate visibility subjects (spec §8). Distinct subjects so the MRT control arm
 # (PendingGateDecision, subscribed only to SUBJECT_SUPPRESSED) never tracks an
 # infrastructure non-delivery.
@@ -783,6 +815,10 @@ async def _build_prompt_and_deliver(
     try:
         if path == "correlation":
             prompt = build_correlation_prompt(payload)
+            doms = payload.get("involved_domains", [])
+            facts_block = format_taught_facts(pm.load_taught_facts_for_domains(doms))
+            if facts_block:
+                prompt = f"{facts_block}\n\n{prompt}"
         else:
             primary = payload["primary_anomaly"]
             stored_prompt = pm.load_prompt(domain)
@@ -790,6 +826,11 @@ async def _build_prompt_and_deliver(
                 domain,
                 f"You are an analyst monitoring '{domain}' data. An anomaly was detected.",
             )
+            facts_block = format_taught_facts(
+                pm.load_taught_facts_for_domains([domain])
+            )
+            if facts_block:
+                system_prompt = f"{facts_block}\n\n{system_prompt}"
             builder = DOMAIN_HANDLERS.get(domain, build_generic_prompt)
             prompt = builder(primary, redis_client, system_prompt)
     except Exception as exc:

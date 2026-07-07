@@ -269,6 +269,24 @@ def build_signature(payload: dict[str, Any]) -> Signature:
     )
 
 
+def _directive_scope_allows(scope: Any, domain: str) -> bool:
+    """True when a taught directive's ``scope`` covers ``domain`` (spec §7.2).
+
+    The schema is ``"scope": "all" | ["<domain>", ...]``: a non-empty list
+    restricts the taught silence to those domains; ``"all"``, ``None``, or an
+    empty list covers every domain.  Any OTHER shape (a bare non-``"all"``
+    string, a dict, a number) is treated as NOT covering the domain -- fail
+    closed, because over-suppression (silencing a domain the user never named)
+    is the unsafe direction.  ``router.route`` normalizes scope to ``"all"`` or
+    a cleaned list before it is ever stored, so this branch only guards
+    legacy/malformed records.  For a correlation the caller passes the primary
+    anomaly's domain.
+    """
+    if isinstance(scope, list):
+        return domain in scope if scope else True
+    return scope is None or scope == "all"
+
+
 class Gate:
     """The advisor receptivity/burden gate (spec §3/§4).
 
@@ -330,6 +348,15 @@ class Gate:
         * danger exemption (``signature.exempt``) →
           ``FIRE("exempt_high_correlated")`` performing **no** state read (§2 B).
 
+        Stage 0.5 — taught-directive pre-check (spec §7.2): reads only
+        ``pm.load_dialogue_directives()`` + ``pm.load_focused_app()``. A
+        directive matching the current focused app whose ``scope`` covers the
+        event's domain (see :func:`_directive_scope_allows`) returns
+        ``SUPPRESS("taught_directive:<id>")`` or ``DOWNGRADE("taught_directive:
+        <id>")`` immediately per its ``action`` field, bypassing the
+        biological arm pipeline entirely (by design — see the inline comment
+        at the call site).
+
         Otherwise gate state is loaded up front (read-only) and the **two-phase**
         pipeline runs (spec §5):
 
@@ -352,6 +379,49 @@ class Gate:
             return GateDecision.fire(
                 "exempt_high_correlated", deciding_arm="danger_exemption"
             )
+
+        # Imperator III taught-directive pre-check (read-only, spec §7.2). Runs
+        # AFTER the exempt fast-exit, so high+correlated advice (invariant B)
+        # is never silenced by a directive, and BEFORE any other gate state is
+        # read/loaded. A matching directive short-circuits the entire
+        # biological arm pipeline (including anti-starvation/Arm 9 and the
+        # cap-fail-open check below) — deliberately: a taught directive is a
+        # known, reversible, user-authored policy ("stay silent in app X" /
+        # "downgrade app X"), not a learned/behavioral suppression, so it is
+        # exempt from the anti-starvation release that exists to catch the
+        # *system* silencing a channel unknowably (spec §7.2 "honoring the
+        # spirit of invariant D"). Both "suppress" and "downgrade" directive
+        # actions are consulted here, under the identical predicate/scope
+        # match — a taught "downgrade" is otherwise a silent false promise
+        # (stored, echoed back as confirmed, but never actually applied).
+        directives: list[dict[str, Any]] = getattr(
+            pm, "load_dialogue_directives", lambda: []
+        )()
+        if directives:
+            focused = getattr(pm, "load_focused_app", lambda **_k: None)(
+                now=now,
+                max_age_s=getattr(config, "focused_app_max_age_s", 300.0),
+            )
+            for d in directives:
+                pred = d.get("predicate") or {}
+                if not (
+                    pred.get("context") == "focused_app"
+                    and focused is not None
+                    and pred.get("match") == focused
+                    and _directive_scope_allows(d.get("scope"), signature.domain)
+                ):
+                    continue
+                directive_action = d.get("action")
+                if directive_action == "suppress":
+                    return GateDecision.suppress(
+                        f"taught_directive:{d.get('directive_id')}",
+                        deciding_arm="taught_directive",
+                    )
+                if directive_action == "downgrade":
+                    return GateDecision.downgrade(
+                        f"taught_directive:{d.get('directive_id')}",
+                        deciding_arm="taught_directive",
+                    )
 
         if signature.ungateable:
             # §5 missing-entity rule: a single event with a missing/"?"/empty

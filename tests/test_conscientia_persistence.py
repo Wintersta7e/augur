@@ -58,3 +58,10 @@ def test_violations_limit_is_keyword_only():
     pm = _pm()
     with pytest.raises(TypeError):
         pm.load_conscientia_violations(5)  # type: ignore[misc]
+
+
+def test_corrupt_violation_entry_degrades_to_empty():
+    pm = _pm()
+    pm.save_conscientia_violation({"surface": "advice"})
+    pm._r.lpush("augur:conscientia:violations", b"{not json")
+    assert pm.load_conscientia_violations(limit=10) == []

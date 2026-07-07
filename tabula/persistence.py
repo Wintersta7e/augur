@@ -62,6 +62,8 @@ MAX_DIALOGUE_LOG: int = 500  # newest-first capped conversation log
 # beyond the cap are refused; existing ids keep updating.
 MAX_DIALOGUE_DIRECTIVES: int = 200
 # Conscientia gated-review verdicts + screen-violation records (spec 2026-07-07)
+# MAX_CONSCIENTIA_VERDICTS must stay >= MAX_IMPERATOR_PROPOSALS --
+# conscientia/auditor.py's sweep idempotency depends on it.
 MAX_CONSCIENTIA_VERDICTS: int = 200
 MAX_CONSCIENTIA_VIOLATIONS: int = 500
 

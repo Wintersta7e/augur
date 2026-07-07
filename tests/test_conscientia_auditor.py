@@ -8,7 +8,11 @@ import pytest
 
 from conscientia.auditor import run_conscientia_review
 from tabula.config import AugurConfig
-from tabula.persistence import PersistenceManager
+from tabula.persistence import (
+    MAX_CONSCIENTIA_VERDICTS,
+    MAX_IMPERATOR_PROPOSALS,
+    PersistenceManager,
+)
 
 CFG = AugurConfig()
 
@@ -56,6 +60,32 @@ async def test_idempotent_across_sweeps():
     out2 = await run_conscientia_review(pm, None, CFG)
     assert out2["reviewed"] == 0
     assert len(pm.load_conscientia_verdicts(limit=50)) == 1
+
+
+@pytest.mark.asyncio
+async def test_idempotent_at_full_proposal_cap():
+    """Regression for the coupled-caps invariant (MAX_CONSCIENTIA_VERDICTS
+    >= MAX_IMPERATOR_PROPOSALS). Seed more gated proposals than the
+    proposal store can hold; one sweep must fully review whatever survives
+    the trim, and a second sweep must find nothing left to re-review."""
+    pm = _pm()
+    for i in range(MAX_IMPERATOR_PROPOSALS + 10):
+        _seed(pm, f"p{i}")
+    out1 = await run_conscientia_review(pm, None, CFG)
+    # The proposal store trims to MAX_IMPERATOR_PROPOSALS entries, so that's
+    # exactly how many gated proposals are visible to (and reviewed by) the
+    # first sweep.
+    assert out1["reviewed"] == MAX_IMPERATOR_PROPOSALS
+    # Every one of those got a verdict persisted -- only guaranteed because
+    # MAX_CONSCIENTIA_VERDICTS >= MAX_IMPERATOR_PROPOSALS.
+    visible_verdicts = pm.load_conscientia_verdicts(
+        limit=max(MAX_CONSCIENTIA_VERDICTS, MAX_IMPERATOR_PROPOSALS)
+    )
+    assert len(visible_verdicts) == min(
+        MAX_IMPERATOR_PROPOSALS, MAX_CONSCIENTIA_VERDICTS
+    )
+    out2 = await run_conscientia_review(pm, None, CFG)
+    assert out2["reviewed"] == 0
 
 
 @pytest.mark.asyncio

@@ -176,6 +176,16 @@ class AugurConfig:
     memory_s_max: int = 365
     max_memory_items: int = 5000
     memory_decay_form: str = "exponential"  # {"exponential", "powerlaw"}
+    # ── Conscientia — value-core screens & review (spec 2026-07-07) ─────────
+    conscientia_enabled: bool = True
+    conscientia_output_screen_enabled: bool = True
+    conscientia_regenerate_on_violation: bool = True
+    conscientia_regenerate_max: int = 1
+    conscientia_teach_screen_enabled: bool = True
+    conscientia_inject_screen_enabled: bool = True
+    conscientia_proposal_screen_enabled: bool = True
+    conscientia_output_extra_patterns: tuple[str, ...] = ()
+    conscientia_teach_extra_patterns: tuple[str, ...] = ()
     # ── Praefectus: faculty supervision & health (spec 2026-06-10) ───────────
     praefectus_enabled: bool = True
     praefectus_heartbeat_interval_s: float = 10.0
@@ -448,6 +458,12 @@ class AugurConfig:
             raise ValueError("dialogue_context_token_budget must be >= 1")
         if self.focused_app_max_age_s <= 0:
             raise ValueError("focused_app_max_age_s must be > 0")
+        # ── Conscientia bounds (spec 2026-07-07) ─────────────────────────────
+        if not (0 <= self.conscientia_regenerate_max <= 2):
+            raise ValueError(
+                f"conscientia_regenerate_max={self.conscientia_regenerate_max} "
+                "must be in [0, 2]"
+            )
 
     # ── Constructors ───────────────────────────────────────────────────────
 
@@ -570,3 +586,5 @@ _TYPE_COERCIONS["gate_tier1_mode"] = _coerce_gate_tier1_mode
 _TYPE_COERCIONS["drift_detector"] = _coerce_drift_detector
 _TYPE_COERCIONS["prompt_forbidden_patterns"] = _coerce_str_tuple
 _TYPE_COERCIONS["memory_decay_form"] = _coerce_memory_decay_form
+_TYPE_COERCIONS["conscientia_output_extra_patterns"] = _coerce_str_tuple
+_TYPE_COERCIONS["conscientia_teach_extra_patterns"] = _coerce_str_tuple

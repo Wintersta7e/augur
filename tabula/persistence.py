@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any  # noqa: F401  (used only in deferred annotations; PEP-563)
+from typing import Any, cast
 
 import redis
 
@@ -109,7 +109,7 @@ class PersistenceManager:
         (like ``json.loads``) so callers keep their concrete ``dict | None``
         return annotations without a cast.
         """
-        raw = self._r.get(key)
+        raw = cast(Any, self._r.get(key))
         if raw is None:
             return default
         return json.loads(raw)
@@ -134,7 +134,7 @@ class PersistenceManager:
         total = trained = 0
         by_domain: dict[str, dict[str, int]] = {}
         for key in self._r.scan_iter(match="augur:vigil:profile:*", count=500):
-            raw = self._r.get(key)
+            raw = cast(Any, self._r.get(key))
             if raw is None:
                 continue
             try:
@@ -166,7 +166,7 @@ class PersistenceManager:
 
     def get_history(self, domain: str, limit: int = 100) -> list[dict]:
         key = f"augur:vigil:history:{domain}"
-        raw_list = self._r.lrange(key, 0, limit - 1)
+        raw_list = cast(list[Any], self._r.lrange(key, 0, limit - 1))
         return [json.loads(entry) for entry in raw_list]
 
     def load_focused_app(
@@ -230,7 +230,9 @@ class PersistenceManager:
         return self._get_json(key)
 
     def get_all_feedback(self, limit: int = 50) -> list[dict]:
-        session_ids = self._r.lrange("augur:responsum:_index", 0, limit - 1)
+        session_ids = cast(
+            list[Any], self._r.lrange("augur:responsum:_index", 0, limit - 1)
+        )
         results: list[dict] = []
         for sid in session_ids:
             sid_str = sid.decode() if isinstance(sid, bytes) else sid
@@ -252,7 +254,7 @@ class PersistenceManager:
         history_key = f"augur:consilium:prompts:{domain}:history"
 
         # Archive current version before overwriting
-        existing = self._r.get(current_key)
+        existing = cast(Any, self._r.get(current_key))
         if existing is not None:
             self._r.lpush(history_key, existing)
             self._r.ltrim(history_key, 0, PROMPT_HISTORY_MAX - 1)
@@ -267,14 +269,14 @@ class PersistenceManager:
 
     def load_prompt(self, domain: str) -> str | None:
         current_key = f"augur:consilium:prompts:{domain}:current"
-        raw = self._r.get(current_key)
+        raw = cast(Any, self._r.get(current_key))
         if raw is None:
             return None
         return json.loads(raw).get("prompt")
 
     def get_prompt_history(self, domain: str, limit: int = 10) -> list[dict]:
         history_key = f"augur:consilium:prompts:{domain}:history"
-        raw_list = self._r.lrange(history_key, 0, limit - 1)
+        raw_list = cast(list[Any], self._r.lrange(history_key, 0, limit - 1))
         return [json.loads(entry) for entry in raw_list]
 
     def rollback_prompt(self, domain: str) -> bool:
@@ -282,13 +284,13 @@ class PersistenceManager:
         current_key = f"augur:consilium:prompts:{domain}:current"
         history_key = f"augur:consilium:prompts:{domain}:history"
 
-        previous_raw = self._r.lpop(history_key)
+        previous_raw = cast(Any, self._r.lpop(history_key))
         if previous_raw is None:
             log.warning("No previous prompt to rollback to for domain %s", domain)
             return False
 
         # Archive the current (bad) version into history tail
-        current_raw = self._r.get(current_key)
+        current_raw = cast(Any, self._r.get(current_key))
         if current_raw is not None:
             self._r.rpush(history_key, current_raw)
             self._r.ltrim(history_key, 0, PROMPT_HISTORY_MAX - 1)
@@ -305,7 +307,7 @@ class PersistenceManager:
         rather than the stale motivating-utility recorded at mutation time.
         """
         current_key = f"augur:consilium:prompts:{domain}:current"
-        raw = self._r.get(current_key)
+        raw = cast(Any, self._r.get(current_key))
         if raw is None:
             return
         entry = json.loads(raw)
@@ -317,9 +319,9 @@ class PersistenceManager:
         prompt — the realized-score pair the 1E rollback gate compares."""
         current_key = f"augur:consilium:prompts:{domain}:current"
         history_key = f"augur:consilium:prompts:{domain}:history"
-        cur_raw = self._r.get(current_key)
+        cur_raw = cast(Any, self._r.get(current_key))
         cur = json.loads(cur_raw).get("score") if cur_raw else None
-        prev_list = self._r.lrange(history_key, 0, 0)
+        prev_list = cast(list[Any], self._r.lrange(history_key, 0, 0))
         prev = json.loads(prev_list[0]).get("score") if prev_list else None
         return cur, prev
 
@@ -331,7 +333,7 @@ class PersistenceManager:
 
     def count_mrt_rating_sessions(self) -> int:
         """Number of distinct sessions that issued a withheld-rating prompt."""
-        return int(self._r.scard("augur:limen:mrt_rating_sessions"))
+        return int(cast(int, self._r.scard("augur:limen:mrt_rating_sessions")))
 
     # -- Threshold config ----------------------------------------------------
 
@@ -381,8 +383,8 @@ class PersistenceManager:
         """
         key = "augur:consilium:app_descriptors"
         if (
-            not self._r.hexists(key, entity)
-            and self._r.hlen(key) >= MAX_APP_DESCRIPTORS
+            not cast(bool, self._r.hexists(key, entity))
+            and cast(int, self._r.hlen(key)) >= MAX_APP_DESCRIPTORS
         ):
             log.warning(
                 "app_descriptor hash full (%d); dropping new entity %s",
@@ -397,14 +399,14 @@ class PersistenceManager:
 
     def load_app_descriptor(self, entity: str) -> str | None:
         """Return one app's descriptor (decoded), or None if absent."""
-        raw = self._r.hget("augur:consilium:app_descriptors", entity)
+        raw = cast(Any, self._r.hget("augur:consilium:app_descriptors", entity))
         if raw is None:
             return None
         return raw.decode() if isinstance(raw, bytes) else raw
 
     def load_app_descriptors(self) -> dict[str, str]:
         """Return the full app->descriptor map with keys/values decoded to str."""
-        raw = self._r.hgetall("augur:consilium:app_descriptors")
+        raw = cast(dict[Any, Any], self._r.hgetall("augur:consilium:app_descriptors"))
         out: dict[str, str] = {}
         for k, v in raw.items():
             key = k.decode() if isinstance(k, bytes) else k
@@ -442,7 +444,9 @@ class PersistenceManager:
 
         Ordered newest-first (lpush index order).
         """
-        raw_ids = self._r.lrange("augur:nexus:graph:_index", 0, limit - 1)
+        raw_ids = cast(
+            list[Any], self._r.lrange("augur:nexus:graph:_index", 0, limit - 1)
+        )
         return [sid.decode() if isinstance(sid, bytes) else sid for sid in raw_ids]
 
     # -- Rule confidence state (reflection matrix tuning) --------------------
@@ -474,7 +478,7 @@ class PersistenceManager:
 
     def load_rule_window_state(self) -> dict:
         """Load per-rule observed-lag EWMA state. Returns {} if absent or corrupt."""
-        raw = self._r.get("augur:nexus:rule_window_state")
+        raw = cast(Any, self._r.get("augur:nexus:rule_window_state"))
         if not raw:
             return {}
         try:
@@ -571,7 +575,7 @@ class PersistenceManager:
 
     def load_proposals(self, *, limit: int = 50) -> list[dict]:
         """Up to *limit* recent proposals, newest first. [] on corrupt/absent."""
-        raw = self._r.lrange("augur:imperator:proposals", 0, limit - 1)
+        raw = cast(list[Any], self._r.lrange("augur:imperator:proposals", 0, limit - 1))
         try:
             return [json.loads(e) for e in raw]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
@@ -586,7 +590,7 @@ class PersistenceManager:
 
     def is_proposal_applied(self, dedupe_key: str) -> bool:
         """True if a recent (un-expired) apply of this dedupe_key exists."""
-        return bool(self._r.exists(f"augur:imperator:applied:{dedupe_key}"))
+        return bool(cast(int, self._r.exists(f"augur:imperator:applied:{dedupe_key}")))
 
     def save_dialogue_turn(self, turn: dict) -> None:
         """Append a conversation turn (newest-first, capped)."""
@@ -610,7 +614,7 @@ class PersistenceManager:
         if limit <= 0:
             return []
         span = (MAX_DIALOGUE_LOG if session_id is not None else limit) - 1
-        raw = self._r.lrange("augur:imperator:dialogue:log", 0, span)
+        raw = cast(list[Any], self._r.lrange("augur:imperator:dialogue:log", 0, span))
         try:
             turns = [json.loads(e) for e in raw]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
@@ -653,7 +657,10 @@ class PersistenceManager:
         """
         if limit <= 0:
             return []
-        raw = self._r.lrange("augur:imperator:dialogue:audit", 0, limit - 1)
+        raw = cast(
+            list[Any],
+            self._r.lrange("augur:imperator:dialogue:audit", 0, limit - 1),
+        )
         try:
             return [json.loads(e) for e in raw]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
@@ -692,7 +699,10 @@ class PersistenceManager:
         Each stored directive is JSON-decoded. Corrupt entries are skipped
         with a warning, and the method returns what it could decode.
         """
-        raw = self._r.hgetall("augur:imperator:dialogue:directives")
+        raw = cast(
+            dict[Any, Any],
+            self._r.hgetall("augur:imperator:dialogue:directives"),
+        )
         out = []
         for v in raw.values():
             try:
@@ -707,7 +717,9 @@ class PersistenceManager:
         BEFORE a create/upsert or remove overwrites/deletes it, so the write
         can record a true restore anchor (apply.py's rollback-anchor
         discipline, spec §8)."""
-        raw = self._r.hget("augur:imperator:dialogue:directives", directive_id)
+        raw = cast(
+            Any, self._r.hget("augur:imperator:dialogue:directives", directive_id)
+        )
         if raw is None:
             return None
         try:
@@ -748,7 +760,7 @@ class PersistenceManager:
     ) -> bool:
         """Return True if mark_tuning_applied was called for this session+pass."""
         key = f"augur:tuning_applied:{pass_name}:{session_id}"
-        return bool(self._r.exists(key))
+        return bool(cast(int, self._r.exists(key)))
 
     # ── Advisor gate append-logs (spec §6) ───────────────────────────────────
     # All four follow the same pattern: lpush + ltrim (mirror save_feedback
@@ -773,7 +785,7 @@ class PersistenceManager:
         Returns [] if the list is absent or any entry is corrupt.
         """
         key = "augur:limen:silences"
-        raw_list = self._r.lrange(key, 0, limit - 1)
+        raw_list = cast(list[Any], self._r.lrange(key, 0, limit - 1))
         try:
             return [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
@@ -796,7 +808,7 @@ class PersistenceManager:
         Returns [] if the list is absent or any entry is corrupt.
         """
         key = "augur:limen:emissions"
-        raw_list = self._r.lrange(key, 0, limit - 1)
+        raw_list = cast(list[Any], self._r.lrange(key, 0, limit - 1))
         try:
             return [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
@@ -820,7 +832,7 @@ class PersistenceManager:
         after reading so the caller gets only the records relevant to one channel.
         """
         key = "augur:limen:observed"
-        raw_list = self._r.lrange(key, 0, limit - 1)
+        raw_list = cast(list[Any], self._r.lrange(key, 0, limit - 1))
         try:
             all_records = [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
@@ -859,7 +871,7 @@ class PersistenceManager:
         Returns [] if the list is absent or any entry is corrupt.
         """
         key = "augur:limen:delivery_failures"
-        raw_list = self._r.lrange(key, 0, limit - 1)
+        raw_list = cast(list[Any], self._r.lrange(key, 0, limit - 1))
         try:
             return [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
@@ -890,7 +902,10 @@ class PersistenceManager:
         """
         if cap is None:
             cap = MAX_GATE_STATE_KEYS
-        if not self._r.hexists(redis_key, field) and self._r.hlen(redis_key) >= cap:
+        if (
+            not cast(bool, self._r.hexists(redis_key, field))
+            and cast(int, self._r.hlen(redis_key)) >= cap
+        ):
             log.warning(
                 "hash %s full (%d); dropping new field %s",
                 redis_key,
@@ -903,7 +918,7 @@ class PersistenceManager:
 
     def _hash_load(self, redis_key: str, field: str) -> dict:
         """Per-field HGET with corrupt-read guard. Returns {} on missing/corrupt."""
-        raw = self._r.hget(redis_key, field)
+        raw = cast(Any, self._r.hget(redis_key, field))
         if raw is None:
             return {}
         try:
@@ -977,7 +992,7 @@ class PersistenceManager:
 
     def load_all_channel_stats(self) -> dict:
         """HGETALL augur:limen:channel_stats → {state_key: stats_dict}. {} if absent."""
-        raw = self._r.hgetall("augur:limen:channel_stats")
+        raw = cast(dict[Any, Any], self._r.hgetall("augur:limen:channel_stats"))
         out: dict[str, dict] = {}
         for fld, val in raw.items():
             try:
@@ -995,7 +1010,7 @@ class PersistenceManager:
 
     def load_advice_rate(self) -> dict:
         """Return advice-rate state, or {} if missing/corrupt."""
-        raw = self._r.get("augur:limen:advice_rate")
+        raw = cast(Any, self._r.get("augur:limen:advice_rate"))
         if not raw:
             return {}
         try:
@@ -1019,11 +1034,16 @@ class PersistenceManager:
 
     def is_self_tolerant(self, state_key: str) -> bool:
         """Return True if state_key is in the self-tolerance set."""
-        return bool(self._r.sismember("augur:limen:self_tolerance", state_key))
+        return bool(
+            cast(
+                bool,
+                self._r.sismember("augur:limen:self_tolerance", state_key),
+            )
+        )
 
     def load_self_tolerance(self) -> set[str]:
         """Return the full self-tolerance set (decoded to str)."""
-        raw = self._r.smembers("augur:limen:self_tolerance")
+        raw = cast(set[Any], self._r.smembers("augur:limen:self_tolerance"))
         return {m.decode() if isinstance(m, bytes) else m for m in raw}
 
     # -- can_track_gate_state (read-only cap probe) ---------------------------
@@ -1037,8 +1057,8 @@ class PersistenceManager:
         condition without writing.
         """
         return bool(
-            self._r.hexists(hash_name, state_key)
-            or self._r.hlen(hash_name) < MAX_GATE_STATE_KEYS
+            cast(bool, self._r.hexists(hash_name, state_key))
+            or cast(int, self._r.hlen(hash_name)) < MAX_GATE_STATE_KEYS
         )
 
     # ── Task 1.3: atomic gate tuning save (spec §6) ──────────────────────────
@@ -1106,7 +1126,7 @@ class PersistenceManager:
         # bytes in production; fakeredis(decode_responses=True) returns str.
         return sorted(
             (m.decode() if isinstance(m, bytes) else m)
-            for m in self._r.smembers(f"augur:memoria:tier:{tier}")
+            for m in cast(set[Any], self._r.smembers(f"augur:memoria:tier:{tier}"))
         )
 
     def load_all_memory_states(self) -> list[dict]:
@@ -1114,7 +1134,7 @@ class PersistenceManager:
         for tier in ("warm", "cold"):
             mids = [
                 m.decode() if isinstance(m, bytes) else m
-                for m in self._r.smembers(f"augur:memoria:tier:{tier}")
+                for m in cast(set[Any], self._r.smembers(f"augur:memoria:tier:{tier}"))
             ]
             if not mids:
                 continue
@@ -1123,7 +1143,10 @@ class PersistenceManager:
             # this on the advice hot path, where one round-trip per memory scaled
             # linearly with total memory count. MGET preserves key order, and
             # each value is decoded independently, so the result is identical.
-            raws = self._r.mget([f"augur:memoria:dsr:{mid}" for mid in mids])
+            raws = cast(
+                list[Any],
+                self._r.mget([f"augur:memoria:dsr:{mid}" for mid in mids]),
+            )
             out.extend(json.loads(raw) for raw in raws if raw is not None)
         return out
 
@@ -1131,10 +1154,15 @@ class PersistenceManager:
         return self._get_json(f"augur:memoria:archive:{memory_id}")
 
     def is_session_processed(self, session_id: str) -> bool:
-        return bool(self._r.sismember("augur:memoria:processed_sessions", session_id))
+        return bool(
+            cast(
+                bool,
+                self._r.sismember("augur:memoria:processed_sessions", session_id),
+            )
+        )
 
     def active_session_count(self) -> int:
-        return int(self._r.scard("augur:memoria:processed_sessions"))
+        return int(cast(int, self._r.scard("augur:memoria:processed_sessions")))
 
     def record_memory_review(
         self, memory_id: str, session_id: str, active_session: int

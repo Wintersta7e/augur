@@ -40,6 +40,11 @@ class _Cfg:
     imperator_ii_dedupe_staleness_s = 86400.0
     min_prompt_len = 20
     prompt_forbidden_patterns = ()
+    # read by conscientia's pre-apply screen (charter.output_patterns) for
+    # every prompt_strategy proposal: _Cfg has no conscientia_enabled, and
+    # the screen's own gate check defaults MISSING flags to True (on), so
+    # the pattern tuple is always built here -- must not AttributeError.
+    conscientia_output_extra_patterns = ()
     sigma_min = 1.5
     sigma_max = 5.0
     # Engine/context/persona knobs for the handle_turn-level I3 test.

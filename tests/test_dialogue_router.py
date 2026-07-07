@@ -20,6 +20,11 @@ class _Cfg:
     sigma_max = 5.0
     min_prompt_len = 20
     prompt_forbidden_patterns = ()
+    # read by conscientia's pre-apply screen (charter.output_patterns) for
+    # every prompt_strategy proposal: _Cfg has no conscientia_enabled, and
+    # the screen's own gate check defaults MISSING flags to True (on), so
+    # the pattern tuple is always built here -- must not AttributeError.
+    conscientia_output_extra_patterns = ()
     # FSRS review knobs, read only on a semantic_fact re-teach (matches
     # tabula.config.AugurConfig's defaults).
     memory_s_growth_factor = 0.5

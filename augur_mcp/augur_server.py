@@ -554,13 +554,20 @@ def get_last_anomaly(domain: str | None = None) -> dict[str, Any]:
 @mcp.tool()
 @_tool_safe
 def get_last_advice(domain: str | None = None) -> dict[str, Any]:
-    """Read the last LLM advice from Redis (ARCH-07: via PersistenceManager)."""
+    """Read the last LLM advice from Redis (ARCH-07: via PersistenceManager).
+
+    Correlated advice is stored with domain="multi"; a domain filter matches
+    those records through their involved_domains so callers asking for the
+    last typing advice still see a typing+activity correlation.
+    """
     with _persistence_ctx() as pm:
         data = pm.load_last_advice()
     if data is None:
         return {"error": "not found"}
     if domain is not None and data.get("domain") != domain:
-        return {"error": "not found", "requested_domain": domain}
+        involved = data.get("involved_domains") or []
+        if not (data.get("domain") == "multi" and domain in involved):
+            return {"error": "not found", "requested_domain": domain}
     return data
 
 

@@ -85,6 +85,46 @@ def test_prior_is_none_for_new_rule_key():
     assert out["prior_rules"] == {"HIGH+HIGH": None}
 
 
+def test_validate_patch_accepts_valid_isolated_patches():
+    from tabula.config import AugurConfig
+
+    assert matrix_ops.validate_patch(rules={"LOW+HIGH": "HIGH"}) is None
+    assert (
+        matrix_ops.validate_patch(rule_windows={"LOW+LOW": 60.0}, config=AugurConfig())
+        is None
+    )
+
+
+def test_validate_patch_rejects_without_touching_redis():
+    # The pre-arm validator mirrors apply_matrix_update's checks and never
+    # needs a client — malformed patches are refused before any side effect.
+    from tabula.config import AugurConfig
+
+    assert matrix_ops.validate_patch(rules={"LOW+LOW": "BANANA"}) is not None
+    assert matrix_ops.validate_patch(rules={"typing+chess": "HIGH"}) is not None
+    cfg = AugurConfig()
+    assert (
+        matrix_ops.validate_patch(rule_windows={"LOW+LOW": 9999.0}, config=cfg)
+        is not None
+    )
+
+
+def test_rule_windows_keys_must_be_severity_pairs():
+    # Symmetry with rules keys: window keys whose parts are not severities
+    # are rejected (windows for keys that can never be rules made no sense).
+    from tabula.config import AugurConfig
+
+    cfg = AugurConfig()
+    err = matrix_ops._validate_escalation_matrix_rule_windows(
+        {"typing+activity": 30.0}, cfg
+    )
+    assert err is not None and "severity" in err
+    assert (
+        matrix_ops._validate_escalation_matrix_rule_windows({"LOW+HIGH": 30.0}, cfg)
+        is None
+    )
+
+
 def test_patch_rejects_oversized_preserved_version():
     pm = _pm()
     # An existing over-cap version (save_escalation_matrix does not validate) must

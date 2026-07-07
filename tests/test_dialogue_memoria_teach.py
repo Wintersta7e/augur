@@ -43,6 +43,62 @@ def test_create_and_load_taught_fact():
     assert facts[0]["pattern"]["kind"] == "semantic"
 
 
+def test_create_persists_rationale():
+    # The user's teaching text must survive into the record (record-level
+    # sibling of pattern) — it is what format_taught_facts prefers over the
+    # rule_key slug when rendering the advice-prompt block.
+    pm = _pm()
+    mid = pm.create_user_taught_memory(
+        {
+            "kind": "semantic",
+            "domains": ["typing"],
+            "rule_key": "deep_work_morning",
+            "severity": "LOW",
+        },
+        source="user",
+        rationale="deep work happens in the mornings",
+    )
+    rec = pm.load_memory_state(mid)
+    assert rec["rationale"] == "deep work happens in the mornings"
+    # identity is pattern-only: rationale must not perturb the memory_id
+    assert mid == pm.create_user_taught_memory(
+        {
+            "kind": "semantic",
+            "domains": ["typing"],
+            "rule_key": "deep_work_morning",
+            "severity": "LOW",
+        },
+        source="user",
+        rationale="different words, same fact",
+    )
+
+
+def test_reteach_replaces_rationale_and_empty_preserves():
+    pm = _pm()
+    pattern = {
+        "kind": "semantic",
+        "domains": ["typing"],
+        "rule_key": "rk",
+        "severity": "LOW",
+    }
+    mid = pm.create_user_taught_memory(pattern, source="user", rationale="first")
+    # non-empty re-teach rationale replaces
+    pm.create_user_taught_memory(pattern, source="user", rationale="second")
+    assert pm.load_memory_state(mid)["rationale"] == "second"
+    # a bare re-teach (no rationale) must NOT erase prior teaching text
+    pm.create_user_taught_memory(pattern, source="user")
+    assert pm.load_memory_state(mid)["rationale"] == "second"
+
+
+def test_create_without_rationale_stores_none():
+    pm = _pm()
+    mid = pm.create_user_taught_memory(
+        {"kind": "semantic", "domains": ["chess"], "rule_key": "rk", "severity": "LOW"},
+        source="user",
+    )
+    assert pm.load_memory_state(mid)["rationale"] is None
+
+
 def test_load_for_domains_filters():
     pm = _pm()
     pm.create_user_taught_memory(

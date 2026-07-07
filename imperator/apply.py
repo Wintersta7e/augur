@@ -52,6 +52,26 @@ def _arm_gate(pm, p: dict, *, cfg) -> bool:
         return False
 
 
+def _escalation_patch_error(p: dict, *, cfg) -> str | None:
+    """Validate the isolated escalation patch BEFORE the anti-thrash gate arms
+    (validate -> arm -> write, the same contract every other handler follows).
+
+    matrix_ops commits nothing on a validation error (it unwatches before
+    MULTI), so there is no committed-change-behind-an-open-gate risk to
+    justify arming first; arming on a patch that can never land would poison
+    the (kind, target) dedupe slot for the staleness window and block the
+    corrected retry (spec: only *applied* entries block).
+
+    Returns None when the patch is well-formed; the validator error otherwise.
+    """
+    action = p.get("action") or {}
+    if "window" in action:
+        return matrix_ops.validate_patch(
+            rule_windows={p["target"]: action["window"]}, config=cfg
+        )
+    return matrix_ops.validate_patch(rules={p["target"]: action.get("target")})
+
+
 def _apply_escalation_rule(pm, p: dict) -> bool:
     """Apply an escalation_rule proposal by updating the matrix and recording the
     rollback anchor. Returns True on success, False on validation error or write failure.
@@ -233,6 +253,20 @@ def apply_proposal(
         return p
     try:
         if p["kind"] == "escalation_rule":
+            # Validate the isolated patch FIRST: a malformed patch commits
+            # nothing, so it must not consume the anti-thrash gate either
+            # (a corrected retry for the same target can still apply
+            # in-window — mirrors _apply_prompt_strategy's contract).
+            err = _escalation_patch_error(p, cfg=cfg)
+            if err:
+                log.info(
+                    "imperator apply: escalation patch for %s refused before "
+                    "arming: %s",
+                    p["target"],
+                    err,
+                )
+                p["status"] = "logged"
+                return p
             # Arm the anti-thrash gate before the committing matrix write so the
             # write can never land behind an open gate (a failed arm aborts here).
             if not _arm_gate(pm, p, cfg=cfg):
@@ -382,8 +416,16 @@ def _apply_semantic_fact(pm, p: dict, *, cfg, session_id: str | None) -> bool:
     prior = pm.load_memory_state(mid)  # rollback anchor, read before the write
     if not _arm_gate(pm, p, cfg=cfg):
         return False
+    # Rationale precedence: action-level first (set by the undo-inverse
+    # builder restoring a prior fact's own rationale), then proposal-level
+    # (the forward teach, where router.route carried the intent rationale).
     pm.create_user_taught_memory(
-        pattern, source="dialogue", protect=True, session_id=session_id, cfg=cfg
+        pattern,
+        source="dialogue",
+        protect=True,
+        session_id=session_id,
+        cfg=cfg,
+        rationale=a.get("rationale") or p.get("rationale") or None,
     )
     a["memory_id"] = mid
     a["prior_fact"] = prior
@@ -446,6 +488,16 @@ def _dispatch_confirmed(pm, p: dict, *, cfg, session_id: str | None = None) -> b
     to pm.create_user_taught_memory's FSRS review on re-teach)."""
     kind = p["kind"]
     if kind == "escalation_rule":
+        # Same validate -> arm -> write ordering as the autonomous path: a
+        # malformed patch must not consume the anti-thrash gate.
+        err = _escalation_patch_error(p, cfg=cfg)
+        if err:
+            log.info(
+                "confirmed apply: escalation patch for %s refused before arming: %s",
+                p["target"],
+                err,
+            )
+            return False
         if not _arm_gate(pm, p, cfg=cfg):
             return False
         return _apply_escalation_rule(pm, p)

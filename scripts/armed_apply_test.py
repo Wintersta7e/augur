@@ -255,17 +255,16 @@ async def main() -> int:
         f"{m.get(bad_key) == snap_rules.get(bad_key)}",
     )
 
-    # 7b. documented quirk: the anti-thrash marker armed BEFORE the failed
-    # write blocks a corrected retry in-window (skipped, not applied)
+    # 7b. validate-before-arm: the refused patch left NO marker, so the
+    # corrected retry for the same (kind,target) applies in-window
+    # (snapshot restore below reverts the rule)
     p7b = prop("escalation_rule", bad_key, {"target": "LOW"})
     out7b = apply_proposal(pm, p7b, cfg=cfg_on, session_id=f"arm-{rid}")
     m = matrix().get("rules") or {}
     row(
-        "7b corrected retry after failed apply blocked by stale marker "
-        "(documented quirk)",
-        out7b["status"] == "skipped" and m.get(bad_key) == snap_rules.get(bad_key),
-        f"status={out7b['status']} rule_unchanged="
-        f"{m.get(bad_key) == snap_rules.get(bad_key)}",
+        "7b corrected retry applies after refused patch (gate never armed)",
+        out7b["status"] == "applied" and m.get(bad_key) == "LOW",
+        f"status={out7b['status']} rule={m.get(bad_key)}",
     )
 
     # Part 1 cleanup: restore matrix snapshot; drop scratch prompt keys.

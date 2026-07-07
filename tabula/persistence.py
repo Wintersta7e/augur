@@ -1211,6 +1211,7 @@ class PersistenceManager:
         protect: bool = True,
         session_id: str | None = None,
         cfg: Any = None,
+        rationale: str | None = None,
     ) -> str:
         """Create OR re-teach a user-taught semantic memory with FSRS decay.
 
@@ -1240,6 +1241,14 @@ class PersistenceManager:
             cfg: AugurConfig for the review's FSRS knobs (memory_s_growth_factor,
                 memory_s_max) -- only read on re-teach; defaults to
                 AugurConfig.from_env() when not supplied
+            rationale: the user's free-text teaching rationale, stored as a
+                record-level sibling of pattern (NOT inside pattern, so the
+                deterministic memory_id is unaffected). Consilium's
+                format_taught_facts prefers this text over the rule_key slug
+                when rendering the advice-prompt block. On re-teach a
+                non-empty rationale replaces the stored one; None/empty
+                PRESERVES the existing rationale (a bare re-teach must not
+                erase prior teaching text).
 
         Returns:
             memory_id (SHA-256 of canonical pattern)
@@ -1267,6 +1276,8 @@ class PersistenceManager:
                 "taught_by": source,
                 "origin_severity": origin_severity,
                 "status": "active",
+                # non-empty replaces; None/empty preserves prior teaching text
+                **({"rationale": rationale} if rationale else {}),
             }
             self.save_memory_state(mid, reviewed)
             return mid
@@ -1282,6 +1293,7 @@ class PersistenceManager:
             "memory_kind": "semantic",
             "source_sessions": [],
             "taught_by": source,
+            "rationale": rationale,
         }
         self.save_memory_state(mid, state)
         return mid

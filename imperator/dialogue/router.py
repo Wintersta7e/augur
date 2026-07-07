@@ -396,8 +396,17 @@ def build_inverse(applied: dict) -> dict | None:
                 # inverse -- undo must report unavailable rather than
                 # re-teach fabricated content and claim a false success.
                 return None
+            # Carry the prior fact's own rationale so the restore is full-
+            # fidelity (mirrors the context_directive inverse above); the
+            # apply handler prefers action-level rationale over the undo
+            # proposal's own rationale text.
             return _undo_proposal(
-                "semantic_fact", p["target"], {"pattern": prior_fact.get("pattern")}
+                "semantic_fact",
+                p["target"],
+                {
+                    "pattern": prior_fact.get("pattern"),
+                    "rationale": prior_fact.get("rationale"),
+                },
             )
         if not a.get("memory_id"):
             return None
@@ -406,7 +415,12 @@ def build_inverse(applied: dict) -> dict | None:
             # content by re-teaching it -- itself a review, per decision B:
             # even an undo is forward decay, never a raw state rollback.
             return _undo_proposal(
-                "semantic_fact", p["target"], {"pattern": prior_fact.get("pattern")}
+                "semantic_fact",
+                p["target"],
+                {
+                    "pattern": prior_fact.get("pattern"),
+                    "rationale": prior_fact.get("rationale"),
+                },
             )
         # Create-with-no-prior: inverse is removal (current behavior).
         return _undo_proposal(

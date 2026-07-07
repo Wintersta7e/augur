@@ -15,6 +15,9 @@ class _Cfg:
     prompt_forbidden_patterns = ()
     imperator_ii_apply_enabled = True
     imperator_ii_dedupe_staleness_s = 86400.0
+    # read by the pre-arm escalation patch validation (window range check)
+    correlation_window_min_s = 5.0
+    correlation_window_max_s = 120.0
 
 
 def _safe(p):
@@ -330,7 +333,10 @@ def test_apply_escalation_window_branch_anchors_prior_from_cas():
 
 def test_apply_invalid_matrix_patch_failsafe():
     # An invalid matrix patch (severity not in LOW/MEDIUM/HIGH) must fail safe:
-    # apply_matrix_update returns an error -> status stays 'logged', matrix unchanged.
+    # refused by the pre-arm validation -> status stays 'logged', matrix
+    # unchanged, and (validate -> arm -> write) the anti-thrash marker is NOT
+    # armed — a validation failure commits nothing, so it must not consume
+    # the (kind, target) dedupe slot.
     pm = _pm()
     p = _safe(
         P.make_proposal(
@@ -344,6 +350,82 @@ def test_apply_invalid_matrix_patch_failsafe():
     assert out["status"] == "logged"
     assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"  # unchanged
     assert "prior_target" not in p["action"]  # no anchor on a failed write
+    assert pm.is_proposal_applied(p["dedupe_key"]) is False  # gate NOT armed
+
+
+def test_corrected_retry_applies_after_invalid_patch():
+    # The corrected proposal for the SAME (kind, target) must apply in-window:
+    # the malformed predecessor never armed the gate.
+    pm = _pm()
+    bad = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "BANANA"},
+            rationale="r",
+        )
+    )
+    assert A.apply_proposal(pm, bad, cfg=_Cfg(), session_id="s1")["status"] == "logged"
+    good = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "MEDIUM"},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, good, cfg=_Cfg(), session_id="s1")
+    assert out["status"] == "applied"
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "MEDIUM"
+    assert good["action"]["prior_target"] == "LOW"
+    assert pm.is_proposal_applied(good["dedupe_key"]) is True
+
+
+def test_invalid_window_patch_leaves_gate_unarmed():
+    # Window variant: an out-of-range window is refused before arming, and the
+    # corrected window for the same target still applies in-window.
+    pm = _pm()
+    bad = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"window": 9999.0},  # outside [5, 120]
+            rationale="r",
+        )
+    )
+    assert A.apply_proposal(pm, bad, cfg=_Cfg(), session_id="s1")["status"] == "logged"
+    assert pm.is_proposal_applied(bad["dedupe_key"]) is False
+    good = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"window": 60.0},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, good, cfg=_Cfg(), session_id="s1")
+    assert out["status"] == "applied"
+    assert pm.load_escalation_matrix()["rule_windows"]["LOW+LOW"] == 60.0
+
+
+def test_confirmed_invalid_escalation_patch_leaves_gate_unarmed():
+    # The human-confirmed path shares the validate -> arm -> write ordering:
+    # a malformed confirmed patch is refused (logged) without arming.
+    pm = _pm()
+    cfg = _Cfg()
+    cfg.dialogue_confirmed_apply_enabled = True
+    p = _safe(
+        P.make_proposal(
+            kind="escalation_rule",
+            target="LOW+LOW",
+            action={"target": "BANANA"},
+            rationale="r",
+        )
+    )
+    out = A.apply_proposal(pm, p, cfg=cfg, session_id="s1", confirmed=True)
+    assert out["status"] == "logged"
+    assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"
+    assert pm.is_proposal_applied(p["dedupe_key"]) is False
 
 
 def test_apply_unknown_kind_failsafe(monkeypatch):

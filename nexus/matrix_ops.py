@@ -86,6 +86,12 @@ def _validate_escalation_matrix_rule_windows(
                 f"rule_windows key '{key}' must be pairwise (one '+'); "
                 f"N-way windows are not yet supported."
             )
+        parts = key.split("+")
+        if not all(p in _VALID_SEVERITIES for p in parts):
+            return (
+                f"invalid severity in rule_windows key '{key}': "
+                f"each part must be one of {sorted(_VALID_SEVERITIES)}"
+            )
         if not isinstance(value, (int, float)):
             return f"rule_windows value for '{key}' must be numeric"
         if not (
@@ -97,6 +103,32 @@ def _validate_escalation_matrix_rule_windows(
                 f"rule_windows[{key}]={value} outside "
                 f"[{config.correlation_window_min_s}, {config.correlation_window_max_s}]"
             )
+    return None
+
+
+def validate_patch(
+    *,
+    rules: dict | None = None,
+    rule_windows: dict | None = None,
+    config: AugurConfig | None = None,
+) -> str | None:
+    """Validate an isolated rules/rule_windows patch WITHOUT touching Redis.
+
+    Runs the same shape validators apply_matrix_update enforces inside its
+    WATCH/CAS, so callers that arm side effects (e.g. Imperator's anti-thrash
+    dedupe marker) before committing can refuse a malformed patch first —
+    validate -> arm -> write. A validation failure here commits nothing and
+    must not consume the caller's one-shot gates.
+
+    Returns None if valid; the validator's error string otherwise.
+    """
+    if rules is not None:
+        err = _validate_escalation_rules(rules)
+        if err:
+            return err
+    if rule_windows is not None:
+        cfg = config if config is not None else AugurConfig.from_env()
+        return _validate_escalation_matrix_rule_windows(rule_windows, cfg)
     return None
 
 

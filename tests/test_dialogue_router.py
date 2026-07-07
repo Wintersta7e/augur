@@ -1114,13 +1114,20 @@ def test_roundtrip_semantic_fact_remove_undo_readds_content():
     assert undo["proposal"]["action"]["prior_fact"] is not None  # captured
 
     inv = R.build_inverse({"proposal": undo["proposal"]})
-    assert inv is not None and inv["action"] == {"pattern": pattern}
+    # full-fidelity restore: the inverse carries the prior fact's own
+    # rationale alongside the pattern (not just the slug)
+    assert inv is not None and inv["action"] == {
+        "pattern": pattern,
+        "rationale": "taught",
+    }
 
     readd = R.apply_undo(
         {"proposal": undo["proposal"]}, pm=pm, cfg=_Cfg(), session_id="d1"
     )
     assert readd["status"] == "applied"
-    assert pm.load_memory_state(mid)["status"] == "active"  # reactivated
+    restored = pm.load_memory_state(mid)
+    assert restored["status"] == "active"  # reactivated
+    assert restored["rationale"] == "taught"  # teaching text restored intact
     assert mid in [f["memory_id"] for f in pm.load_taught_facts()]
 
 
@@ -1167,7 +1174,11 @@ def test_roundtrip_semantic_fact_reteach_undo_restores_prior_pattern():
     assert strengthened["S"] > first_state["S"]
 
     inv = R.build_inverse({"proposal": applied2["proposal"]})
-    assert inv is not None and inv["action"] == {"pattern": pattern}
+    # the inverse restores the PRIOR teaching text along with the pattern
+    assert inv is not None and inv["action"] == {
+        "pattern": pattern,
+        "rationale": "left-handed",
+    }
 
     # A different session for the undo: review()'s idempotency is per
     # session, so re-using "d1" here would be a no-op review, not a
@@ -1181,3 +1192,5 @@ def test_roundtrip_semantic_fact_reteach_undo_restores_prior_pattern():
     # intended decision-B semantics (forward-only decay, even on undo).
     assert pm.load_memory_state(mid)["S"] > strengthened["S"]
     assert pm.load_memory_state(mid)["pattern"] == pattern
+    # the prior teaching text is restored too (was "left-handed again")
+    assert pm.load_memory_state(mid)["rationale"] == "left-handed"

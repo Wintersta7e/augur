@@ -84,7 +84,9 @@ def test_block_char_budget_enforced():
 # (fake_pm), so the prompt the LLM would receive is captured verbatim.
 
 
-def _seed_fact(pm, domains: list[str], rule_key: str) -> None:
+def _seed_fact(
+    pm, domains: list[str], rule_key: str, rationale: str | None = None
+) -> None:
     pm.create_user_taught_memory(
         {
             "kind": "semantic",
@@ -93,6 +95,7 @@ def _seed_fact(pm, domains: list[str], rule_key: str) -> None:
             "severity": "LOW",
         },
         source="user",
+        rationale=rationale,
     )
 
 
@@ -125,6 +128,21 @@ async def test_taught_fact_injected_into_standalone_prompt(fake_pm, cfg) -> None
     prompt = await _run_and_capture_prompt(SINGLE_MEDIUM_TYPING, fake_pm, cfg)
     assert "Known facts (taught by the user):" in prompt
     assert "TYPING_FACT_MARKER" in prompt
+
+
+async def test_taught_rationale_reaches_the_prompt(fake_pm, cfg) -> None:
+    # The user's own teaching text — not just the rule_key slug — must reach
+    # the advice prompt when it was provided at teach time (real writer path,
+    # not a synthetic record).
+    _seed_fact(
+        fake_pm,
+        ["typing"],
+        "morning_deep_work",
+        rationale="deep work happens in the mornings; long pauses are thought",
+    )
+    prompt = await _run_and_capture_prompt(SINGLE_MEDIUM_TYPING, fake_pm, cfg)
+    assert "Known facts (taught by the user):" in prompt
+    assert "deep work happens in the mornings; long pauses are thought" in prompt
 
 
 async def test_taught_fact_injected_into_correlation_prompt(fake_pm, cfg) -> None:

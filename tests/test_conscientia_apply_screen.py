@@ -99,14 +99,20 @@ def test_screen_exception_fails_closed():
 
 
 def test_confirmed_path_screened_too():
+    # A protected-surface target is refused ONLY by the conscientia screen —
+    # gate_calibration's own handler would apply this floor_set otherwise,
+    # so this test fails if the screen is unwired from _apply_confirmed.
     pm = _pm()
-    pm.save_prompt("typing", "existing prompt text that is long enough")
-    # NOTE: matches _Cfg's narrow prompt_forbidden_patterns=("take a break",)
-    # rather than the brief's original "You are fatigued — rest now." --
-    # that phrase only matches AugurConfig's full production default list
-    # (which also carries "you are fatigued"), not this file's deliberately
-    # narrow fixture. Same trigger phrase as the non-confirmed refusal test;
-    # what's under test here is that _apply_confirmed's path is ALSO screened.
-    p = _prompt_prop("Please take a break whenever this fires.")
+    p = _safe(
+        P.make_proposal(
+            kind="gate_calibration",
+            target="conscientia/charter.py",
+            action={"op": "floor_set", "state_key": "s1", "value": 0.1},
+            rationale="r",
+        )
+    )
     out = A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s", confirmed=True)
     assert out["status"] == "logged"
+    viols = pm.load_conscientia_violations(limit=5)
+    assert viols and viols[0]["surface"] == "apply"
+    assert viols[0]["code"] == "protected_surface"

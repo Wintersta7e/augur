@@ -54,3 +54,11 @@ def test_render_charter_is_pure_data():
     assert doc["version"] == charter.CHARTER_VERSION
     assert [p["pid"] for p in doc["principles"]] == [p.pid for p in charter.PRINCIPLES]
     assert doc["protected_surfaces"] == list(charter.PROTECTED_SURFACES)
+
+
+def test_pattern_assembly_tolerates_partial_cfg():
+    class _Partial:
+        prompt_forbidden_patterns = ("take a break",)
+
+    assert charter.output_patterns(_Partial()) == ("take a break",)
+    assert charter.teach_patterns(object()) == ()

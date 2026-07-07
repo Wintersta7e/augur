@@ -64,16 +64,20 @@ PROTECTED_SURFACES: tuple[str, ...] = (
 
 def output_patterns(cfg) -> tuple[str, ...]:
     """Valence patterns for outgoing advice text: the shared prompt-mutation
-    list plus output-surface extras (single source of truth, spec D8)."""
-    return tuple(cfg.prompt_forbidden_patterns) + tuple(
-        cfg.conscientia_output_extra_patterns
+    list plus output-surface extras (single source of truth, spec D8).
+    getattr-tolerant so a partially-shaped cfg double degrades to fewer
+    patterns instead of raising (the screens treat missing flags as ON)."""
+    return tuple(getattr(cfg, "prompt_forbidden_patterns", ())) + tuple(
+        getattr(cfg, "conscientia_output_extra_patterns", ())
     )
 
 
 def teach_patterns(cfg) -> tuple[str, ...]:
-    """Valence patterns for user-taught content (rationale / rule_key)."""
-    return tuple(cfg.prompt_forbidden_patterns) + tuple(
-        cfg.conscientia_teach_extra_patterns
+    """Valence patterns for user-taught content (rationale / rule_key).
+    getattr-tolerant so a partially-shaped cfg double degrades to fewer
+    patterns instead of raising (the screens treat missing flags as ON)."""
+    return tuple(getattr(cfg, "prompt_forbidden_patterns", ())) + tuple(
+        getattr(cfg, "conscientia_teach_extra_patterns", ())
     )
 
 

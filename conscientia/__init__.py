@@ -8,6 +8,11 @@ from conscientia.charter import (  # noqa: F401
     PROTECTED_SURFACES,
     render_charter,
 )
-
-# Task 3 adds: Verdict, screen_advice_text, screen_taught_content,
-# screen_proposal, make_violation, CORRECTIVE_SUFFIX
+from conscientia.screens import (  # noqa: F401
+    CORRECTIVE_SUFFIX,
+    Verdict,
+    make_violation,
+    screen_advice_text,
+    screen_proposal,
+    screen_taught_content,
+)

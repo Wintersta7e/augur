@@ -132,8 +132,9 @@ async def main() -> int:
     m = matrix().get("rules") or {}
     row(
         "1 disarmed escalation_rule stays logged",
-        out1["status"] == "logged" and scratch not in m,
-        f"status={out1['status']} rule_absent={scratch not in m}",
+        out1["status"] == "logged" and m.get(scratch) == snap_rules.get(scratch),
+        f"status={out1['status']} rule_unchanged="
+        f"{m.get(scratch) == snap_rules.get(scratch)}",
     )
 
     # 2. armed -> applied with anchor + dedupe marker

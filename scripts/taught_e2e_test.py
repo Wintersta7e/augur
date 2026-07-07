@@ -126,9 +126,19 @@ async def main() -> int:
                 f"arm={data.get('arm')} reason={data.get('reason')}",
                 flush=True,
             )
+        elif msg.subject == "augur.limen.delivery_failure":
+            # not scored, but printed so a host-side LLM timeout (advice
+            # wait expiring with neither advice nor suppression) is
+            # self-diagnosing in the run log
+            print(
+                f"  <- delivery_failure entity={data.get('entity')} "
+                f"reason={data.get('reason')}",
+                flush=True,
+            )
 
     await nc.subscribe("augur.consilium.advice", cb=on_msg)
     await nc.subscribe("augur.limen.suppressed", cb=on_msg)
+    await nc.subscribe("augur.limen.delivery_failure", cb=on_msg)
     await asyncio.sleep(0.5)
 
     def adv_for(entity: str) -> list[dict]:
@@ -327,11 +337,13 @@ async def main() -> int:
     ]
     block = format_taught_facts(pm.load_taught_facts_for_domains(["typing"]))
     rationale_in_block = "deep work happens in the mornings" in block
+    # the fact renders as its rationale when one was taught (preferred),
+    # falling back to the rule_key slug for rationale-less records
+    fact_rendered = rationale_in_block or f"morning_deep_work_{rid}" in block
     row(
         "A fact taught + readable via advisor load path",
-        taught and len(mine) == 1 and f"morning_deep_work_{rid}" in block,
-        f"applied={taught} in_store={len(mine)} block_has_rule_key="
-        f"{f'morning_deep_work_{rid}' in block}",
+        taught and len(mine) == 1 and fact_rendered,
+        f"applied={taught} in_store={len(mine)} rendered={fact_rendered}",
     )
     row(
         "A(info) rationale text survives into advice block",

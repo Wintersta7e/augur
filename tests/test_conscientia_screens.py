@@ -100,6 +100,25 @@ def test_proposal_prompt_text_valence_refused():
     assert not v.ok and v.code == "forbidden_valence"
 
 
+def test_proposal_missing_kind_is_verdict_not_exception():
+    v = screen_proposal({"target": "x", "klass": "safe", "action": {}}, CFG)
+    assert not v.ok and v.code == "malformed_proposal"
+
+
+def test_proposal_screen_gates():
+    bad = {"kind": "code", "target": "x", "klass": "safe", "action": {}}
+    assert screen_proposal(bad, AugurConfig(conscientia_enabled=False)).ok
+    assert screen_proposal(
+        bad, AugurConfig(conscientia_proposal_screen_enabled=False)
+    ).ok
+
+
+def test_taught_screen_master_flag_gates():
+    assert screen_taught_content(
+        "take a break", None, AugurConfig(conscientia_enabled=False)
+    ).ok
+
+
 def test_make_violation_shape():
     rec = make_violation(
         "advice",

@@ -79,6 +79,13 @@ def screen_proposal(p: dict, cfg) -> Verdict:
         cfg, "conscientia_proposal_screen_enabled", True
     ):
         return Verdict(True)
+    if "kind" not in p:
+        return Verdict(
+            False,
+            "malformed_proposal",
+            "proposal missing required 'kind' field",
+            "containment",
+        )
     from imperator import proposals as P  # local import: avoid cycle at module load
 
     kind = p.get("kind", "")

@@ -386,7 +386,10 @@ async def test_semantic_fact_persists_and_shapes_advice(real_pm, real_nc, dialog
     assert query_ollama.await_count == 1, "advice LLM was not called"
     prompt = query_ollama.await_args.args[0]
     assert "Known facts (taught by the user):" in prompt
-    assert "HIGH+HIGH" in prompt
+    # The taught rationale (not the rule_key slug) is what reaches the
+    # advice prompt: format_taught_facts prefers record-level rationale
+    # since the CF-1 fix persisted it end-to-end.
+    assert "chess and typing spiking together means stress" in prompt
 
 
 # ── Scenario 5 (spec §14.5): heavy-confirm gate ─────────────────────────────

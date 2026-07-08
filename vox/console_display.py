@@ -58,6 +58,7 @@ SUBJECT_HEALTH = "augur.praefectus.health"
 SUBJECT_AUSPICES = "augur.imperator.auspices"
 SUBJECT_SELF_MODEL = "augur.imperator.self_model"
 SUBJECT_PROPOSAL = "augur.imperator.proposal"
+SUBJECT_CONSCIENTIA_VIOLATION = "augur.conscientia.violation"
 WRAP_WIDTH = 80
 
 # ---------------------------------------------------------------------------
@@ -246,6 +247,30 @@ def update_last_rendered(last_rendered: dict, anomaly: dict) -> None:
     last_rendered[domain] = (anomaly.get("entity"), anomaly.get("timestamp"))
 
 
+def dedup_should_suppress_violation(last_violations: dict, violation: dict) -> bool:
+    """Return True if an identical violation was already rendered.
+
+    Matches on (surface, domain, detail) — the same charter block repeated
+    verbatim (e.g. a habitually-triggered pattern) is suppressed; a
+    different detail for the same surface/domain still renders.
+    """
+    surface = violation.get("surface")
+    if surface is None:
+        return False
+    prev_detail = last_violations.get((surface, violation.get("domain")))
+    if prev_detail is None:
+        return False
+    return prev_detail == violation.get("detail")
+
+
+def update_last_violations(last_violations: dict, violation: dict) -> None:
+    """Record this violation as the last rendered one for its (surface, domain)."""
+    surface = violation.get("surface")
+    if surface is None:
+        return
+    last_violations[(surface, violation.get("domain"))] = violation.get("detail")
+
+
 def render_advice(data: dict) -> str:
     """Multi-line formatted block for LLM advice."""
     domain = data.get("domain", "?")
@@ -316,6 +341,21 @@ def render_suppression(data: dict) -> str:
         f"{DIM}{ts}{RESET}  "
         f"{FG_GRAY}{domain}/{entity} {severity}  "
         f"(silent: {reason}){RESET}"
+    )
+
+
+def render_conscientia_violation(data: dict) -> str:
+    """One-line alert for a Conscientia charter block (augur.conscientia.violation).
+
+    Read-only operator surface: the block itself already happened upstream
+    (consilium/advisor.py) — this only renders the record.
+    """
+    surface = data.get("surface", "?")
+    principle = data.get("principle", "?")
+    detail = data.get("detail", "?")
+    return (
+        f"{FG_RED}{BOLD}✖ CONSCIENTIA{RESET}  "
+        f"{FG_GRAY}blocked {surface} ({principle}): {detail}{RESET}"
     )
 
 
@@ -552,6 +592,7 @@ async def run() -> None:
     )
 
     last_rendered: dict[str, tuple[str, str]] = {}
+    last_violations: dict[tuple[str | None, str | None], str | None] = {}
 
     print(BANNER, flush=True)
 
@@ -636,6 +677,17 @@ async def run() -> None:
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
 
+    async def on_conscientia_violation(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = json.loads(msg.data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        if dedup_should_suppress_violation(last_violations, data):
+            return
+        print(render_conscientia_violation(data), flush=True)
+        update_last_violations(last_violations, data)
+
     # LEAK-07: save subscription handles so unsubscribe() is called on
     # shutdown rather than relying on nc.close() to tear them down abruptly
     # mid-render.
@@ -648,6 +700,9 @@ async def run() -> None:
     sub_auspices = await nc.subscribe(SUBJECT_AUSPICES, cb=on_auspices)
     sub_self_model = await nc.subscribe(SUBJECT_SELF_MODEL, cb=on_self_model)
     sub_proposal = await nc.subscribe(SUBJECT_PROPOSAL, cb=on_proposal)
+    sub_conscientia_violation = await nc.subscribe(
+        SUBJECT_CONSCIENTIA_VIOLATION, cb=on_conscientia_violation
+    )
 
     try:
         while True:
@@ -671,6 +726,7 @@ async def run() -> None:
             await sub_auspices.unsubscribe()
             await sub_self_model.unsubscribe()
             await sub_proposal.unsubscribe()
+            await sub_conscientia_violation.unsubscribe()
         except Exception as exc:
             log.debug("Unsubscribe failed during shutdown: %s", exc)
         await nc.close()

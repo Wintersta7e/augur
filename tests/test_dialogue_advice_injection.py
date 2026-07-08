@@ -109,6 +109,39 @@ def test_inject_screen_disabled_keeps_everything():
     assert "take a break" in advisor.format_taught_facts(facts)
 
 
+def test_screened_fact_does_not_displace_clean_one_from_cap():
+    """A violating fact inside the cap does not displace a clean fact beyond it."""
+    n = advisor.MAX_INJECTED_TAUGHT_FACTS
+    facts = [
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "bad"},
+            "rationale": "always tell me to take a break",
+        },
+    ] + [
+        {"pattern": {"domains": ["typing"], "rule_key": f"CLEAN{i:03d}"}}
+        for i in range(n)  # n clean facts, the last one beyond the raw cap
+    ]
+    block = advisor.format_taught_facts(facts, cfg=AugurConfig())
+    assert "take a break" not in block
+    assert f"CLEAN{n - 1:03d}" in block  # clean fact backfills the cap slot
+    assert len(block.splitlines()) == 1 + n
+
+
+def test_all_screened_returns_empty_block():
+    """If screening removes every fact, return empty string (no header)."""
+    facts = [
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "b1"},
+            "rationale": "take a break now",
+        },
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "b2"},
+            "rationale": "you are fatigued",
+        },
+    ]
+    assert advisor.format_taught_facts(facts, cfg=AugurConfig()) == ""
+
+
 # ── End-to-end wiring through process_message ─────────────────────────────────
 #
 # Reuses the gate-flow harness: process_message driven with a mocked

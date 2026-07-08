@@ -80,16 +80,19 @@ TAUGHT_FACTS_CHAR_BUDGET = 2400
 def format_taught_facts(facts: list[dict], *, cfg: AugurConfig | None = None) -> str:
     """Format taught facts into a block to inject into advice prompts.
 
-    Returns empty string if facts list is empty. Caps at
-    MAX_INJECTED_TAUGHT_FACTS facts and TAUGHT_FACTS_CHAR_BUDGET chars.
+    Returns empty string if facts list is empty or if all facts are screened
+    out. Caps at MAX_INJECTED_TAUGHT_FACTS facts and TAUGHT_FACTS_CHAR_BUDGET
+    chars.
 
     ``cfg=None`` (the default) skips screening entirely, preserving every
     existing caller/test. When a cfg is given and both
     ``conscientia_inject_screen_enabled`` and the master ``conscientia_enabled``
     flag are on, a fact whose note (rationale, falling back to rule_key)
-    matches a charter teach-pattern is dropped from the block. This checks
-    patterns directly via ``charter.teach_patterns`` rather than calling
-    ``screen_taught_content`` (which self-gates on
+    matches a charter teach-pattern is dropped from the block. Screening is
+    applied to the full facts list BEFORE the fact-count cap, ensuring that
+    a violating fact inside the cap does not displace a clean fact beyond it.
+    This checks patterns directly via ``charter.teach_patterns`` rather than
+    calling ``screen_taught_content`` (which self-gates on
     ``conscientia_teach_screen_enabled``) so the inject surface stays
     independent of the teach-time screen's on/off state. Log-only: no
     violation record is written for this surface.
@@ -107,18 +110,34 @@ def format_taught_facts(facts: list[dict], *, cfg: AugurConfig | None = None) ->
         from conscientia.screens import match_pattern
 
         patterns = charter.teach_patterns(cfg)
-    lines = ["Known facts (taught by the user):"]
+
+    # Screen the full list first (before capping), so a violating fact
+    # inside the raw cap doesn't displace a clean fact beyond it.
     skipped = 0
-    for f in facts[:MAX_INJECTED_TAUGHT_FACTS]:
+    capped_facts = []
+    for f in facts:
         pat = f.get("pattern") or {}
-        doms = "+".join(pat.get("domains") or [])
         note = f.get("rationale") or pat.get("rule_key") or ""
         if screen and match_pattern(note, patterns) is not None:
             skipped += 1
             continue
-        lines.append(f"- {doms}: {note}")
+        capped_facts.append(f)
+        if len(capped_facts) >= MAX_INJECTED_TAUGHT_FACTS:
+            break
+
     if skipped:
         log.warning("conscientia: skipped %d taught fact(s) from the prompt", skipped)
+
+    # Return empty string if screening eliminated everything.
+    if not capped_facts:
+        return ""
+
+    lines = ["Known facts (taught by the user):"]
+    for f in capped_facts:
+        pat = f.get("pattern") or {}
+        doms = "+".join(pat.get("domains") or [])
+        note = f.get("rationale") or pat.get("rule_key") or ""
+        lines.append(f"- {doms}: {note}")
     return "\n".join(lines)[:TAUGHT_FACTS_CHAR_BUDGET]
 
 

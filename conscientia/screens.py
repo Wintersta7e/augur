@@ -37,9 +37,6 @@ def match_pattern(text: str, patterns: tuple[str, ...]) -> str | None:
     return None
 
 
-_match = match_pattern  # legacy alias
-
-
 def screen_advice_text(text, cfg) -> Verdict:
     """Valence screen for any outgoing user-facing text (advice, notes)."""
     if not getattr(cfg, "conscientia_enabled", True) or not getattr(

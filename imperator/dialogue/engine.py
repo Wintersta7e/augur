@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable
 
+from conscientia import screens
 from imperator.dialogue import context as C, intents as I, persona, router as R
 
 log = logging.getLogger(__name__)
@@ -311,15 +312,53 @@ async def _resolve_pending(
 async def _handle_intent(
     intent: dict, base_reply: str, ctx, session_id: str, user_text: str, *, pm, cfg
 ) -> DialogueTurn:
-    """Validate and route a freshly parsed intent: dispatch to undo, route a
-    new pending proposal awaiting confirmation, or fall back to a
+    """Validate and route a freshly parsed intent: dispatch to undo, screen
+    and route a new pending proposal awaiting confirmation, or fall back to a
     clarification reply on an invalid intent. Never applies anything itself
     -- undo (like every other kind) only ever creates a pending here; the
-    actual apply/reversal happens at confirm time in ``_resolve_pending``."""
+    actual apply/reversal happens at confirm time in ``_resolve_pending``.
+
+    Teach intents (``teach_semantic_fact``/``teach_context_directive``) run
+    through Conscientia's teach-time value screen here rather than inside
+    ``router.route()``: route() is a pure translation layer with no Redis
+    access (pinned by test_dialogue_invariants.py::
+    test_route_is_pure_no_state_writes; its own docstring says pm/cfg are
+    accepted only for interface symmetry). This is the earliest point where
+    the validated intent fields, ``pm``, and ``session_id`` are all in scope
+    together for the best-effort violation write. A screen refusal raises
+    ValueError, reusing the same except-ValueError-to-truthful-reply seam as
+    every other route() rejection (e.g. teach_context_directive's missing-
+    focused-app check).
+    """
     try:
         valid = I.validate_intent(intent)
         if valid["kind"] == "undo":
             return await _handle_undo(session_id, user_text, base_reply, pm=pm, cfg=cfg)
+        if valid["kind"] in ("teach_semantic_fact", "teach_context_directive"):
+            v = screens.screen_taught_content(
+                valid.get("rationale"),
+                (valid.get("action") or {}).get("rule_key"),
+                cfg,
+            )
+            if not v.ok:
+                try:
+                    pm.save_conscientia_violation(
+                        screens.make_violation(
+                            "teach",
+                            v.code or "refused",
+                            v.detail or "",
+                            v.principle or "",
+                            session_id=session_id,
+                        )
+                    )
+                except Exception:
+                    log.warning(
+                        "conscientia violation record failed (non-fatal)",
+                        exc_info=True,
+                    )
+                raise ValueError(
+                    f"I won't store that: {v.detail} (principle: {v.principle})."
+                )
         new_pending = R.route(valid, ctx, pm=pm, cfg=cfg)
         pm.save_dialogue_pending(
             session_id, new_pending, ttl=cfg.dialogue_pending_ttl_s

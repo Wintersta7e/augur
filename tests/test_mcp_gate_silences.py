@@ -32,15 +32,16 @@ async def _list_tools():
 
 
 # ---------------------------------------------------------------------------
-# Tool count assertion (31 tools)
+# Tool count assertion (34 tools)
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_tool_count_is_31():
-    """Tool count must be 31 after adding dialogue tools (dialogue_turn/history/pending)."""
+def test_mcp_tool_count_is_34():
+    """Tool count must be 34 after adding the conscientia tools
+    (get_conscientia_charter/get_conscientia_verdicts/get_conscientia_violations)."""
     tools = asyncio.run(_list_tools())
-    assert len(tools) == 31, (
-        f"Expected 31 MCP tools, got {len(tools)}: {[t.name for t in tools]}"
+    assert len(tools) == 34, (
+        f"Expected 34 MCP tools, got {len(tools)}: {[t.name for t in tools]}"
     )
 
 

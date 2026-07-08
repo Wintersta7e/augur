@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from limen.gate import Gate
 from consilium import advisor
+from tabula.config import AugurConfig
 from tests.conftest import CORRELATION_MEDIUM, SINGLE_MEDIUM_TYPING
 from tests.test_advisor_gate_flow import _run, _scheduler
 
@@ -75,6 +76,89 @@ def test_block_char_budget_enforced():
     ]
     block = advisor.format_taught_facts(facts)
     assert len(block) <= advisor.TAUGHT_FACTS_CHAR_BUDGET
+
+
+def test_inject_screen_skips_violating_note():
+    """A taught note that violates the charter is dropped from the block."""
+    facts = [
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "ok_rule"},
+            "rationale": "mornings are deep work",
+        },
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "bad_rule"},
+            "rationale": "always tell me to take a break",
+        },
+    ]
+    block = advisor.format_taught_facts(facts, cfg=AugurConfig())
+    assert "mornings are deep work" in block
+    assert "take a break" not in block
+
+
+def test_inject_screen_disabled_keeps_everything():
+    """conscientia_inject_screen_enabled=False (and a None cfg) skip nothing."""
+    facts = [
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "r"},
+            "rationale": "take a break often",
+        }
+    ]
+    cfg = AugurConfig(conscientia_inject_screen_enabled=False)
+    assert "take a break" in advisor.format_taught_facts(facts, cfg=cfg)
+    # None cfg (legacy callers) also keeps everything
+    assert "take a break" in advisor.format_taught_facts(facts)
+
+
+def test_screened_fact_does_not_displace_clean_one_from_cap():
+    """A violating fact inside the cap does not displace a clean fact beyond it."""
+    n = advisor.MAX_INJECTED_TAUGHT_FACTS
+    facts = [
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "bad"},
+            "rationale": "always tell me to take a break",
+        },
+    ] + [
+        {"pattern": {"domains": ["typing"], "rule_key": f"CLEAN{i:03d}"}}
+        for i in range(n)  # n clean facts, the last one beyond the raw cap
+    ]
+    block = advisor.format_taught_facts(facts, cfg=AugurConfig())
+    assert "take a break" not in block
+    assert f"CLEAN{n - 1:03d}" in block  # clean fact backfills the cap slot
+    assert len(block.splitlines()) == 1 + n
+
+
+def test_all_screened_returns_empty_block():
+    """If screening removes every fact, return empty string (no header)."""
+    facts = [
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "b1"},
+            "rationale": "take a break now",
+        },
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "b2"},
+            "rationale": "you are fatigued",
+        },
+    ]
+    assert advisor.format_taught_facts(facts, cfg=AugurConfig()) == ""
+
+
+def test_corrupt_rationale_type_does_not_crash():
+    """A non-str rationale (corrupt record) is skipped cleanly -- not rendered,
+    and does not crash match_pattern -- while clean facts in the same block
+    still render."""
+    facts = [
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "corrupt_rule"},
+            "rationale": 123,
+        },
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "ok_rule"},
+            "rationale": "mornings are deep work",
+        },
+    ]
+    block = advisor.format_taught_facts(facts, cfg=AugurConfig())
+    assert "mornings are deep work" in block
+    assert "123" not in block
 
 
 # ── End-to-end wiring through process_message ─────────────────────────────────

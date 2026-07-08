@@ -18,6 +18,11 @@ class _Cfg:
     # read by the pre-arm escalation patch validation (window range check)
     correlation_window_min_s = 5.0
     correlation_window_max_s = 120.0
+    # read by conscientia's pre-apply screen (charter.output_patterns) for
+    # every prompt_strategy proposal: _Cfg has no conscientia_enabled, and
+    # the screen's own gate check defaults MISSING flags to True (on), so
+    # the pattern tuple is always built here -- must not AttributeError.
+    conscientia_output_extra_patterns = ()
 
 
 def _safe(p):

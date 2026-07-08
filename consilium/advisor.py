@@ -46,6 +46,7 @@ from consilium.app_descriptor import (
     descriptor_suffix,
     resolve_app_descriptor,
 )
+from conscientia import screens as conscientia_screens
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -139,6 +140,83 @@ def format_taught_facts(facts: list[dict], *, cfg: AugurConfig | None = None) ->
         note = f.get("rationale") or pat.get("rule_key") or ""
         lines.append(f"- {doms}: {note}")
     return "\n".join(lines)[:TAUGHT_FACTS_CHAR_BUDGET]
+
+
+async def conscientia_finalize_text(
+    text,
+    prompt,
+    *,
+    query_ollama,
+    http_client,
+    config,
+    pm,
+    nc,
+    decision,
+    domain,
+    entity,
+    session_id,
+):
+    """S2: valence-screen outgoing text; one corrective regeneration, then
+    block. Fail-OPEN on screen errors (invariant C3: a Conscientia bug must
+    not silence the pipeline). Returns ``(final_text | None, regenerated)`` —
+    a ``None`` final_text means BLOCKED: the violation is recorded + published
+    and the caller must not deliver and must not touch gate state (spec D10).
+    """
+    try:
+        verdict = conscientia_screens.screen_advice_text(text, config)
+        if verdict.ok:
+            return text, False
+        retries = (
+            config.conscientia_regenerate_max
+            if config.conscientia_regenerate_on_violation
+            else 0
+        )
+        for _ in range(retries):
+            retry_prompt = prompt + conscientia_screens.CORRECTIVE_SUFFIX.format(
+                matched=verdict.detail
+            )
+            text2, _latency = await query_ollama(retry_prompt, http_client, config)
+            v2 = conscientia_screens.screen_advice_text(text2, config)
+            if v2.ok:
+                return text2, True
+            verdict = v2
+        # Blocked: record + publish, deliver nothing, touch no gate state.
+        record = conscientia_screens.make_violation(
+            "advice",
+            verdict.code or "forbidden_valence",
+            verdict.detail or "",
+            verdict.principle or "restraint",
+            decision_id=getattr(decision, "id", None),
+            state_key=getattr(decision, "state_key", None),
+            domain=domain,
+            entity=entity,
+            session_id=session_id,
+            regenerated=retries > 0,
+        )
+        try:
+            pm.save_conscientia_violation(record)
+        except Exception:
+            log.warning("conscientia violation record failed", exc_info=True)
+        try:
+            await nc.publish(
+                "augur.conscientia.violation",
+                json.dumps(record, default=str).encode(),
+            )
+        except Exception:
+            log.warning("conscientia violation publish failed", exc_info=True)
+        log.warning(
+            "conscientia blocked %s delivery for %s/%s: %s",
+            record["surface"],
+            domain,
+            entity,
+            verdict.detail,
+        )
+        return None, retries > 0
+    except Exception:
+        log.warning(
+            "conscientia output screen failed; delivering unscreened", exc_info=True
+        )
+        return text, False
 
 
 # Gate visibility subjects (spec §8). Distinct subjects so the MRT control arm
@@ -919,12 +997,33 @@ async def _build_prompt_and_deliver(
         )
         return
 
+    # ── conscientia output screen (S2) — valence-screen the advice, one
+    #    corrective regeneration, else block (spec D10: no publish, no gate
+    #    mutation on block; fail-open on any screen error, invariant C3). ──
+    advice, conscientia_regenerated = await conscientia_finalize_text(
+        advice,
+        prompt,
+        query_ollama=query_ollama_fn,
+        http_client=http_client,
+        config=config,
+        pm=pm,
+        nc=nc,
+        decision=decision,
+        domain=domain,
+        entity=signature.entity,
+        session_id=_resolve_session_id(redis_client),
+    )
+    if advice is None:
+        return  # blocked: no publish, no record_delivery_success (spec D10)
+
     # ── publish advice ──
     advice_payload = _build_advice_event(
         payload, advice_text=advice, model_used=config.ollama_model, decision=decision
     )
     advice_payload["latency_ms"] = round(latency_ms, 1)
     advice_payload["tier"] = tier
+    if conscientia_regenerated:
+        advice_payload["conscientia_regenerated"] = True
     try:
         await nc.publish(PUBLISH_SUBJECT, json.dumps(advice_payload).encode())
         log.info("Published advice to %s", PUBLISH_SUBJECT)
@@ -953,19 +1052,48 @@ async def _publish_tier1_note(
     decision: GateDecision,
     nc: nats.aio.client.Client,
     config: AugurConfig,
-) -> None:
-    """Publish a templated Tier-1 note on ``augur.consilium.advice`` (tier=1)."""
+    pm: PersistenceManager,
+    http_client: httpx.AsyncClient,
+    query_ollama_fn: Callable,
+    redis_client: redis.Redis | None,
+) -> bool:
+    """Publish a templated Tier-1 note on ``augur.consilium.advice`` (tier=1).
+
+    Returns ``True`` when the note was published, ``False`` when Conscientia
+    blocked it. The note is valence-screened through the same output surface as
+    full advice (spec D10); on a block the caller must skip
+    ``record_delivery_success`` (no gate mutation).
+    """
+    note_text = (
+        f"(Tier-1 note) A {signature.severity} {signature.domain} signal was "
+        f"observed on {signature.entity}; no full analysis was warranted."
+    )
+    note_text, conscientia_regenerated = await conscientia_finalize_text(
+        note_text,
+        note_text,
+        query_ollama=query_ollama_fn,
+        http_client=http_client,
+        config=config,
+        pm=pm,
+        nc=nc,
+        decision=decision,
+        domain=signature.domain,
+        entity=signature.entity,
+        session_id=_resolve_session_id(redis_client),
+    )
+    if note_text is None:
+        return False  # blocked: no note publish, no gate mutation (spec D10)
     note = _build_advice_event(
         payload,
-        advice_text=(
-            f"(Tier-1 note) A {signature.severity} {signature.domain} signal was "
-            f"observed on {signature.entity}; no full analysis was warranted."
-        ),
+        advice_text=note_text,
         model_used="tier1-template",
         decision=decision,
     )
     note["tier"] = 1
+    if conscientia_regenerated:
+        note["conscientia_regenerated"] = True
     await nc.publish(PUBLISH_SUBJECT, json.dumps(note).encode())
+    return True
 
 
 async def process_message(
@@ -1046,12 +1174,16 @@ async def process_message(
     # ── downgrade → Tier-1 note ──
     if decision.action == "downgrade":
         try:
-            await _publish_tier1_note(
+            delivered = await _publish_tier1_note(
                 payload=payload,
                 signature=signature,
                 decision=decision,
                 nc=nc,
                 config=config,
+                pm=pm,
+                http_client=http_client,
+                query_ollama_fn=query_ollama,
+                redis_client=redis_client,
             )
         except Exception as exc:
             log.error("tier-1 note publish failed: %s", exc)
@@ -1063,6 +1195,8 @@ async def process_message(
                 decision.id,
             )
             return
+        if not delivered:
+            return  # conscientia blocked the note (spec D10): no gate mutation
         _safe(
             gate.record_delivery_success,
             signature,

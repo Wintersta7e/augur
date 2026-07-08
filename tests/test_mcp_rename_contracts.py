@@ -131,3 +131,29 @@ def test_dialogue_tools_and_subjects_present():
     assert "augur.imperator.ii.trigger" in engine_src
     # Keys live under the imperator.dialogue namespace via PersistenceManager.
     assert "augur:imperator:dialogue:" in inspect.getsource(PersistenceManager)
+
+
+def test_conscientia_tools_and_subjects_present():
+    # The conscientia charter/verdict/violation MCP tools are pure inspection --
+    # augur_server itself never publishes or writes conscientia state, it only
+    # renders the charter and reads via PersistenceManager. Pin tool presence
+    # here plus the underlying subjects (published by conscientia.auditor and
+    # consilium.advisor, not augur_server) and keys (tabula.persistence), so a
+    # rename in any of those modules fails this file too.
+    src = inspect.getsource(srv)
+    for tool in (
+        "get_conscientia_charter",
+        "get_conscientia_verdicts",
+        "get_conscientia_violations",
+    ):
+        assert f"def {tool}(" in src
+
+    from conscientia import auditor as conscientia_auditor
+    from consilium import advisor as consilium_advisor
+
+    assert "augur.conscientia.verdict" in inspect.getsource(conscientia_auditor)
+    assert "augur.conscientia.violation" in inspect.getsource(consilium_advisor)
+
+    persistence_src = inspect.getsource(PersistenceManager)
+    assert "augur:conscientia:verdicts" in persistence_src
+    assert "augur:conscientia:violations" in persistence_src

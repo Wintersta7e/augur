@@ -8,6 +8,7 @@ import time
 import uuid as _uuid
 
 from consilium.prompt_safety import is_prompt_acceptable
+from conscientia import screens
 from memoria.fsrs import make_memory_id
 from nexus import matrix_ops
 from imperator import proposals as P
@@ -50,6 +51,43 @@ def _arm_gate(pm, p: dict, *, cfg) -> bool:
             exc_info=True,
         )
         return False
+
+
+def _conscientia_refuses(pm, p: dict, *, cfg) -> bool:
+    """S4 pre-apply value screen (spec D6: fail-CLOSED — for self-modification
+    the safe direction is not applying). Returns True when the apply must be
+    refused; records the violation best-effort."""
+    try:
+        v = screens.screen_proposal(p, cfg)
+    except Exception:
+        log.warning(
+            "conscientia proposal screen failed for %s/%s; refusing apply "
+            "(fail-closed)",
+            p.get("kind"),
+            p.get("target"),
+            exc_info=True,
+        )
+        return True
+    if v.ok:
+        return False
+    try:
+        pm.save_conscientia_violation(
+            screens.make_violation(
+                "apply",
+                v.code or "refused",
+                v.detail or "",
+                v.principle or "",
+            )
+        )
+    except Exception:
+        log.warning("conscientia violation record failed (non-fatal)", exc_info=True)
+    log.info(
+        "conscientia refused apply for %s/%s: %s",
+        p.get("kind"),
+        p.get("target"),
+        v.detail,
+    )
+    return True
 
 
 def _escalation_patch_error(p: dict, *, cfg) -> str | None:
@@ -251,6 +289,9 @@ def apply_proposal(
     if pm.is_proposal_applied(p["dedupe_key"]):
         p["status"] = "skipped"
         return p
+    if _conscientia_refuses(pm, p, cfg=cfg):
+        p["status"] = "logged"
+        return p
     try:
         if p["kind"] == "escalation_rule":
             # Validate the isolated patch FIRST: a malformed patch commits
@@ -451,6 +492,9 @@ def _apply_confirmed(pm, p: dict, *, cfg, session_id: str | None) -> dict:
         p["status"] = "logged"
         return p
     if p.get("klass") != "safe" or p.get("kind") not in P._CONFIRMED_APPLY_KINDS:
+        p["status"] = "logged"
+        return p
+    if _conscientia_refuses(pm, p, cfg=cfg):
         p["status"] = "logged"
         return p
     try:

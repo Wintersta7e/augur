@@ -826,6 +826,38 @@ def get_proposals(limit: int = 50) -> dict[str, Any]:
         return {"proposals": pm.load_proposals(limit=max(1, min(limit, 200)))}
 
 
+@mcp.tool()
+@_tool_safe
+def get_conscientia_charter() -> dict[str, Any]:
+    """Render the Conscientia charter (principles, protected surfaces).
+
+    Pure code/data — the charter is deliberately not stored in Redis and has
+    no write path (invariant C1)."""
+    from conscientia.charter import render_charter
+
+    return render_charter()
+
+
+@mcp.tool()
+@_tool_safe
+def get_conscientia_verdicts(limit: int = 20) -> dict[str, Any]:
+    """Newest-first gated-review verdicts (recommendation reject/needs_human)."""
+    limit = max(1, min(limit, 200))
+    with _persistence_ctx() as pm:
+        verdicts = pm.load_conscientia_verdicts(limit=limit)
+    return {"verdicts": verdicts, "count": len(verdicts)}
+
+
+@mcp.tool()
+@_tool_safe
+def get_conscientia_violations(limit: int = 20) -> dict[str, Any]:
+    """Newest-first screen violations (blocked advice, refused teachings)."""
+    limit = max(1, min(limit, 500))
+    with _persistence_ctx() as pm:
+        violations = pm.load_conscientia_violations(limit=limit)
+    return {"violations": violations, "count": len(violations)}
+
+
 # ---------------------------------------------------------------------------
 # Dialogue tools (Imperator III)
 # ---------------------------------------------------------------------------

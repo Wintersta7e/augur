@@ -155,6 +155,7 @@ async def conscientia_finalize_text(
     domain,
     entity,
     session_id,
+    state_key=None,
 ):
     """S2: valence-screen outgoing text; one corrective regeneration, then
     block. Fail-OPEN on screen errors (invariant C3: a Conscientia bug must
@@ -175,7 +176,14 @@ async def conscientia_finalize_text(
             retry_prompt = prompt + conscientia_screens.CORRECTIVE_SUFFIX.format(
                 matched=verdict.detail
             )
-            text2, _latency = await query_ollama(retry_prompt, http_client, config)
+            try:
+                text2, _latency = await query_ollama(retry_prompt, http_client, config)
+            except Exception:
+                log.warning(
+                    "conscientia regeneration call failed; proceeding to block",
+                    exc_info=True,
+                )
+                break  # degrade: no retry result -> fall through to block
             v2 = conscientia_screens.screen_advice_text(text2, config)
             if v2.ok:
                 return text2, True
@@ -187,7 +195,7 @@ async def conscientia_finalize_text(
             verdict.detail or "",
             verdict.principle or "restraint",
             decision_id=getattr(decision, "id", None),
-            state_key=getattr(decision, "state_key", None),
+            state_key=state_key,
             domain=domain,
             entity=entity,
             session_id=session_id,
@@ -1012,6 +1020,7 @@ async def _build_prompt_and_deliver(
         domain=domain,
         entity=signature.entity,
         session_id=_resolve_session_id(redis_client),
+        state_key=signature.state_key,
     )
     if advice is None:
         return  # blocked: no publish, no record_delivery_success (spec D10)
@@ -1080,6 +1089,7 @@ async def _publish_tier1_note(
         domain=signature.domain,
         entity=signature.entity,
         session_id=_resolve_session_id(redis_client),
+        state_key=signature.state_key,
     )
     if note_text is None:
         return False  # blocked: no note publish, no gate mutation (spec D10)

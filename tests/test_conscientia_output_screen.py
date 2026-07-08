@@ -95,9 +95,48 @@ async def test_forbidden_advice_blocked_after_failed_retry(fake_pm, cfg) -> None
     assert violations[0]["domain"] == "typing"
     assert violations[0]["entity"] == "user"
     assert violations[0]["decision_id"]  # non-empty decision linkage
+    # Join axis: state_key comes from the gate Signature (single:{domain}:
+    # {entity}), NOT GateDecision (which has no such field).
+    assert violations[0]["state_key"] == "single:typing:user"
     # Exactly one violation event published.
     assert len(_published_on(nc, VIOLATION_SUBJECT)) == 1
     # Original + one regeneration attempt.
+    assert query_ollama.await_count == 2
+    # Gate delivery-success NOT recorded (spec D10) → no emission.
+    assert fake_pm.load_emissions(limit=10) == []
+
+
+async def test_retry_llm_failure_blocks(fake_pm, cfg) -> None:
+    gate, cfg2 = _fire_gate(cfg)
+    nc = _nc()
+    # Forbidden first reply; the regeneration LLM call itself raises. Spec
+    # failure-mode table: "Regeneration LLM call fails/times out -> degrade ->
+    # skip retry, proceed to block" — it must NOT fail open to the ORIGINAL
+    # forbidden text via the helper's outer except.
+    query_ollama = AsyncMock(
+        side_effect=[("please take a break now", 1.0), RuntimeError("ollama down")]
+    )
+    await _run(
+        payload=SINGLE_MEDIUM_TYPING,
+        gate=gate,
+        scheduler=_scheduler(),
+        pm=fake_pm,
+        nc=nc,
+        http_client=MagicMock(),
+        config=cfg2,
+        query_ollama=query_ollama,
+    )
+
+    # No advice published — the forbidden original must never leak out.
+    assert _published_on(nc, advisor.PUBLISH_SUBJECT) == []
+    # Exactly one violation record; a retry was attempted (it just failed).
+    violations = fake_pm.load_conscientia_violations(limit=10)
+    assert len(violations) == 1
+    assert violations[0]["surface"] == "advice"
+    assert violations[0]["regenerated"] is True
+    # Violation publish was attempted.
+    assert len(_published_on(nc, VIOLATION_SUBJECT)) == 1
+    # Original call + the failed regeneration attempt — no further retries.
     assert query_ollama.await_count == 2
     # Gate delivery-success NOT recorded (spec D10) → no emission.
     assert fake_pm.load_emissions(limit=10) == []
@@ -211,3 +250,35 @@ async def test_note_path_also_screened(fake_pm, cfg) -> None:
     assert query_ollama.await_count == 0
     # Gate delivery-success NOT recorded (spec D10) → no tier-1 emission.
     assert fake_pm.load_emissions(limit=10) == []
+
+
+async def test_note_path_violation_carries_state_key(fake_pm, cfg) -> None:
+    # Finding-2 coverage for the SECOND conscientia_finalize_text call site
+    # (the tier-1 note path, ``_publish_tier1_note``) — state_key must come
+    # from the same gate Signature there too, not just on the tier-2 path.
+    cfg2 = replace(
+        cfg,
+        conscientia_output_extra_patterns=("no full analysis",),
+        conscientia_regenerate_on_violation=False,
+    )
+    gate = Gate(config=cfg2)
+    d = GateDecision.downgrade(
+        "cost_tier_downgrade", deciding_arm="cost_tier_router", tier=1
+    )
+    gate.evaluate = lambda *a, **k: d  # type: ignore[assignment]
+    nc = _nc()
+    query_ollama = AsyncMock(return_value=("clean", 1.0))
+    await _run(
+        payload=SINGLE_MEDIUM_TYPING,
+        gate=gate,
+        scheduler=_scheduler(),
+        pm=fake_pm,
+        nc=nc,
+        http_client=MagicMock(),
+        config=cfg2,
+        query_ollama=query_ollama,
+    )
+
+    violations = fake_pm.load_conscientia_violations(limit=10)
+    assert len(violations) == 1
+    assert violations[0]["state_key"] == "single:typing:user"

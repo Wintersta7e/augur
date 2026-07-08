@@ -29,12 +29,15 @@ class Verdict:
     principle: str | None = None
 
 
-def _match(text: str, patterns: tuple[str, ...]) -> str | None:
+def match_pattern(text: str, patterns: tuple[str, ...]) -> str | None:
     low = text.lower()
     for pat in patterns:
         if pat and pat.lower() in low:
             return pat
     return None
+
+
+_match = match_pattern  # legacy alias
 
 
 def screen_advice_text(text, cfg) -> Verdict:
@@ -45,7 +48,7 @@ def screen_advice_text(text, cfg) -> Verdict:
         return Verdict(True)
     if not isinstance(text, str) or not text:
         return Verdict(True)
-    hit = _match(text, charter.output_patterns(cfg))
+    hit = match_pattern(text, charter.output_patterns(cfg))
     if hit is None:
         return Verdict(True)
     return Verdict(False, "forbidden_valence", f"matched {hit!r}", "restraint")
@@ -60,7 +63,7 @@ def screen_taught_content(rationale, rule_key, cfg) -> Verdict:
     pats = charter.teach_patterns(cfg)
     for field in (rationale, rule_key):
         if isinstance(field, str) and field:
-            hit = _match(field, pats)
+            hit = match_pattern(field, pats)
             if hit is not None:
                 return Verdict(
                     False, "forbidden_valence", f"matched {hit!r}", "restraint"
@@ -109,7 +112,7 @@ def screen_proposal(p: dict, cfg) -> Verdict:
     if kind == "prompt_strategy":
         text = (p.get("action") or {}).get("text", "")
         hit = (
-            _match(text, charter.output_patterns(cfg))
+            match_pattern(text, charter.output_patterns(cfg))
             if isinstance(text, str)
             else None
         )

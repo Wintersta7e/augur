@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from limen.gate import Gate
 from consilium import advisor
+from tabula.config import AugurConfig
 from tests.conftest import CORRELATION_MEDIUM, SINGLE_MEDIUM_TYPING
 from tests.test_advisor_gate_flow import _run, _scheduler
 
@@ -75,6 +76,37 @@ def test_block_char_budget_enforced():
     ]
     block = advisor.format_taught_facts(facts)
     assert len(block) <= advisor.TAUGHT_FACTS_CHAR_BUDGET
+
+
+def test_inject_screen_skips_violating_note():
+    """A taught note that violates the charter is dropped from the block."""
+    facts = [
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "ok_rule"},
+            "rationale": "mornings are deep work",
+        },
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "bad_rule"},
+            "rationale": "always tell me to take a break",
+        },
+    ]
+    block = advisor.format_taught_facts(facts, cfg=AugurConfig())
+    assert "mornings are deep work" in block
+    assert "take a break" not in block
+
+
+def test_inject_screen_disabled_keeps_everything():
+    """conscientia_inject_screen_enabled=False (and a None cfg) skip nothing."""
+    facts = [
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "r"},
+            "rationale": "take a break often",
+        }
+    ]
+    cfg = AugurConfig(conscientia_inject_screen_enabled=False)
+    assert "take a break" in advisor.format_taught_facts(facts, cfg=cfg)
+    # None cfg (legacy callers) also keeps everything
+    assert "take a break" in advisor.format_taught_facts(facts)
 
 
 # ── End-to-end wiring through process_message ─────────────────────────────────

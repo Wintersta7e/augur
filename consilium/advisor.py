@@ -77,20 +77,48 @@ MAX_INJECTED_TAUGHT_FACTS = 12
 TAUGHT_FACTS_CHAR_BUDGET = 2400
 
 
-def format_taught_facts(facts: list[dict]) -> str:
+def format_taught_facts(facts: list[dict], *, cfg: AugurConfig | None = None) -> str:
     """Format taught facts into a block to inject into advice prompts.
 
     Returns empty string if facts list is empty. Caps at
     MAX_INJECTED_TAUGHT_FACTS facts and TAUGHT_FACTS_CHAR_BUDGET chars.
+
+    ``cfg=None`` (the default) skips screening entirely, preserving every
+    existing caller/test. When a cfg is given and both
+    ``conscientia_inject_screen_enabled`` and the master ``conscientia_enabled``
+    flag are on, a fact whose note (rationale, falling back to rule_key)
+    matches a charter teach-pattern is dropped from the block. This checks
+    patterns directly via ``charter.teach_patterns`` rather than calling
+    ``screen_taught_content`` (which self-gates on
+    ``conscientia_teach_screen_enabled``) so the inject surface stays
+    independent of the teach-time screen's on/off state. Log-only: no
+    violation record is written for this surface.
     """
     if not facts:
         return ""
+    screen = (
+        cfg is not None
+        and getattr(cfg, "conscientia_inject_screen_enabled", True)
+        and getattr(cfg, "conscientia_enabled", True)
+    )
+    patterns = ()
+    if screen:
+        from conscientia import charter
+        from conscientia.screens import match_pattern
+
+        patterns = charter.teach_patterns(cfg)
     lines = ["Known facts (taught by the user):"]
+    skipped = 0
     for f in facts[:MAX_INJECTED_TAUGHT_FACTS]:
         pat = f.get("pattern") or {}
         doms = "+".join(pat.get("domains") or [])
         note = f.get("rationale") or pat.get("rule_key") or ""
+        if screen and match_pattern(note, patterns) is not None:
+            skipped += 1
+            continue
         lines.append(f"- {doms}: {note}")
+    if skipped:
+        log.warning("conscientia: skipped %d taught fact(s) from the prompt", skipped)
     return "\n".join(lines)[:TAUGHT_FACTS_CHAR_BUDGET]
 
 
@@ -816,7 +844,9 @@ async def _build_prompt_and_deliver(
         if path == "correlation":
             prompt = build_correlation_prompt(payload)
             doms = payload.get("involved_domains", [])
-            facts_block = format_taught_facts(pm.load_taught_facts_for_domains(doms))
+            facts_block = format_taught_facts(
+                pm.load_taught_facts_for_domains(doms), cfg=config
+            )
             if facts_block:
                 prompt = f"{facts_block}\n\n{prompt}"
         else:
@@ -827,7 +857,7 @@ async def _build_prompt_and_deliver(
                 f"You are an analyst monitoring '{domain}' data. An anomaly was detected.",
             )
             facts_block = format_taught_facts(
-                pm.load_taught_facts_for_domains([domain])
+                pm.load_taught_facts_for_domains([domain]), cfg=config
             )
             if facts_block:
                 system_prompt = f"{facts_block}\n\n{system_prompt}"

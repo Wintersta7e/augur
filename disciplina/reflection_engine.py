@@ -1509,6 +1509,24 @@ async def run_reflection(
         memory = {"analysis": "memory", "error": "exception", "reason": str(exc)}
         log.error("Memory sweep failed: %s", exc)
 
+    # 8. Conscientia review pass (Task 11) — offline audit of any GATED
+    # proposals Imperator II has raised since the last reflection. The
+    # auditor self-gates on config.conscientia_enabled (returns the
+    # zero-shape result when disabled), so it is called unconditionally here
+    # — same try/except discipline as the Memory spine pass above.
+    try:
+        from conscientia.auditor import run_conscientia_review
+
+        conscientia = await run_conscientia_review(pm, nc, config)
+        log.info(
+            "Conscientia review: %d proposal(s) reviewed, recommendations=%s",
+            conscientia.get("reviewed", 0),
+            conscientia.get("recommendations"),
+        )
+    except Exception as exc:
+        conscientia = {"error": str(exc)}
+        log.warning("Conscientia review failed (non-fatal): %s", exc)
+
     # Build report
     report = {
         "session_id": session_id,
@@ -1522,6 +1540,7 @@ async def run_reflection(
             "gate": gate,
             "memory": memory,
         },
+        "conscientia": conscientia,
         "adjustments": {
             "sigma_adjusted": any_sigma_adjusted,
             "sigma_values": sigma_values_after,

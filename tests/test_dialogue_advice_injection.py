@@ -142,6 +142,25 @@ def test_all_screened_returns_empty_block():
     assert advisor.format_taught_facts(facts, cfg=AugurConfig()) == ""
 
 
+def test_corrupt_rationale_type_does_not_crash():
+    """A non-str rationale (corrupt record) is skipped cleanly -- not rendered,
+    and does not crash match_pattern -- while clean facts in the same block
+    still render."""
+    facts = [
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "corrupt_rule"},
+            "rationale": 123,
+        },
+        {
+            "pattern": {"domains": ["typing"], "rule_key": "ok_rule"},
+            "rationale": "mornings are deep work",
+        },
+    ]
+    block = advisor.format_taught_facts(facts, cfg=AugurConfig())
+    assert "mornings are deep work" in block
+    assert "123" not in block
+
+
 # ── End-to-end wiring through process_message ─────────────────────────────────
 #
 # Reuses the gate-flow harness: process_message driven with a mocked

@@ -53,6 +53,8 @@ def test_screened_prompt_text_refused_before_arm():
     assert pm.is_proposal_applied(p["dedupe_key"]) is False  # never armed
     viols = pm.load_conscientia_violations(limit=5)
     assert viols and viols[0]["surface"] == "apply"
+    assert viols[0]["state_key"] == "prompt_strategy:typing"
+    assert viols[0]["session_id"] == "s"
 
 
 def test_clean_apply_still_works():

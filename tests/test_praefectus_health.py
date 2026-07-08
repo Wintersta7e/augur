@@ -67,6 +67,108 @@ def test_record_activity_window_and_last_event():
     assert window.advice and window.suppressed and window.delivery_failure
 
 
+def test_record_activity_conscientia_advice_violation_is_a_terminal():
+    # Finding: a Conscientia block on the advice surface (spec D10) emits ONLY
+    # augur.conscientia.violation -- no augur.consilium.advice/suppressed/
+    # delivery_failure. It must still count as a consilium terminal.
+    states = H.initial_states(1000.0)
+    window = H.ActivityWindow()
+    cfg = _Cfg()
+    H.record_activity(
+        states,
+        window,
+        "augur.conscientia.violation",
+        {"surface": "advice"},
+        1012.0,
+        cfg,
+    )
+    assert window.conscientia_block == [1012.0]
+
+
+def test_record_activity_conscientia_non_advice_violation_not_a_terminal():
+    # A violation on a non-advice surface (e.g. "teach") is not a consilium-advice
+    # terminal and must not be counted.
+    states = H.initial_states(1000.0)
+    window = H.ActivityWindow()
+    cfg = _Cfg()
+    H.record_activity(
+        states,
+        window,
+        "augur.conscientia.violation",
+        {"surface": "teach"},
+        1012.0,
+        cfg,
+    )
+    assert window.conscientia_block == []
+    assert not window.advice and not window.suppressed and not window.delivery_failure
+
+
+def test_stall_signal_conscientia_advice_block_not_a_stall():
+    # Regression for the false consilium_stall: two MEDIUM detections, each
+    # answered only by an advice-surface Conscientia block, must NOT read as a
+    # stall -- consilium serviced both; Conscientia refused the output.
+    states = H.initial_states(1000.0)
+    window = H.ActivityWindow()
+    cfg = _Cfg()
+    H.record_activity(
+        states,
+        window,
+        "augur.nexus.detected",
+        {"combined_severity": "MEDIUM"},
+        750.0,
+        cfg,
+    )
+    H.record_activity(
+        states, window, "augur.conscientia.violation", {"surface": "advice"}, 751.0, cfg
+    )
+    H.record_activity(
+        states,
+        window,
+        "augur.nexus.detected",
+        {"combined_severity": "MEDIUM"},
+        760.0,
+        cfg,
+    )
+    H.record_activity(
+        states, window, "augur.conscientia.violation", {"surface": "advice"}, 761.0, cfg
+    )
+    v = H.stall_signal(window, 1000.0, cfg)
+    assert v.degraded is False
+    assert "consilium_stall" not in v.reasons
+
+
+def test_stall_signal_conscientia_teach_violation_still_stalls():
+    # Same two detections, but the only conscientia events are teach-surface --
+    # those must not rescue a genuine stall.
+    states = H.initial_states(1000.0)
+    window = H.ActivityWindow()
+    cfg = _Cfg()
+    H.record_activity(
+        states,
+        window,
+        "augur.nexus.detected",
+        {"combined_severity": "MEDIUM"},
+        750.0,
+        cfg,
+    )
+    H.record_activity(
+        states, window, "augur.conscientia.violation", {"surface": "teach"}, 751.0, cfg
+    )
+    H.record_activity(
+        states,
+        window,
+        "augur.nexus.detected",
+        {"combined_severity": "MEDIUM"},
+        760.0,
+        cfg,
+    )
+    H.record_activity(
+        states, window, "augur.conscientia.violation", {"surface": "teach"}, 761.0, cfg
+    )
+    v = H.stall_signal(window, 1000.0, cfg)
+    assert v.degraded and "consilium_stall" in v.reasons
+
+
 def test_liveness_alive_stale_dead():
     cfg = _Cfg()
     st = H.FacultyHealth("vigil", required=True, seen=True, last_heartbeat=1000.0)

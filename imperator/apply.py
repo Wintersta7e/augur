@@ -53,10 +53,11 @@ def _arm_gate(pm, p: dict, *, cfg) -> bool:
         return False
 
 
-def _conscientia_refuses(pm, p: dict, *, cfg) -> bool:
+def _conscientia_refuses(pm, p: dict, *, cfg, session_id: str | None = None) -> bool:
     """S4 pre-apply value screen (spec D6: fail-CLOSED — for self-modification
     the safe direction is not applying). Returns True when the apply must be
-    refused; records the violation best-effort."""
+    refused; records the violation best-effort.
+    """
     try:
         v = screens.screen_proposal(p, cfg)
     except Exception:
@@ -77,6 +78,8 @@ def _conscientia_refuses(pm, p: dict, *, cfg) -> bool:
                 v.code or "refused",
                 v.detail or "",
                 v.principle or "",
+                state_key=f"{p.get('kind')}:{p.get('target')}",
+                session_id=session_id,
             )
         )
     except Exception:
@@ -289,7 +292,7 @@ def apply_proposal(
     if pm.is_proposal_applied(p["dedupe_key"]):
         p["status"] = "skipped"
         return p
-    if _conscientia_refuses(pm, p, cfg=cfg):
+    if _conscientia_refuses(pm, p, cfg=cfg, session_id=session_id):
         p["status"] = "logged"
         return p
     try:
@@ -494,7 +497,7 @@ def _apply_confirmed(pm, p: dict, *, cfg, session_id: str | None) -> dict:
     if p.get("klass") != "safe" or p.get("kind") not in P._CONFIRMED_APPLY_KINDS:
         p["status"] = "logged"
         return p
-    if _conscientia_refuses(pm, p, cfg=cfg):
+    if _conscientia_refuses(pm, p, cfg=cfg, session_id=session_id):
         p["status"] = "logged"
         return p
     try:

@@ -96,7 +96,9 @@ def format_taught_facts(facts: list[dict], *, cfg: AugurConfig | None = None) ->
     calling ``screen_taught_content`` (which self-gates on
     ``conscientia_teach_screen_enabled``) so the inject surface stays
     independent of the teach-time screen's on/off state. Log-only: no
-    violation record is written for this surface.
+    violation record is written for this surface. A fact whose note is not a
+    str (a corrupt record) is skipped the same way, regardless of screening,
+    since match_pattern requires a str and the raw value must not be rendered.
     """
     if not facts:
         return ""
@@ -119,6 +121,11 @@ def format_taught_facts(facts: list[dict], *, cfg: AugurConfig | None = None) ->
     for f in facts:
         pat = f.get("pattern") or {}
         note = f.get("rationale") or pat.get("rule_key") or ""
+        if not isinstance(note, str):
+            # Corrupt record: a truthy non-str rationale would crash
+            # match_pattern and must not be rendered raw either.
+            skipped += 1
+            continue
         if screen and match_pattern(note, patterns) is not None:
             skipped += 1
             continue

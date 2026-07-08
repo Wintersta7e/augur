@@ -66,6 +66,9 @@ class ActivityWindow:
     advice: list[float] = field(default_factory=list)
     suppressed: list[float] = field(default_factory=list)
     delivery_failure: list[float] = field(default_factory=list)
+    conscientia_block: list[float] = field(
+        default_factory=list
+    )  # advice-surface augur.conscientia.violation (spec D10 block; a terminal)
 
 
 @dataclass
@@ -151,6 +154,13 @@ def record_activity(
         window.suppressed.append(now)
     elif subject == "augur.limen.delivery_failure":
         window.delivery_failure.append(now)
+    elif subject == "augur.conscientia.violation":
+        # A Conscientia block on the advice surface (spec D10) is deliberate and
+        # terminal for that detection: consilium serviced it, Conscientia refused
+        # delivery. Count it so it does not read as a stall. Other surfaces (e.g.
+        # "teach") are not consilium-advice terminals and must not count here.
+        if str(payload.get("surface", "")) == "advice":
+            window.conscientia_block.append(now)
 
     _, faculty = classify_event(subject)
     if faculty and faculty in states:
@@ -161,6 +171,7 @@ def record_activity(
     window.advice = [t for t in window.advice if t >= cutoff]
     window.suppressed = [t for t in window.suppressed if t >= cutoff]
     window.delivery_failure = [t for t in window.delivery_failure if t >= cutoff]
+    window.conscientia_block = [t for t in window.conscientia_block if t >= cutoff]
 
 
 def liveness(state: FacultyHealth, now: float, started_at: float, cfg) -> str:
@@ -187,9 +198,10 @@ def liveness(state: FacultyHealth, now: float, started_at: float, cfg) -> str:
 
 
 def stall_signal(window: ActivityWindow, now: float, cfg) -> StallVerdict:
-    """Windowed MEDIUM/HIGH nexus.detected vs {advice|suppressed|delivery_failure}
-    deficit + a delivery_failure spike → degraded, with reasons. Rate-based (not
-    per-event) so anti-starvation coalescing within tolerance does not false-trigger.
+    """Windowed MEDIUM/HIGH nexus.detected vs {advice|suppressed|delivery_failure|
+    conscientia_block} deficit + a delivery_failure spike → degraded, with reasons.
+    Rate-based (not per-event) so anti-starvation coalescing within tolerance does
+    not false-trigger.
 
     consilium_stall counts only detections aged past the servicing grace (one
     ollama_timeout — the worst-case time to turn a detection into a terminal via a
@@ -197,7 +209,9 @@ def stall_signal(window: ActivityWindow, now: float, cfg) -> StallVerdict:
     is in-flight work consilium has not yet had time to service (a long LLM call, or a
     fresh restart), NOT a stall. An idle consilium with no inbound detections never
     trips this — there is no pending work to fail. Terminals still count over the whole
-    window, so a late terminal clears earlier pending work.
+    window, so a late terminal clears earlier pending work. An advice-surface
+    Conscientia block (spec D10) is also a terminal: consilium serviced the
+    detection, Conscientia refused the output — that is not consilium degradation.
     """
     cutoff = now - cfg.effective_stall_window_s
     # servicing grace = one ollama_timeout (cold-start call is the worst case), always
@@ -210,6 +224,7 @@ def stall_signal(window: ActivityWindow, now: float, cfg) -> StallVerdict:
         [t for t in window.advice if t >= cutoff]
         + [t for t in window.suppressed if t >= cutoff]
         + [t for t in window.delivery_failure if t >= cutoff]
+        + [t for t in window.conscientia_block if t >= cutoff]
     )
     dfs = [t for t in window.delivery_failure if t >= cutoff]
     reasons: list[str] = []

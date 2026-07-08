@@ -556,7 +556,8 @@ def _coerce_str_tuple(v: str) -> tuple[str, ...]:
     """Comma-split into a tuple of non-empty stripped strings.
 
     NOT ``tuple(v)`` (which the auto-build loop would assign, splitting a string
-    into characters). Used for AUGUR_PROMPT_FORBIDDEN_PATTERNS.
+    into characters). Used for prompt_forbidden_patterns, conscientia_output_extra_patterns,
+    and conscientia_teach_extra_patterns.
     """
     parts = tuple(p.strip() for p in v.split(",") if p.strip())
     if not parts:

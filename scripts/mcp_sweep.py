@@ -61,6 +61,9 @@ EXPECTED_TOOLS = {
     "get_app_descriptors",
     "get_gate_silences",
     "get_proposals",
+    "get_conscientia_charter",
+    "get_conscientia_verdicts",
+    "get_conscientia_violations",
     "dialogue_turn",
     "dialogue_history",
     "dialogue_pending",
@@ -151,7 +154,7 @@ async def main() -> int:
             tools = await session.list_tools()
             names = {t.name for t in tools.tools}
             row(
-                "list_tools (31 tools)",
+                "list_tools (34 tools)",
                 names == EXPECTED_TOOLS,
                 f"{len(names)} tools, missing={sorted(EXPECTED_TOOLS - names)}, "
                 f"extra={sorted(names - EXPECTED_TOOLS)}",
@@ -283,6 +286,29 @@ async def main() -> int:
                 "get_proposals",
                 "error" not in r,
                 f"count={len(r.get('proposals', []))}",
+            )
+
+            # ---- conscientia surface (charter is pure code/data; verdicts and
+            # violations are legitimately empty right after a flush)
+            r = await call("get_conscientia_charter")
+            row(
+                "get_conscientia_charter",
+                "error" not in r and bool(r.get("principles")),
+                f"version={r.get('version')} principles={len(r.get('principles', []))}",
+            )
+
+            r = await call("get_conscientia_verdicts", {"limit": 5})
+            row(
+                "get_conscientia_verdicts",
+                "error" not in r and "verdicts" in r,
+                f"count={r.get('count')}",
+            )
+
+            r = await call("get_conscientia_violations", {"limit": 5})
+            row(
+                "get_conscientia_violations",
+                "error" not in r and "violations" in r,
+                f"count={r.get('count')}",
             )
 
             r = await call("list_sessions", {"limit": 5})

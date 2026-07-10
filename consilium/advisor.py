@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sys
 import time
 from collections.abc import Callable  # noqa: F401 — PEP-563 deferred annotations
@@ -47,6 +48,7 @@ from consilium.app_descriptor import (
     resolve_app_descriptor,
 )
 from conscientia import screens as conscientia_screens
+from conscientia.recording import record_violation_best_effort
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -61,6 +63,9 @@ log = logging.getLogger("augur_advisor")
 # Constants
 # ---------------------------------------------------------------------------
 SUBSCRIBE_SUBJECT = "augur.nexus.detected"
+# Praesagium forewarnings arrive on their own subject and are consumed through
+# the SAME gated pipeline via on_foreseen (spec 2026-07-09-praesagium §6.3).
+SUBSCRIBE_FORESEEN = "augur.praesagium.foreseen"
 PUBLISH_SUBJECT = "augur.consilium.advice"
 
 
@@ -163,12 +168,18 @@ async def conscientia_finalize_text(
     entity,
     session_id,
     state_key=None,
+    allow_regeneration: bool = True,
 ):
     """S2: valence-screen outgoing text; one corrective regeneration, then
     block. Fail-OPEN on screen errors (invariant C3: a Conscientia bug must
     not silence the pipeline). Returns ``(final_text | None, regenerated)`` —
     a ``None`` final_text means BLOCKED: the violation is recorded + published
     and the caller must not deliver and must not touch gate state (spec D10).
+
+    ``allow_regeneration`` (default ``True``, backwards-compatible) forces
+    ``retries = 0`` when ``False`` so a violating template goes straight to
+    block with no LLM call — the anticipatory lane has no prompt to regenerate
+    against (spec §6.3-4).
     """
     try:
         verdict = conscientia_screens.screen_advice_text(text, config)
@@ -176,7 +187,7 @@ async def conscientia_finalize_text(
             return text, False
         retries = (
             config.conscientia_regenerate_max
-            if config.conscientia_regenerate_on_violation
+            if (allow_regeneration and config.conscientia_regenerate_on_violation)
             else 0
         )
         for _ in range(retries):
@@ -208,10 +219,7 @@ async def conscientia_finalize_text(
             session_id=session_id,
             regenerated=retries > 0,
         )
-        try:
-            pm.save_conscientia_violation(record)
-        except Exception:
-            log.warning("conscientia violation record failed", exc_info=True)
+        record_violation_best_effort(pm, record)
         try:
             await nc.publish(
                 "augur.conscientia.violation",
@@ -728,6 +736,21 @@ def _build_advice_event(
         payload.get("combined_severity", primary.get("severity", "low"))
     ).lower()
 
+    # A forewarning has no "move". On the anticipatory path primary.move and
+    # primary.context.label are unclamped free text, so derive the alias from the
+    # clamp-validated antecedent -> consequent (control-free by construction)
+    # rather than reading them.
+    if payload.get("source") == "anticipatory":
+        block = payload.get("anticipatory") or {}
+        ante, cons = block.get("antecedent"), block.get("consequent")
+        move = (
+            f"{ante} → {cons}"
+            if isinstance(ante, str) and isinstance(cons, str)
+            else None
+        )
+    else:
+        move = primary.get("move", primary.get("context", {}).get("label", "?"))
+
     return {
         "domain": domain,
         "entity": entity,
@@ -745,7 +768,7 @@ def _build_advice_event(
         "escalation_rule": payload.get("escalation_rule"),
         # Compat aliases for console_display and feedback_collector
         "player": primary.get("entity", entity),
-        "move": primary.get("move", primary.get("context", {}).get("label", "?")),
+        "move": move,
         "think_time": primary.get("value", value),
         # Decision-time frozen baseline for the outcome metric (spec 1A/§4.3):
         # the detector emits these pre-update on every anomaly; thread them so
@@ -951,70 +974,101 @@ async def _build_prompt_and_deliver(
     """
     path = resolve_advisor_path(payload)
     domain = signature.domain
-    # ── prompt build ──
-    try:
-        if path == "correlation":
-            prompt = build_correlation_prompt(payload)
-            doms = payload.get("involved_domains", [])
-            facts_block = format_taught_facts(
-                pm.load_taught_facts_for_domains(doms), cfg=config
-            )
-            if facts_block:
-                prompt = f"{facts_block}\n\n{prompt}"
-        else:
-            primary = payload["primary_anomaly"]
-            stored_prompt = pm.load_prompt(domain)
-            system_prompt = stored_prompt or DEFAULT_PROMPTS.get(
-                domain,
-                f"You are an analyst monitoring '{domain}' data. An anomaly was detected.",
-            )
-            facts_block = format_taught_facts(
-                pm.load_taught_facts_for_domains([domain]), cfg=config
-            )
-            if facts_block:
-                system_prompt = f"{facts_block}\n\n{system_prompt}"
-            builder = DOMAIN_HANDLERS.get(domain, build_generic_prompt)
-            prompt = builder(primary, redis_client, system_prompt)
-    except Exception as exc:
-        log.error("Prompt build failed for '%s': %s", domain, exc)
-        _safe(
-            pm.save_delivery_failure, signature, "prompt_build_failed", now, decision.id
-        )
-        await publish_delivery_failure_event(
-            nc, signature, decision.as_fire("prompt_build_failed"), payload
-        )
-        return
 
-    # ── LLM ──
-    try:
-        advice, latency_ms = await query_ollama_fn(prompt, http_client, config)
-    except httpx.ConnectError:
-        log.error("Ollama unreachable at %s", config.ollama_url)
-        _safe(
-            pm.save_delivery_failure, signature, "ollama_unreachable", now, decision.id
-        )
-        await publish_delivery_failure_event(
-            nc, signature, decision.as_fire("ollama_unreachable"), payload
-        )
-        return
-    except httpx.TimeoutException:
-        log.error("Ollama timed out after %ds", config.ollama_timeout)
-        _safe(pm.save_delivery_failure, signature, "ollama_timeout", now, decision.id)
-        await publish_delivery_failure_event(
-            nc, signature, decision.as_fire("ollama_timeout"), payload
-        )
-        return
-    except Exception as exc:
-        log.error("Ollama returned unusable response: %s", exc)
-        _safe(pm.save_delivery_failure, signature, "ollama_error", now, decision.id)
-        await publish_delivery_failure_event(
-            nc, signature, decision.as_fire("ollama_error"), payload
-        )
-        return
+    # ── anticipatory lane (spec §6.3-3): a foreseen forewarning is a
+    #    deterministic template — skip taught-facts, prompt build, and Ollama
+    #    entirely. The LLM-free advice flows into the SAME S2 + publish +
+    #    record path below; regeneration is disabled (no prompt to regenerate
+    #    against — allow_regeneration=False), so a violating template blocks. ──
+    anticipatory = payload.get("source") == "anticipatory"
+    if anticipatory:
+        block = payload.get("anticipatory") or {}
+        advice = block.get("forewarning_text")
+        if not isinstance(advice, str) or not advice:
+            # Defensive: on_foreseen already validated this, but never deliver
+            # (and never mutate gate state) on a missing/empty template.
+            log.warning("anticipatory payload has no forewarning_text; not delivering")
+            return
+        prompt = advice  # unused for S2 (allow_regeneration=False) — no LLM here
+        latency_ms = 0.0
+        model_used = "anticipatory-template"
+    else:
+        model_used = config.ollama_model
+        # ── prompt build ──
+        try:
+            if path == "correlation":
+                prompt = build_correlation_prompt(payload)
+                doms = payload.get("involved_domains", [])
+                facts_block = format_taught_facts(
+                    pm.load_taught_facts_for_domains(doms), cfg=config
+                )
+                if facts_block:
+                    prompt = f"{facts_block}\n\n{prompt}"
+            else:
+                primary = payload["primary_anomaly"]
+                stored_prompt = pm.load_prompt(domain)
+                system_prompt = stored_prompt or DEFAULT_PROMPTS.get(
+                    domain,
+                    f"You are an analyst monitoring '{domain}' data. An anomaly was detected.",
+                )
+                facts_block = format_taught_facts(
+                    pm.load_taught_facts_for_domains([domain]), cfg=config
+                )
+                if facts_block:
+                    system_prompt = f"{facts_block}\n\n{system_prompt}"
+                builder = DOMAIN_HANDLERS.get(domain, build_generic_prompt)
+                prompt = builder(primary, redis_client, system_prompt)
+        except Exception as exc:
+            log.error("Prompt build failed for '%s': %s", domain, exc)
+            _safe(
+                pm.save_delivery_failure,
+                signature,
+                "prompt_build_failed",
+                now,
+                decision.id,
+            )
+            await publish_delivery_failure_event(
+                nc, signature, decision.as_fire("prompt_build_failed"), payload
+            )
+            return
+
+        # ── LLM ──
+        try:
+            advice, latency_ms = await query_ollama_fn(prompt, http_client, config)
+        except httpx.ConnectError:
+            log.error("Ollama unreachable at %s", config.ollama_url)
+            _safe(
+                pm.save_delivery_failure,
+                signature,
+                "ollama_unreachable",
+                now,
+                decision.id,
+            )
+            await publish_delivery_failure_event(
+                nc, signature, decision.as_fire("ollama_unreachable"), payload
+            )
+            return
+        except httpx.TimeoutException:
+            log.error("Ollama timed out after %ds", config.ollama_timeout)
+            _safe(
+                pm.save_delivery_failure, signature, "ollama_timeout", now, decision.id
+            )
+            await publish_delivery_failure_event(
+                nc, signature, decision.as_fire("ollama_timeout"), payload
+            )
+            return
+        except Exception as exc:
+            log.error("Ollama returned unusable response: %s", exc)
+            _safe(pm.save_delivery_failure, signature, "ollama_error", now, decision.id)
+            await publish_delivery_failure_event(
+                nc, signature, decision.as_fire("ollama_error"), payload
+            )
+            return
 
     # ── conscientia output screen (S2) — valence-screen the advice, one
     #    corrective regeneration, else block (spec D10: no publish, no gate
-    #    mutation on block; fail-open on any screen error, invariant C3). ──
+    #    mutation on block; fail-open on any screen error, invariant C3). The
+    #    anticipatory lane disables regeneration (no prompt/LLM in this lane). ──
     advice, conscientia_regenerated = await conscientia_finalize_text(
         advice,
         prompt,
@@ -1028,16 +1082,26 @@ async def _build_prompt_and_deliver(
         entity=signature.entity,
         session_id=_resolve_session_id(redis_client),
         state_key=signature.state_key,
+        allow_regeneration=not anticipatory,
     )
     if advice is None:
         return  # blocked: no publish, no record_delivery_success (spec D10)
 
     # ── publish advice ──
     advice_payload = _build_advice_event(
-        payload, advice_text=advice, model_used=config.ollama_model, decision=decision
+        payload, advice_text=advice, model_used=model_used, decision=decision
     )
+    # First-generation latency only: a conscientia corrective regeneration's
+    # second LLM call is not re-timed (the payload flags it via
+    # conscientia_regenerated; the field is display-only in vox).
     advice_payload["latency_ms"] = round(latency_ms, 1)
     advice_payload["tier"] = tier
+    # Anticipatory provenance (spec §6.3-3): domain=="praesagium" is the durable
+    # join key; source/anticipatory are payload-local extras threaded onto the
+    # advice event for Vox + branch discrimination (merged where latency/tier are).
+    if anticipatory:
+        advice_payload["source"] = "anticipatory"
+        advice_payload["anticipatory"] = payload["anticipatory"]
     if conscientia_regenerated:
         advice_payload["conscientia_regenerated"] = True
     try:
@@ -1061,6 +1125,20 @@ async def _build_prompt_and_deliver(
     )
 
 
+def _humanize_key(key: str) -> str:
+    """Canonical key → readable label: ``"typing:user"`` → ``"typing (user)"``.
+
+    A LOCAL duplicate of ``praesagium.matcher._humanize`` (spec §6.3-5): kept
+    here on purpose so Consilium carries no import of the Praesagium package.
+    Splits on the FIRST colon only (a colon-bearing entity survives whole); a
+    key with no colon passes through unchanged.
+    """
+    if ":" not in key:
+        return key
+    domain, entity = key.split(":", 1)
+    return f"{domain} ({entity})"
+
+
 async def _publish_tier1_note(
     *,
     payload: dict,
@@ -1080,10 +1158,23 @@ async def _publish_tier1_note(
     full advice (spec D10); on a block the caller must skip
     ``record_delivery_success`` (no gate mutation).
     """
-    note_text = (
-        f"(Tier-1 note) A {signature.severity} {signature.domain} signal was "
-        f"observed on {signature.entity}; no full analysis was warranted."
-    )
+    if payload.get("source") == "anticipatory":
+        # A forewarning downgraded to a note: nothing was OBSERVED yet, so the
+        # wording states the prediction, not an observation (spec §6.3-4).
+        block = payload.get("anticipatory") or {}
+        antecedent_h = _humanize_key(str(block.get("antecedent", "")))
+        consequent_h = _humanize_key(str(block.get("consequent", "")))
+        window_s = int(block.get("window_s") or 0)
+        pid = block.get("pattern_id", "?")
+        note_text = (
+            f"(Tier-1 note) Forewarning withheld to a note: {consequent_h} may "
+            f"follow {antecedent_h} within ~{window_s}s (pattern {pid})."
+        )
+    else:
+        note_text = (
+            f"(Tier-1 note) A {signature.severity} {signature.domain} signal was "
+            f"observed on {signature.entity}; no full analysis was warranted."
+        )
     note_text, conscientia_regenerated = await conscientia_finalize_text(
         note_text,
         note_text,
@@ -1321,6 +1412,86 @@ async def process_message(
 
 
 # ---------------------------------------------------------------------------
+# Praesagium foreseen boundary (spec §6.3-2, invariant PR1b)
+# ---------------------------------------------------------------------------
+
+
+# Any C0/C1/DEL control byte PLUS the Unicode bidirectional controls (LRM/RLM,
+# the embedding/override set U+202A-202E, the isolate set U+2066-2069). Identity
+# fields are single-line identifiers, so \t and \n are rejected too. An identity
+# field renders raw via vox with no valence screen to catch it, so a control or
+# text-reordering byte in one drops the whole envelope below; body text
+# (forewarning_text) is screened separately by the Conscientia output screen
+# (S2) and so is not checked here.
+_CONTROL_BYTES = re.compile(
+    r"[\x00-\x1f\x7f-\x9f"
+    r"\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+)
+
+
+def _clamp_foreseen(payload: dict) -> dict | None:
+    """Validate + CLAMP a foreseen envelope at the Consilium boundary (PR1b).
+
+    ``augur.praesagium.foreseen`` is a spoofable subject and its publisher is
+    bug-prone, so PR1 (a forewarning is NEVER exempt) is enforced HERE, not by
+    publisher convention. Returns the clamped payload, or ``None`` to DROP (the
+    caller logs a warning and never touches the gate) when the envelope is not a
+    well-formed anticipatory foreseen:
+
+    - ``source == "anticipatory"``;
+    - a dict ``anticipatory`` block with non-empty str ``pattern_id`` AND
+      ``forewarning_text``;
+    - ``primary_anomaly.domain == "praesagium"`` with a non-empty entity.
+
+    On a valid envelope it FORCE-SETS ``correlation_found=False``,
+    ``correlated_events=[]``, ``combined_severity="MEDIUM"``,
+    ``primary_anomaly.severity="medium"``, and ``involved_domains=["praesagium"]``
+    regardless of what arrived, so no forged field reaches ``build_signature``
+    unclamped (⇒ ``exempt is False``, ``path == "single"``).
+    """
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("source") != "anticipatory":
+        return None
+    block = payload.get("anticipatory")
+    if not isinstance(block, dict):
+        return None
+    pattern_id = block.get("pattern_id")
+    forewarning_text = block.get("forewarning_text")
+    if not isinstance(pattern_id, str) or not pattern_id:
+        return None
+    if not isinstance(forewarning_text, str) or not forewarning_text:
+        return None
+    primary = payload.get("primary_anomaly")
+    if not isinstance(primary, dict):
+        return None
+    if primary.get("domain") != "praesagium":
+        return None
+    entity = primary.get("entity")
+    if not isinstance(entity, str) or not entity:
+        return None
+    # Identity fields render raw via vox with no valence screen behind them, so
+    # reject control/ANSI bytes here. forewarning_text is exempt here: it is
+    # body text, screened for control bytes by the Conscientia output screen (S2).
+    for name, value in (
+        ("pattern_id", pattern_id),
+        ("antecedent", block.get("antecedent")),
+        ("consequent", block.get("consequent")),
+        ("entity", entity),
+    ):
+        if isinstance(value, str) and _CONTROL_BYTES.search(value):
+            log.warning("Dropping foreseen envelope: control bytes in %s", name)
+            return None
+    # Force the never-exempt, medium-severity, single-path shape (PR1b).
+    payload["correlation_found"] = False
+    payload["correlated_events"] = []
+    payload["combined_severity"] = "MEDIUM"
+    primary["severity"] = "medium"
+    payload["involved_domains"] = ["praesagium"]
+    return payload
+
+
+# ---------------------------------------------------------------------------
 # Core loop
 # ---------------------------------------------------------------------------
 
@@ -1411,8 +1582,35 @@ async def run() -> None:
             now=datetime.now(timezone.utc).timestamp(),
         )
 
+    async def on_foreseen(msg: nats.aio.client.Msg) -> None:
+        # Praesagium forewarnings: validate + CLAMP the spoofable envelope
+        # (PR1b) BEFORE delegating to the SAME gated process_message path.
+        try:
+            payload = json.loads(msg.data.decode())
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            log.warning("Bad foreseen payload: %s", exc)
+            return
+        clamped = _clamp_foreseen(payload)
+        if clamped is None:
+            log.warning("Dropping malformed/spoofed foreseen envelope")
+            return
+        await process_message(
+            payload=clamped,
+            gate=gate,
+            scheduler=scheduler,
+            pm=pm,
+            nc=nc,
+            http_client=http_client,
+            redis_client=redis_client,
+            classifier_lane=classifier_lane,
+            config=config,
+            now=datetime.now(timezone.utc).timestamp(),
+        )
+
     sub = await nc.subscribe(SUBSCRIBE_SUBJECT, cb=on_message)
+    sub_foreseen = await nc.subscribe(SUBSCRIBE_FORESEEN, cb=on_foreseen)
     log.info("Subscribed to %s", SUBSCRIBE_SUBJECT)
+    log.info("Subscribed to %s", SUBSCRIBE_FORESEEN)
     log.info("Severity gate: only processing %s", SEVERITY_GATE)
     log.info("Supported domains: %s (+ generic fallback)", list(DOMAIN_HANDLERS.keys()))
     log.info(
@@ -1433,6 +1631,7 @@ async def run() -> None:
             except asyncio.CancelledError:
                 pass
         await sub.unsubscribe()
+        await sub_foreseen.unsubscribe()
         await classifier_lane.shutdown()
         await http_client.aclose()
         await nc.close()

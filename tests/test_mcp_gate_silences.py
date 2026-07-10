@@ -32,16 +32,16 @@ async def _list_tools():
 
 
 # ---------------------------------------------------------------------------
-# Tool count assertion (34 tools)
+# Tool count assertion (36 tools)
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_tool_count_is_34():
-    """Tool count must be 34 after adding the conscientia tools
-    (get_conscientia_charter/get_conscientia_verdicts/get_conscientia_violations)."""
+def test_mcp_tool_count_is_36():
+    """Tool count must be 36 after adding the praesagium tools
+    (get_praesagium_patterns/get_praesagium_predictions)."""
     tools = asyncio.run(_list_tools())
-    assert len(tools) == 34, (
-        f"Expected 34 MCP tools, got {len(tools)}: {[t.name for t in tools]}"
+    assert len(tools) == 36, (
+        f"Expected 36 MCP tools, got {len(tools)}: {[t.name for t in tools]}"
     )
 
 

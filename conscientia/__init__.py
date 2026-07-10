@@ -8,6 +8,8 @@ from conscientia.charter import (  # noqa: F401
     PROTECTED_SURFACES,
     render_charter,
 )
+from conscientia.recording import record_violation_best_effort  # noqa: F401
+from conscientia.review import review_gated  # noqa: F401
 from conscientia.screens import (  # noqa: F401
     CORRECTIVE_SUFFIX,
     Verdict,

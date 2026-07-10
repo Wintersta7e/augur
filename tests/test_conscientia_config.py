@@ -26,6 +26,16 @@ def test_env_overrides(monkeypatch):
     assert cfg.conscientia_regenerate_max == 2
 
 
+def test_extra_patterns_env_comma_split(monkeypatch):
+    monkeypatch.setenv("AUGUR_CONSCIENTIA_OUTPUT_EXTRA_PATTERNS", "foo bar, baz ,, qux")
+    monkeypatch.setenv("AUGUR_CONSCIENTIA_TEACH_EXTRA_PATTERNS", " solo ")
+    cfg = AugurConfig.from_env()
+    # comma-split, stripped, empties dropped — NOT per-character (the
+    # auto-build loop's tuple(v) would char-split without the coercion)
+    assert cfg.conscientia_output_extra_patterns == ("foo bar", "baz", "qux")
+    assert cfg.conscientia_teach_extra_patterns == ("solo",)
+
+
 def test_regenerate_max_bounds():
     with pytest.raises(ValueError):
         AugurConfig(conscientia_regenerate_max=-1)

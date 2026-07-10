@@ -8,7 +8,7 @@ Drives the ENTIRE pipeline end-to-end and scores every faculty PASS/FAIL:
     -> Responsum.complete -> Disciplina (reflection, incl. Memoria sweep)
     -> Imperator I self-model fold -> Imperator II reasoner -> proposal (watch-first)
 
-Plus a Praefectus health readout (all 9 faculties alive) and a Limen SUPPRESS
+Plus a Praefectus health readout (all 10 faculties alive) and a Limen SUPPRESS
 best-effort attempt.
 
 Run-unique entity names => fresh baselines. Runs from WSL against the
@@ -323,6 +323,11 @@ async def main() -> int:
         if r.exists("augur:memoria:processed_sessions")
         else 0
     )
+    praesagium_episode_sessions = 0
+    try:
+        praesagium_episode_sessions = r.llen("augur:praesagium:episodes:_index")
+    except Exception:
+        pass
 
     # ---- report ----
     advice = obs["augur.consilium.advice"]
@@ -380,6 +385,12 @@ async def main() -> int:
             "Memoria (sweep)",
             memoria_sessions > 0 or refl is not None,
             f"processed_sessions={memoria_sessions}",
+        ),
+        (
+            "Praesagium (episodes)",
+            praesagium_episode_sessions > 0 and health.get("praesagium") == "alive",
+            f"episode_sessions={praesagium_episode_sessions} "
+            f"heartbeat={health.get('praesagium', '?')}",
         ),
     ]
     print("\n" + "=" * 72)

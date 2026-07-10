@@ -31,39 +31,55 @@ orchestration): **Tabula** (the shared slate), **Sensus** (senses), **Vigil**
 (the watch), **Nexus** (binding/correlation), **Consilium** (counsel/LLM),
 **Limen** (the threshold — the stay-silent gate), **Responsum** (feedback),
 **Disciplina** (training/reflection), **Vox** (the voice), **Praefectus** (the
-marshal — faculty supervision/health).
+marshal — supervision/health), **Memoria** (memory), **Imperator** (the seat of
+self-improvement), **Conscientia** (the conscience — a value core that can refuse),
+and **Praesagium** (foresight — anticipation).
 
 ## Status
 
 Active personal research project. The full pipeline — perception → detection →
 correlation → gated LLM advice → feedback → self-tuning — is implemented and
-covered by a large suite (**988 unit + 43 fast integration + 4 slow**) under
+covered by a large suite (**2245 unit + 53 fast integration + 5 slow**) under
 strict ruff lints and green CI. Verified end-to-end with four perception domains
 against a local Ollama `qwen2.5:32b`. It's still rough in places and the Redis
 key / NATS subject contracts can shift between commits — treat it as a working
 pipeline you can build and run, not a finished, packaged app.
 
 **Implemented:**
-- The six-stage pipeline across the faculty pantheon (Sensus → Vigil → Nexus →
-  Consilium → Responsum → Disciplina → Vox)
+- The perception→advice pipeline across the faculty pantheon (Sensus → Vigil →
+  Nexus → Consilium → Responsum → Disciplina → Vox)
 - The biological stay-silent gate (Limen) — suppress / fire / downgrade before
   every LLM call, with hard safety invariants
 - Memoria — a Hot/Warm/Cold memory spine with FSRS decay on an active-session
   clock, consolidated by a session-end sweep
 - N-way cross-domain correlation with a self-tuning escalation matrix + adaptive
   per-rule windows
-- Seven-pass session-end reflection (precision / utility / counterfactual /
-  correlation / window / gate / memory)
+- Session-end reflection: seven analysis passes (precision / utility /
+  counterfactual / correlation / window / gate / memory) plus the Conscientia
+  review and Praesagium mining sweeps
 - **Praefectus** (supervision/health) — heartbeat liveness for every faculty, a
   conservative pipeline-stall signal, an MCP health tool, and degradation alerts
   surfaced through Vox
-- A 25-tool FastMCP control server; Docker dual-mode (native dev or fully
-  containerized deploy)
+- **Imperator** (self-improvement) — deterministic self-model + auspices
+  read-models, an LLM reasoner over its own blind spots that emits ranked
+  proposals, and a conversation faculty (ask it what it saw and why; teach it
+  corrections). Only a *safe*, reversible class of proposal can auto-apply, and
+  applying is **off by default**
+- **Conscientia** (the value core) — five screens that can refuse: advice output,
+  teaching, prompt injection, pre-apply, and offline review of anything the
+  self-improvement engine wants a human for. Its charter is code, not data, with
+  no write path
+- **Praesagium** (anticipation) — learns cross-session "A precedes B within W"
+  patterns, arms predictions, and verifies every one of them against what
+  actually happened. Forewarnings are deterministic templates that enter the same
+  gated path as any advice and can never claim the gate's danger exemption.
+  **Speaking is off by default**: it learns and measures its own hit rate first
+- A 36-tool FastMCP control server; Docker dual-mode (native dev or fully
+  containerized deploy — 10 faculty components)
 
-**Not done yet:** cross-session pattern mining + anticipation (Memoria is the
-substrate they consume), Praefectus *output arbitration* + lifecycle (the
-supervision/health increment is built; arbitration and restart are deferred), the
-higher pantheon tiers (Imperator, Conscientia), and packaged installers.
+**Not done yet:** a vision sense (**Visus**), Praefectus *output arbitration* +
+lifecycle (the supervision/health increment is built; arbitration and restart are
+deferred), and packaged installers.
 
 ## Features
 
@@ -91,25 +107,43 @@ higher pantheon tiers (Imperator, Conscientia), and packaged installers.
 - Recurring patterns consolidate toward Cold; one-offs fade and are **archived,
   never hard-deleted**, by a session-end "sleep" sweep
 
+### Anticipation (Praesagium)
+- **Cross-session pattern mining** — records a compact episode stream per session,
+  then mines ordered "A precedes B within W" pairs offline during reflection
+- **Honest promotion** — a pattern is believed only past cross-session support, a
+  Wilson lower bound on confidence, lift over a *session-conditional* null (so
+  "both happen when you're at the desk" is rejected), lag stability, and a
+  probation mine against fresh data
+- **Self-verifying** — every armed prediction resolves exactly once (fulfilled or
+  expired), so each pattern carries a measured hit rate and retires itself when
+  your behavior drifts
+
 ### Reasoning, feedback & self-improvement
 - **Local-LLM advice (Consilium)** over Ollama, with cross-domain prompts that
   reason about the *combination* of signals, not any one alone
 - **Feedback (Responsum)** — explicit (interactive, or headless via the
   `augur.responsum.feedback` subject / MCP `submit_feedback`) + behavioral scoring
-  with per-domain 1/N attribution; **reflection (Disciplina)** runs seven analysis
+  with per-domain 1/N attribution; **reflection (Disciplina)** runs its analysis
   passes per session and tunes thresholds, prompts, the escalation matrix, and the
   gate itself
+- **Self-improvement (Imperator)** — reasons over its own measured blind spots and
+  proposes changes; only reversible, sanctioned edits can auto-apply, gated behind
+  a flag that ships **off**. Everything structural is logged for review
+- **A conscience (Conscientia)** — screens that refuse rather than comply: it can
+  block its own advice, refuse what you try to teach it, and decline to apply a
+  self-modification. Fail directions are deliberate — the output screen fails
+  *open* (never silences the pipeline), the teach and apply screens fail *closed*
 
 ### Interfaces
-- **Vox** — an ANSI console renderer with domain-scoped dedup
-- **`augur_mcp`** — a 25-tool FastMCP server for lifecycle, event injection,
-  state inspection, runtime tuning, pipeline-health, and explicit advice feedback
+- **Vox** — an ANSI console renderer with domain-scoped dedup; every payload is
+  stripped of control, escape, and bidirectional characters as it is decoded
+- **`augur_mcp`** — a 36-tool FastMCP server for lifecycle, event injection,
+  state inspection, runtime tuning, pipeline-health, dialogue, learned patterns
+  and predictions, charter/verdict inspection, and explicit advice feedback
 
 ### Planned / architected (not built)
-- Cross-session mining + rule induction (C2), detection → anticipation (C3),
-  Praefectus *output arbitration* + lifecycle (its supervision/health tier is
-  built), the **Imperator + Conscientia** (mind + conscience) tiers, and a vision
-  sense (**Visus**)
+- A vision sense (**Visus**), Praefectus *output arbitration* + lifecycle (its
+  supervision/health tier is built), and rule induction over the mined patterns
 
 ### Explicitly declined (not on the roadmap)
 - Multi-user / team mode • Cloud sync • Telemetry • Hosted/SaaS surface • Marketing
@@ -151,7 +185,7 @@ bash infrastructure/run_augur.sh
 sudo .venv/bin/python sensus/typing_monitor.py   # system-wide typing (Linux: root)
 ```
 
-Fully containerized (the six faculty components run as containers; Ollama stays
+Fully containerized (the ten faculty components run as containers; Ollama stays
 on the host for GPU access):
 
 ```bash
@@ -173,21 +207,28 @@ augur/
 ├── consilium/     # local-LLM advisor (+ app-descriptor classifier)
 ├── limen/         # the stay-silent gate (runs in-process inside Consilium)
 ├── responsum/     # feedback collector → augur.responsum.complete
-├── disciplina/    # seven-pass reflection engine → augur.disciplina.complete
+├── disciplina/    # reflection engine → augur.disciplina.complete
 ├── memoria/       # pure FSRS/tier/sweep logic (no Redis) for the memory spine
 ├── praefectus/    # faculty supervision/health monitor → augur.praefectus.health
+├── imperator/     # self-model, proposals, apply, dialogue → augur.imperator.*
+├── conscientia/   # value core: charter-as-code, screens, gated review
+├── praesagium/    # anticipation: episodes, pattern miner, prediction matcher
 ├── vox/           # ANSI console renderer
-├── augur_mcp/     # FastMCP control server (25 tools)
+├── augur_mcp/     # FastMCP control server (36 tools)
 ├── infrastructure/# run_augur.sh launcher + connection/persistence smoke tests
-└── tests/         # 988 unit (mocked) + 47 integration (real Redis/NATS/Ollama)
+└── tests/         # 2245 unit (mocked) + 58 integration (real Redis/NATS/Ollama)
 ```
 
 **Data flow:** `sensus.* → vigil.anomaly → nexus.detected → consilium (+ limen
-gate) → consilium.advice → responsum.complete → disciplina.complete → vox`. At
-session end, Nexus flushes its correlation graph to Redis and Disciplina runs the
-reflection passes (including the Memoria consolidation sweep). **Praefectus** rides
-the whole bus (`augur.>`) — every faculty heartbeats on `augur.system.heartbeat`
-and Praefectus publishes `augur.praefectus.health` liveness/degradation transitions.
+gate, + the Conscientia output screen) → consilium.advice → responsum.complete →
+disciplina.complete → vox`. At session end, Nexus flushes its correlation graph to
+Redis and Disciplina runs the reflection passes (including the Memoria
+consolidation sweep, the Conscientia review of anything gated, and the Praesagium
+pattern mine). **Praesagium** also rides the raw anomaly stream, recording episodes
+and resolving predictions; when armed, a forewarning enters Consilium on its own
+subject and traverses the same gate as any other advice. **Praefectus** rides the
+whole bus (`augur.>`) — every faculty heartbeats on `augur.system.heartbeat` and
+Praefectus publishes `augur.praefectus.health` liveness/degradation transitions.
 
 ## Design principles
 
@@ -203,9 +244,16 @@ and Praefectus publishes `augur.praefectus.health` liveness/degradation transiti
 5. **Self-tuning, with safety floors.** Reflection adjusts thresholds, prompts,
    the escalation matrix, and the gate — but hard invariants and floor-protected
    memories are never tuned away.
-6. **Inspectable.** Every baseline, graph, reflection, and gate decision is in
-   Redis and queryable through the MCP server. Persistence is centralized.
-7. **A named pantheon.** The faculties are an identity/charter layer over the
+6. **Watch before you act.** Every capability that could act on its own arrives
+   switched off: self-modification applies nothing until armed, and anticipation
+   learns and scores its own predictions before it is allowed to speak one.
+7. **A conscience that can say no.** Screens sit in front of the system's output,
+   its teaching, and its own self-edits. Its charter lives in code with no write
+   path — the system cannot rewrite what it is allowed to become.
+8. **Inspectable.** Every baseline, graph, reflection, learned pattern, prediction
+   outcome, and gate decision is in Redis and queryable through the MCP server.
+   Persistence is centralized.
+9. **A named pantheon.** The faculties are an identity/charter layer over the
    blackboard — the architecture stays decentralized; the names give it a spine.
 
 ## Security notes
@@ -218,6 +266,11 @@ and Praefectus publishes `augur.praefectus.health` liveness/degradation transiti
   monitoring port discloses the full subscription topology.
 - All MCP tool inputs are validated against a strict allowlist
   (`^[a-z0-9_]{1,64}$`) with bounded length caps.
+- NATS subjects are unauthenticated on the loopback bus, so any local process can
+  publish one. Payloads are stripped of control, escape, and bidirectional
+  characters as Vox decodes them — a renderer never prints attacker-chosen bytes
+  to your terminal — and the anticipation lane, which reaches the console without
+  passing through an LLM, additionally rejects them at its entry gate.
 - Session-scoped Redis keys (feedback, correlation graphs, reflections) carry a
   30-day TTL; only learned state (baselines, prompts, matrix, memories) is durable.
 

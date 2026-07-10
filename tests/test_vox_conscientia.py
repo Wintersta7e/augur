@@ -59,3 +59,14 @@ def test_violation_dedup_does_not_suppress_different_detail():
 
     other = dict(payload, detail="matched 'you seem distracted'")
     assert V.dedup_should_suppress_violation(last_violations, other) is False
+
+
+def test_violation_dedup_does_not_suppress_different_entity():
+    # Two entities tripping the same charter pattern are distinct alerts —
+    # entity is part of the dedup key, not collapsed into it.
+    last_violations: dict = {}
+    payload = _violation_payload()
+    V.update_last_violations(last_violations, payload)
+
+    other = dict(payload, entity="user2")
+    assert V.dedup_should_suppress_violation(last_violations, other) is False

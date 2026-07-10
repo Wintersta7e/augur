@@ -233,6 +233,28 @@ class AugurConfig:
     # pre-check, the dialogue teach path, and Imperator-I's activity read-model.
     focused_app_max_age_s: float = 300.0
 
+    # ── Praesagium — anticipation faculty (spec 2026-07-09) ─────────────────
+    praesagium_enabled: bool = True
+    praesagium_emit_enabled: bool = False  # watch-first: default OFF
+    praesagium_episode_cap_per_session: int = 2000
+    praesagium_support_min_sessions: int = 3
+    praesagium_conf_lower_min: float = 0.4
+    praesagium_lift_min: float = 1.5
+    praesagium_lag_min_s: float = 10.0
+    praesagium_lag_max_s: float = 900.0
+    praesagium_window_margin: float = 1.25
+    praesagium_lag_stability_ratio: float = 2.0
+    praesagium_max_patterns: int = 50
+    praesagium_pattern_cooldown_s: float = 600.0
+    praesagium_hit_rate_alpha: float = 0.2
+    praesagium_hit_rate_retire_below: float = 0.3
+    praesagium_retire_min_resolutions: int = 5
+    praesagium_mine_max_sessions: int = 30
+    praesagium_mine_min_interval_s: float = 1800.0
+    praesagium_expiry_grace_s: float = 5.0
+    praesagium_open_predictions_cap: int = 100
+    praesagium_predictions_cap: int = 500
+
     def __post_init__(self) -> None:
         """Validate bounds on tuning fields. Raises ValueError on out-of-range.
 
@@ -463,6 +485,113 @@ class AugurConfig:
             raise ValueError(
                 f"conscientia_regenerate_max={self.conscientia_regenerate_max} "
                 "must be in [0, 2]"
+            )
+        # ── Praesagium bounds (spec 2026-07-09) ──────────────────────────────
+        if not (100 <= self.praesagium_episode_cap_per_session <= 20000):
+            raise ValueError(
+                f"praesagium_episode_cap_per_session={self.praesagium_episode_cap_per_session} "
+                "outside [100, 20000]"
+            )
+        if not (2 <= self.praesagium_support_min_sessions <= 20):
+            raise ValueError(
+                f"praesagium_support_min_sessions={self.praesagium_support_min_sessions} "
+                "outside [2, 20]"
+            )
+        if not (0.05 <= self.praesagium_conf_lower_min <= 0.95):
+            raise ValueError(
+                f"praesagium_conf_lower_min={self.praesagium_conf_lower_min} "
+                "outside [0.05, 0.95]"
+            )
+        if not (1.0 <= self.praesagium_lift_min <= 20.0):
+            raise ValueError(
+                f"praesagium_lift_min={self.praesagium_lift_min} outside [1.0, 20.0]"
+            )
+        if not (1.0 <= self.praesagium_lag_min_s <= 300.0):
+            raise ValueError(
+                f"praesagium_lag_min_s={self.praesagium_lag_min_s} outside [1.0, 300.0]"
+            )
+        if not (30.0 <= self.praesagium_lag_max_s <= 7200.0):
+            raise ValueError(
+                f"praesagium_lag_max_s={self.praesagium_lag_max_s} outside [30.0, 7200.0]"
+            )
+        if not (1.0 <= self.praesagium_window_margin <= 3.0):
+            raise ValueError(
+                f"praesagium_window_margin={self.praesagium_window_margin} "
+                "outside [1.0, 3.0]"
+            )
+        if not (0.5 <= self.praesagium_lag_stability_ratio <= 10.0):
+            raise ValueError(
+                f"praesagium_lag_stability_ratio={self.praesagium_lag_stability_ratio} "
+                "outside [0.5, 10.0]"
+            )
+        if not (1 <= self.praesagium_max_patterns <= 500):
+            raise ValueError(
+                f"praesagium_max_patterns={self.praesagium_max_patterns} outside [1, 500]"
+            )
+        if not (30.0 <= self.praesagium_pattern_cooldown_s <= 86400.0):
+            raise ValueError(
+                f"praesagium_pattern_cooldown_s={self.praesagium_pattern_cooldown_s} "
+                "outside [30.0, 86400.0]"
+            )
+        if not (0.0 < self.praesagium_hit_rate_alpha <= 0.5):
+            raise ValueError(
+                f"praesagium_hit_rate_alpha={self.praesagium_hit_rate_alpha} "
+                "outside (0.0, 0.5]"
+            )
+        if not (0.0 <= self.praesagium_hit_rate_retire_below < 1.0):
+            raise ValueError(
+                f"praesagium_hit_rate_retire_below={self.praesagium_hit_rate_retire_below} "
+                "outside [0.0, 1.0)"
+            )
+        if not (1 <= self.praesagium_retire_min_resolutions <= 100):
+            raise ValueError(
+                f"praesagium_retire_min_resolutions={self.praesagium_retire_min_resolutions} "
+                "outside [1, 100]"
+            )
+        if not (3 <= self.praesagium_mine_max_sessions <= 200):
+            raise ValueError(
+                f"praesagium_mine_max_sessions={self.praesagium_mine_max_sessions} "
+                "outside [3, 200]"
+            )
+        if not (0.0 <= self.praesagium_mine_min_interval_s <= 86400.0):
+            raise ValueError(
+                f"praesagium_mine_min_interval_s={self.praesagium_mine_min_interval_s} "
+                "outside [0.0, 86400.0]"
+            )
+        if not (0.5 <= self.praesagium_expiry_grace_s <= 60.0):
+            raise ValueError(
+                f"praesagium_expiry_grace_s={self.praesagium_expiry_grace_s} "
+                "outside [0.5, 60.0]"
+            )
+        if not (1 <= self.praesagium_open_predictions_cap <= 1000):
+            raise ValueError(
+                f"praesagium_open_predictions_cap={self.praesagium_open_predictions_cap} "
+                "outside [1, 1000]"
+            )
+        if not (10 <= self.praesagium_predictions_cap <= 10000):
+            raise ValueError(
+                f"praesagium_predictions_cap={self.praesagium_predictions_cap} "
+                "outside [10, 10000]"
+            )
+        # Cross-field checks
+        if not (self.praesagium_lag_min_s < self.praesagium_lag_max_s):
+            raise ValueError(
+                f"praesagium_lag_min_s={self.praesagium_lag_min_s} must be < "
+                f"praesagium_lag_max_s={self.praesagium_lag_max_s}"
+            )
+        if not (
+            self.praesagium_support_min_sessions <= self.praesagium_mine_max_sessions
+        ):
+            raise ValueError(
+                f"praesagium_support_min_sessions={self.praesagium_support_min_sessions} "
+                "must be <= "
+                f"praesagium_mine_max_sessions={self.praesagium_mine_max_sessions}"
+            )
+        if not (self.praesagium_hit_rate_retire_below < self.praesagium_conf_lower_min):
+            raise ValueError(
+                f"praesagium_hit_rate_retire_below={self.praesagium_hit_rate_retire_below} "
+                "must be < "
+                f"praesagium_conf_lower_min={self.praesagium_conf_lower_min}"
             )
 
     # ── Constructors ───────────────────────────────────────────────────────

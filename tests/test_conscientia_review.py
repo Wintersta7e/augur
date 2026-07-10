@@ -45,6 +45,30 @@ def test_unbounded_action_fails_bounded_but_still_needs_human():
     assert rec["recommendation"] == "needs_human"  # bounded is advisory, not a rejector
 
 
+def test_nested_payload_over_2kib_fails_bounded():
+    # Spec R4's second clause: total ≤ 4 KiB but a single embedded code blob
+    # > 2 KiB is exactly the smuggled-big-patch shape the clause exists for.
+    action = {"files": [{"path": "a.py", "patch": "x" * 3000}], "note": "small"}
+    rec = review_gated(_gated(action=action), CFG)
+    by = {c["check"]: c["ok"] for c in rec["checks"]}
+    assert not by["bounded"]
+    assert rec["recommendation"] == "needs_human"
+    note = next(c["note"] for c in rec["checks"] if c["check"] == "bounded")
+    assert "2" in note and "KiB" in note
+
+
+def test_nested_payloads_under_2kib_pass_bounded():
+    action = {"files": [{"path": "a.py", "patch": "x" * 1000}], "note": "y" * 1000}
+    rec = review_gated(_gated(action=action), CFG)
+    assert {c["check"]: c["ok"] for c in rec["checks"]}["bounded"]
+
+
+def test_oversized_nested_dict_key_fails_bounded():
+    # Keys are payload capacity too — a blob can hide there.
+    rec = review_gated(_gated(action={"z" * 3000: "v"}), CFG)
+    assert not {c["check"]: c["ok"] for c in rec["checks"]}["bounded"]
+
+
 def test_never_approve():
     # exhaustively: no input yields anything but reject/needs_human
     for kind in ("code", "structural"):

@@ -53,6 +53,7 @@ COMPONENT_COMMANDS: dict[str, list[str]] = {
     "praefectus": [sys.executable, "-m", "praefectus.monitor"],
     "imperator": [sys.executable, "-m", "imperator.awareness"],
     "imperator_ii": [sys.executable, "-m", "imperator.improver"],
+    "praesagium": [sys.executable, "-m", "praesagium.matcher"],
 }
 
 # SEC-02: allowlist for domain / entity / stream_id values received through
@@ -856,6 +857,53 @@ def get_conscientia_violations(limit: int = 20) -> dict[str, Any]:
     with _persistence_ctx() as pm:
         violations = pm.load_conscientia_violations(limit=limit)
     return {"violations": violations, "count": len(violations)}
+
+
+# ---------------------------------------------------------------------------
+# Praesagium tools (anticipation faculty — read-only inspection)
+# ---------------------------------------------------------------------------
+
+_PRAESAGIUM_STATUS_RANK = {"active": 0, "provisional": 1, "retired": 2}
+
+
+@mcp.tool()
+@_tool_safe
+def get_praesagium_patterns(limit: int = 50) -> dict[str, Any]:
+    """Mined Praesagium patterns: actives first, then provisional, then
+    retired (stable by conf_lower desc within each group)."""
+    limit = max(1, min(limit, 200))
+    with _persistence_ctx() as pm:
+        blob = pm.load_praesagium_patterns()
+    if not blob:
+        return {"patterns": [], "count": 0, "mined_at": None}
+    patterns = sorted(
+        blob.get("patterns", {}).values(),
+        key=lambda p: (
+            _PRAESAGIUM_STATUS_RANK.get(p.get("status"), 2),
+            -(p.get("conf_lower") or 0.0),
+        ),
+    )[:limit]
+    return {
+        "patterns": patterns,
+        "count": len(patterns),
+        "mined_at": blob.get("mined_at"),
+    }
+
+
+@mcp.tool()
+@_tool_safe
+def get_praesagium_predictions(limit: int = 20) -> dict[str, Any]:
+    """Open Praesagium predictions plus newest-first resolved (resolved
+    truncated to limit, clamped <= 200)."""
+    limit = max(1, min(limit, 200))
+    with _persistence_ctx() as pm:
+        open_predictions = pm.load_praesagium_open_predictions()
+        resolved = pm.load_praesagium_resolved(limit=limit)
+    return {
+        "open": open_predictions,
+        "resolved": resolved,
+        "counts": {"open": len(open_predictions), "resolved_returned": len(resolved)},
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -155,10 +155,17 @@ def make_on_msg(pm, config, http, *, lock, last_run, spawn, publish):
             return
         now = time.time()
         if now - last_run[0] < config.imperator_ii_min_interval_s:
+            log.info(
+                "imperator II trigger dropped: rate-limited "
+                "(%.1fs since last accepted cycle, min %.1fs)",
+                now - last_run[0],
+                config.imperator_ii_min_interval_s,
+            )
             return
         if lock.locked():
             # A cycle is already in flight; drop this trigger rather than queue
             # it (the next disciplina.complete will re-trigger if still warranted).
+            log.info("imperator II trigger dropped: cycle already in flight")
             return
         try:
             payload = json.loads(msg.data.decode()) if msg.data else {}

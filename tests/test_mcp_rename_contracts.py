@@ -32,6 +32,7 @@ def test_component_commands_keys_and_modules_renamed():
         "praefectus",
         "imperator",
         "imperator_ii",
+        "praesagium",
     }
     assert {c[-1] for c in cmds.values()} == {
         "vigil.anomaly_detector",
@@ -43,6 +44,7 @@ def test_component_commands_keys_and_modules_renamed():
         "praefectus.monitor",
         "imperator.awareness",
         "imperator.improver",
+        "praesagium.matcher",
     }
 
 
@@ -157,3 +159,26 @@ def test_conscientia_tools_and_subjects_present():
     persistence_src = inspect.getsource(PersistenceManager)
     assert "augur:conscientia:verdicts" in persistence_src
     assert "augur:conscientia:violations" in persistence_src
+
+
+def test_praesagium_tools_and_subjects_present():
+    # The praesagium pattern/prediction MCP tools are pure inspection --
+    # augur_server itself never publishes or writes praesagium state, it only
+    # reads via PersistenceManager. Pin tool presence here plus the underlying
+    # subjects (published by praesagium.matcher) and keys (tabula.persistence),
+    # so a rename in either module fails this file too.
+    src = inspect.getsource(srv)
+    for tool in ("get_praesagium_patterns", "get_praesagium_predictions"):
+        assert f"def {tool}(" in src
+
+    from praesagium import matcher as praesagium_matcher
+
+    matcher_src = inspect.getsource(praesagium_matcher)
+    assert "augur.praesagium.foreseen" in matcher_src
+    assert "augur.praesagium.resolved" in matcher_src
+
+    persistence_src = inspect.getsource(PersistenceManager)
+    assert "augur:praesagium:patterns" in persistence_src
+    assert "augur:praesagium:predictions:open" in persistence_src
+    assert "augur:praesagium:predictions:log" in persistence_src
+    assert "augur:praesagium:episodes:" in persistence_src

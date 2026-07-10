@@ -119,6 +119,10 @@ def route(intent: dict, ctx, *, pm, cfg) -> dict:
     ``pm``/``cfg`` are accepted for interface symmetry with the rest of the
     confirm/apply/undo surface; this deterministic mapping needs neither --
     all state comes from ``ctx`` (recent_suppressions).
+
+    Conscientia's teach-time value screen does NOT live here: route() is
+    pinned pure (no Redis), so screening happens upstream in
+    ``engine._handle_intent`` before this is called.
     """
     kind = intent["kind"]
     # Cast (not assert): _REQUIRE_TARGET-gated kinds always carry a target by

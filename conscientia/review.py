@@ -15,6 +15,31 @@ import time
 from conscientia import charter
 
 _MAX_ACTION_BYTES = 4096
+_MAX_NESTED_PAYLOAD_BYTES = 2048
+
+
+def _max_nested_payload_len(action: dict) -> int:
+    """Longest serialized string (value OR key) anywhere inside *action* —
+    spec R4's nested clause: a total under 4 KiB can still smuggle one big
+    code blob, which is the shape this catches.
+
+    Iterative walk, measured with the same escaped-serialization convention
+    as the total bound. Only called after ``json.dumps`` succeeded on the
+    whole action (see _checks), so the structure is known acyclic and the
+    walk terminates.
+    """
+    longest = 0
+    stack: list[object] = [action]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            stack.extend(node.keys())
+            stack.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+        elif isinstance(node, str):
+            longest = max(longest, len(json.dumps(node)))
+    return longest
 
 
 def _checks(p: dict) -> list[dict]:
@@ -25,12 +50,19 @@ def _checks(p: dict) -> list[dict]:
     )
     action = p.get("action")
     try:
-        bounded_ok = (
-            isinstance(action, dict)
-            and len(json.dumps(action, default=str)) <= _MAX_ACTION_BYTES
-        )
+        # Total bound first: json.dumps raising on a cyclic action fails the
+        # check before _max_nested_payload_len would walk the cycle.
+        if isinstance(action, dict):
+            total_ok = len(json.dumps(action, default=str)) <= _MAX_ACTION_BYTES
+            nested_ok = (
+                total_ok
+                and _max_nested_payload_len(action) <= _MAX_NESTED_PAYLOAD_BYTES
+            )
+        else:
+            total_ok = nested_ok = False
     except (TypeError, ValueError):
-        bounded_ok = False
+        total_ok = nested_ok = False
+    bounded_ok = total_ok and nested_ok
     return [
         {
             "check": "klass_gated",
@@ -54,7 +86,11 @@ def _checks(p: dict) -> list[dict]:
             "ok": bounded_ok,
             "note": "action within bounds"
             if bounded_ok
-            else "action missing/oversized (>4KiB)",
+            else (
+                "nested payload exceeds 2KiB"
+                if total_ok
+                else "action missing/oversized (>4KiB)"
+            ),
         },
         {
             "check": "tests_verifiable",

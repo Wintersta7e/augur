@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 
 import fakeredis
 from tabula.persistence import PersistenceManager
@@ -344,7 +345,7 @@ def test_on_msg_ignores_unconsumed_subject(monkeypatch):
     assert spawned == []  # not a consumed subject -> no cycle
 
 
-def test_on_msg_rate_limited(monkeypatch):
+def test_on_msg_rate_limited(monkeypatch, caplog):
     pm = PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
     _seed_fresh(pm)
     cfg = _Cfg()
@@ -352,8 +353,14 @@ def test_on_msg_rate_limited(monkeypatch):
     on_msg, _lock, _last, spawned = _harness(
         pm, cfg, monkeypatch=monkeypatch, last_run_at=__import__("time").time()
     )
-    asyncio.run(on_msg(_Msg("augur.disciplina.complete", {"session_id": "s1"})))
-    assert spawned == []  # within the min-interval -> dropped before spawning
+    with caplog.at_level(logging.INFO, logger="imperator.improver"):
+        asyncio.run(on_msg(_Msg("augur.disciplina.complete", {"session_id": "s1"})))
+    assert spawned == []
+    # The drop must be visible at INFO (live runners log at INFO) — a silent
+    # drop cost a root-cause during the Task 15 live verification.
+    assert any(
+        "rate-limited" in r.getMessage() for r in caplog.records
+    )  # within the min-interval -> dropped before spawning
 
 
 def test_on_msg_spawns_cycle_and_does_not_block_on_freshness(monkeypatch):
@@ -412,7 +419,7 @@ def test_on_msg_spawns_cycle_and_does_not_block_on_freshness(monkeypatch):
     assert asyncio.run(scenario()) is True
 
 
-def test_on_msg_drops_trigger_while_cycle_in_flight(monkeypatch):
+def test_on_msg_drops_trigger_while_cycle_in_flight(monkeypatch, caplog):
     # BUG B: at most one cycle in flight. While the first cycle holds the lock, a
     # second consumed trigger is dropped (not queued) — proven by only one spawn.
     pm = PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
@@ -447,8 +454,11 @@ def test_on_msg_drops_trigger_while_cycle_in_flight(monkeypatch):
             "augur.disciplina.complete", {"timestamp": "2030-01-01T00:00:00+00:00"}
         )
         await on_msg(m)  # accepted, lock now held by task
-        await on_msg(m)  # second trigger: lock held -> dropped
+        with caplog.at_level(logging.INFO, logger="imperator.improver"):
+            await on_msg(m)  # second trigger: lock held -> dropped
         assert len(tasks) == 1
+        # The drop must be visible at INFO, same as the rate-limit drop.
+        assert any("in flight" in r.getMessage() for r in caplog.records)
         for t in tasks:
             t.cancel()
         return True

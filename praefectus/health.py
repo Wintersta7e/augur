@@ -22,6 +22,7 @@ REQUIRED_FACULTIES: tuple[str, ...] = (
     "praefectus",
     "imperator",
     "imperator_ii",
+    "praesagium",
 )
 OPTIONAL_COMPONENTS: tuple[str, ...] = (
     "sensus.chess",
@@ -134,6 +135,14 @@ def record_heartbeat(
     st.last_heartbeat = ts
 
 
+def _is_praesagium_state_key(payload: dict) -> bool:
+    """True when a suppressed/delivery_failure event's Signature.state_key
+    (advisor.py publish_suppressed_event/publish_delivery_failure_event: both
+    carry ``"state_key": signature.state_key``) is the single-path praesagium
+    channel (limen/gate.py build_signature: ``f"single:{domain}:{entity}"``)."""
+    return str(payload.get("state_key", "")).startswith("single:praesagium:")
+
+
 def record_activity(
     states: dict[str, FacultyHealth],
     window: ActivityWindow,
@@ -144,22 +153,43 @@ def record_activity(
 ) -> None:
     """Push the subject's signal class into the window (for the stall math) and stamp
     last_event_ts on the owning faculty if it is in the registry. Then prune the window
-    to the effective stall horizon so memory stays bounded."""
+    to the effective stall horizon so memory stays bounded.
+
+    Praesagium-attributable terminals (spec 2026-07-09 §7.2) are excluded from
+    the consilium stall accounting: an anticipatory advice/suppressed/
+    delivery-failure/advice-surface-violation is a terminal of PRAESAGIUM work
+    (a foreseen forewarning), not of a nexus detection, so counting it toward
+    consilium's terminals could mask a genuinely stalled real detection in the
+    same window. The carrier field is pinned per publisher's real payload:
+    ``domain == "praesagium"`` for advice/violation events (advisor.py
+    _build_advice_event / conscientia/screens.py make_violation both carry
+    ``"domain"``); ``state_key`` prefix ``"single:praesagium:"`` for
+    suppressed/delivery-failure events (advisor.py publish_suppressed_event /
+    publish_delivery_failure_event both carry ``"state_key"``).
+    """
     if subject == "augur.nexus.detected":
         if str(payload.get("combined_severity", "")).upper() in ("MEDIUM", "HIGH"):
             window.detected_mh.append(now)
     elif subject == "augur.consilium.advice":
-        window.advice.append(now)
+        if str(payload.get("domain", "")) != "praesagium":
+            window.advice.append(now)
     elif subject == "augur.limen.suppressed":
-        window.suppressed.append(now)
+        if not _is_praesagium_state_key(payload):
+            window.suppressed.append(now)
     elif subject == "augur.limen.delivery_failure":
-        window.delivery_failure.append(now)
+        if not _is_praesagium_state_key(payload):
+            window.delivery_failure.append(now)
     elif subject == "augur.conscientia.violation":
         # A Conscientia block on the advice surface (spec D10) is deliberate and
         # terminal for that detection: consilium serviced it, Conscientia refused
         # delivery. Count it so it does not read as a stall. Other surfaces (e.g.
         # "teach") are not consilium-advice terminals and must not count here.
-        if str(payload.get("surface", "")) == "advice":
+        # A praesagium-domain advice-surface block is a terminal of anticipatory
+        # work, not of a nexus detection -- excluded for the same reason as above.
+        if (
+            str(payload.get("surface", "")) == "advice"
+            and str(payload.get("domain", "")) != "praesagium"
+        ):
             window.conscientia_block.append(now)
 
     _, faculty = classify_event(subject)

@@ -80,6 +80,9 @@ def severity_badge(severity: str) -> str:
     return f"{color}[{label}]{RESET}"
 
 
+FORESEEN_BADGE = f"{BOLD}{FG_CYAN}[FORESEEN]{RESET}"
+
+
 def render_anomaly_line(data: dict) -> str:
     """One-line notification for low-severity anomalies."""
     domain = data.get("domain", "?")
@@ -292,6 +295,9 @@ def render_advice(data: dict) -> str:
     latency_ms = data.get("latency_ms", 0)
 
     badge = severity_badge(severity)
+    foreseen_prefix = (
+        f"{FORESEEN_BADGE}  " if data.get("source") == "anticipatory" else ""
+    )
 
     # Word-wrap the advice text
     wrapped = textwrap.fill(advice_text, width=WRAP_WIDTH - 4)
@@ -307,7 +313,7 @@ def render_advice(data: dict) -> str:
         lines = [
             "",
             THICK_SEPARATOR,
-            f"  {BOLD}AUGUR ADVISOR{RESET}  {badge}  "
+            f"  {foreseen_prefix}{BOLD}AUGUR ADVISOR{RESET}  {badge}  "
             f"{player_color}{player.upper()}{RESET} played {BOLD}{move}{RESET}",
             SEPARATOR,
             f"  {FG_GRAY}Think time:{RESET}  {BOLD}{think_time:.1f}s{RESET}",
@@ -325,7 +331,7 @@ def render_advice(data: dict) -> str:
     lines = [
         "",
         THICK_SEPARATOR,
-        f"  {BOLD}AUGUR ADVISOR{RESET}  {badge}  "
+        f"  {foreseen_prefix}{BOLD}AUGUR ADVISOR{RESET}  {badge}  "
         f"{FG_CYAN}{domain.upper()}{RESET}/{entity}",
         SEPARATOR,
         f"{FG_WHITE}{indented}{RESET}",

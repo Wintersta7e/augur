@@ -64,6 +64,8 @@ EXPECTED_TOOLS = {
     "get_conscientia_charter",
     "get_conscientia_verdicts",
     "get_conscientia_violations",
+    "get_praesagium_patterns",
+    "get_praesagium_predictions",
     "dialogue_turn",
     "dialogue_history",
     "dialogue_pending",
@@ -154,7 +156,7 @@ async def main() -> int:
             tools = await session.list_tools()
             names = {t.name for t in tools.tools}
             row(
-                "list_tools (34 tools)",
+                "list_tools (36 tools)",
                 names == EXPECTED_TOOLS,
                 f"{len(names)} tools, missing={sorted(EXPECTED_TOOLS - names)}, "
                 f"extra={sorted(names - EXPECTED_TOOLS)}",
@@ -309,6 +311,23 @@ async def main() -> int:
                 "get_conscientia_violations",
                 "error" not in r and "violations" in r,
                 f"count={r.get('count')}",
+            )
+
+            # ---- praesagium surface (patterns/predictions may legitimately
+            # be empty on a fresh stack -- score presence of the documented
+            # response shape, not non-emptiness)
+            r = await call("get_praesagium_patterns", {"limit": 5})
+            row(
+                "get_praesagium_patterns",
+                "error" not in r and "patterns" in r and "count" in r,
+                f"count={r.get('count')} mined_at={r.get('mined_at')}",
+            )
+
+            r = await call("get_praesagium_predictions", {"limit": 5})
+            row(
+                "get_praesagium_predictions",
+                "error" not in r and "open" in r and "resolved" in r and "counts" in r,
+                f"counts={r.get('counts')}",
             )
 
             r = await call("list_sessions", {"limit": 5})

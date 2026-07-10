@@ -56,7 +56,7 @@ echo "  Starting Augur pipeline..."
 echo -e "${RESET}"
 
 # 1. Anomaly detector (must be first — listens for chess moves)
-echo -ne "  [1/9] Anomaly detector ...  "
+echo -ne "  [1/10] Anomaly detector ...  "
 $PYTHON "$PROJECT_DIR/vigil/anomaly_detector.py" \
 	>"$LOG_DIR/anomaly_detector.log" 2>&1 &
 PIDS+=($!)
@@ -69,7 +69,7 @@ else
 fi
 
 # 2. Correlator (cross-domain correlation — must be between detector and advisor)
-echo -ne "  [2/9] Correlator        ...  "
+echo -ne "  [2/10] Correlator        ...  "
 $PYTHON "$PROJECT_DIR/nexus/correlator.py" \
 	>"$LOG_DIR/correlator.log" 2>&1 &
 PIDS+=($!)
@@ -82,7 +82,7 @@ else
 fi
 
 # 3. Augur advisor (multi-domain LLM advisor — listens for correlation events)
-echo -ne "  [3/9] Augur advisor     ...  "
+echo -ne "  [3/10] Augur advisor     ...  "
 $PYTHON "$PROJECT_DIR/consilium/advisor.py" \
 	>"$LOG_DIR/augur_advisor.log" 2>&1 &
 PIDS+=($!)
@@ -95,7 +95,7 @@ else
 fi
 
 # 4. Feedback collector (listens for advice + perception events)
-echo -ne "  [4/9] Feedback collector...  "
+echo -ne "  [4/10] Feedback collector...  "
 $PYTHON "$PROJECT_DIR/responsum/feedback_collector.py" \
 	>"$LOG_DIR/feedback_collector.log" 2>&1 &
 PIDS+=($!)
@@ -108,7 +108,7 @@ else
 fi
 
 # 5. Reflection engine (triggers at end of session)
-echo -ne "  [5/9] Reflection engine ...  "
+echo -ne "  [5/10] Reflection engine ...  "
 $PYTHON "$PROJECT_DIR/disciplina/reflection_engine.py" \
 	>"$LOG_DIR/reflection_engine.log" 2>&1 &
 PIDS+=($!)
@@ -121,7 +121,7 @@ else
 fi
 
 # 6. Praefectus (faculty supervision / health monitor)
-echo -ne "  [6/9] Praefectus       ...  "
+echo -ne "  [6/10] Praefectus       ...  "
 $PYTHON "$PROJECT_DIR/praefectus/monitor.py" \
 	>"$LOG_DIR/praefectus.log" 2>&1 &
 PIDS+=($!)
@@ -133,7 +133,7 @@ else
 fi
 
 # 7. Imperator (awareness read-models — deterministic, no LLM)
-echo -ne "  [7/9] Imperator        ...  "
+echo -ne "  [7/10] Imperator        ...  "
 $PYTHON "$PROJECT_DIR/imperator/awareness.py" \
 	>"$LOG_DIR/imperator.log" 2>&1 &
 PIDS+=($!)
@@ -145,7 +145,7 @@ else
 fi
 
 # 8. Imperator II (self-improvement reasoner — watch-first, apply default OFF)
-echo -ne "  [8/9] Imperator II     ...  "
+echo -ne "  [8/10] Imperator II     ...  "
 $PYTHON "$PROJECT_DIR/imperator/improver.py" \
 	>"$LOG_DIR/imperator_ii.log" 2>&1 &
 PIDS+=($!)
@@ -156,8 +156,20 @@ else
 	echo -e "\033[91mFAILED${RESET}  — check $LOG_DIR/imperator_ii.log"
 fi
 
-# 9. Console display (runs in foreground — output goes to terminal)
-echo -e "  [9/9] Console display   ...  ${GREEN}starting (foreground)${RESET}"
+# 9. Praesagium (anticipation matcher — watch-first, enhancement not critical path)
+echo -ne "  [9/10] Praesagium       ...  "
+$PYTHON "$PROJECT_DIR/praesagium/matcher.py" \
+	>"$LOG_DIR/praesagium_matcher.log" 2>&1 &
+PIDS+=($!)
+sleep 1
+if kill -0 "${PIDS[-1]}" 2>/dev/null; then
+	echo -e "${GREEN}started${RESET}  (PID ${PIDS[-1]})"
+else
+	echo -e "\033[91mFAILED${RESET}  — check $LOG_DIR/praesagium_matcher.log"
+fi
+
+# 10. Console display (runs in foreground — output goes to terminal)
+echo -e "  [10/10] Console display   ...  ${GREEN}starting (foreground)${RESET}"
 echo ""
 echo -e "${GREEN}${BOLD}  All components running.${RESET}"
 echo ""

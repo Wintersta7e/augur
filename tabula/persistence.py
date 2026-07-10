@@ -66,6 +66,15 @@ MAX_DIALOGUE_DIRECTIVES: int = 200
 # conscientia/auditor.py's sweep idempotency depends on it.
 MAX_CONSCIENTIA_VERDICTS: int = 200
 MAX_CONSCIENTIA_VIOLATIONS: int = 500
+# Praesagium — anticipation faculty (spec 2026-07-09): per-session episode
+# logs, the open-prediction hash, and the resolved-prediction log. These are
+# the method DEFAULTS; callers pass their AugurConfig value explicitly
+# (praesagium_episode_cap_per_session / praesagium_open_predictions_cap /
+# praesagium_predictions_cap) so the default only matters for unconfigured
+# direct callers (e.g. tests).
+MAX_PRAESAGIUM_OPEN: int = 100
+MAX_PRAESAGIUM_RESOLVED: int = 500
+MAX_PRAESAGIUM_EPISODES: int = 2000
 
 # Default TTL for per-session Redis keys (feedback, correlation graph,
 # reflection report). Prevents indefinite growth beyond the 1000-entry
@@ -1411,3 +1420,189 @@ class PersistenceManager:
             if mdoms & want:
                 out.append(m)
         return out
+
+    # ── Praesagium — anticipation faculty (spec 2026-07-09) ─────────────────
+    # Episode lists are per-session (RPUSH, oldest-first), TTL'd + index-
+    # registered like save_correlation_graph. patterns is a single mined-
+    # rules JSON blob, overwritten each mine cycle. Open predictions live in
+    # a hash (HSET keyed by prediction_id) via the shared _hash_save/
+    # _hash_load helpers. resolve_praesagium_prediction is the ONLY path
+    # that moves a prediction open -> resolved: WATCH/MULTI CAS on the open
+    # hash (nexus/matrix_ops.py precedent) makes a replayed resolve on an
+    # already-resolved id a true no-op, the exactly-once contract behind
+    # invariant PR6.
+
+    def append_praesagium_episode(
+        self, session_id: str, entry: dict, *, cap: int = MAX_PRAESAGIUM_EPISODES
+    ) -> None:
+        """Append one episode to a session's list (RPUSH; newest at the tail).
+
+        TTL'd with SESSION_KEY_TTL_S on every call (not just the first) so
+        the key's expiry keeps sliding forward with activity, mirroring the
+        session-lifetime discipline of save_correlation_graph/save_feedback.
+        Trimmed to the newest *cap* entries via LTRIM -cap..-1 (RPUSH means
+        newest is at the tail, so trimming from the negative end keeps the
+        newest and drops the oldest). The session id is registered in the
+        ordered _index list only on the FIRST append of a session (RPUSH
+        return == 1), mirroring save_correlation_graph's lpush-once index
+        registration.
+        """
+        key = f"augur:praesagium:episodes:{session_id}"
+        n = self._r.rpush(key, json.dumps(entry))
+        self._r.ltrim(key, -cap, -1)
+        self._r.expire(key, SESSION_KEY_TTL_S)
+        if n == 1:
+            self._r.lpush("augur:praesagium:episodes:_index", session_id)
+            self._r.ltrim("augur:praesagium:episodes:_index", 0, 999)
+
+    def load_praesagium_episodes(self, session_id: str) -> list[dict]:
+        """Return a session's full episode list, oldest-first.
+
+        Corrupt entries are skipped individually rather than degrading the
+        whole list to [] — episodes are independent perception records
+        feeding pattern mining, so one bad entry should not hide the rest
+        (contrast the capped audit-log loaders below, which degrade whole).
+        """
+        key = f"augur:praesagium:episodes:{session_id}"
+        raw_list = cast(list[Any], self._r.lrange(key, 0, -1))
+        out: list[dict] = []
+        for entry in raw_list:
+            try:
+                out.append(json.loads(entry))
+            except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                continue
+        return out
+
+    def list_praesagium_episode_sessions(self, *, limit: int = 50) -> list[str]:
+        """Return recent session ids with persisted episode logs, newest first.
+
+        A non-positive *limit* returns [] (mirrors load_conscientia_verdicts):
+        otherwise LRANGE's stop index of ``limit - 1 == -1`` would read as
+        "through the last element", inverting limit=0 into "all sessions".
+        """
+        if limit <= 0:
+            return []
+        raw_ids = cast(
+            list[Any],
+            self._r.lrange("augur:praesagium:episodes:_index", 0, limit - 1),
+        )
+        return [sid.decode() if isinstance(sid, bytes) else sid for sid in raw_ids]
+
+    def save_praesagium_patterns(self, blob: dict) -> None:
+        """Overwrite the live mined-patterns blob (no TTL; regenerated each
+        mine cycle, same live-state discipline as save_auspices/save_self_model)."""
+        self._set_json("augur:praesagium:patterns", blob)
+
+    def load_praesagium_patterns(self) -> dict | None:
+        """Return the mined-patterns blob, or None if absent."""
+        return self._get_json("augur:praesagium:patterns")
+
+    def save_praesagium_open_prediction(
+        self, rec: dict, *, cap: int = MAX_PRAESAGIUM_OPEN
+    ) -> bool:
+        """Store an open prediction in the augur:praesagium:predictions:open hash.
+
+        *rec* must include a non-empty "prediction_id" key (ValueError
+        otherwise). Refuse-at-cap via the shared _hash_save helper: returns
+        False if a NEW prediction_id would exceed *cap* (existing ids keep
+        updating even at cap), mirroring add_dialogue_directive's contract.
+        """
+        prediction_id = rec.get("prediction_id")
+        if not prediction_id:
+            raise ValueError("rec must include a non-empty 'prediction_id'")
+        return self._hash_save(
+            "augur:praesagium:predictions:open", prediction_id, rec, cap=cap
+        )
+
+    def load_praesagium_open_predictions(self) -> list[dict]:
+        """Return all open predictions. Corrupt entries are skipped
+        individually, mirroring load_dialogue_directives."""
+        raw = cast(dict[Any, Any], self._r.hgetall("augur:praesagium:predictions:open"))
+        out: list[dict] = []
+        for v in raw.values():
+            try:
+                out.append(json.loads(v))
+            except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                continue
+        return out
+
+    def update_praesagium_open_prediction(
+        self, prediction_id: str, fields: dict
+    ) -> None:
+        """Merge *fields* into an existing open prediction; no-op if
+        *prediction_id* is not present (already resolved or never existed).
+
+        Load-merge-save against the hash field, bypassing the cap check
+        (the id already exists, so this can never grow the hash).
+        """
+        key = "augur:praesagium:predictions:open"
+        raw = cast(Any, self._r.hget(key, prediction_id))
+        if raw is None:
+            return
+        try:
+            rec = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning(
+                "augur:praesagium:predictions:open field %s corrupt; dropping update",
+                prediction_id,
+            )
+            return
+        rec.update(fields)
+        self._r.hset(key, prediction_id, json.dumps(rec))
+
+    def resolve_praesagium_prediction(
+        self,
+        prediction_id: str,
+        resolved_rec: dict,
+        *,
+        cap: int = MAX_PRAESAGIUM_RESOLVED,
+    ) -> bool:
+        """Move a prediction from open -> resolved. Returns True iff THIS
+        call removed the open record and appended to the resolved log --
+        the exactly-once contract behind invariant PR6 (spec §5.3). A
+        replayed resolve on an already-resolved (or never-existed)
+        prediction_id is a true no-op, returning False rather than raising
+        or double-logging.
+
+        WATCH/MULTI CAS on the open hash (the nexus/matrix_ops.py apply_
+        matrix_update precedent): the existence check and the HDEL+LPUSH+
+        LTRIM commit as one atomic transaction, so a concurrent resolve of
+        the same prediction_id cannot double-append to the resolved log.
+        """
+        key_open = "augur:praesagium:predictions:open"
+        key_log = "augur:praesagium:predictions:log"
+        with self._r.pipeline() as pipe:
+            while True:
+                try:
+                    pipe.watch(key_open)
+                    if not pipe.hexists(key_open, prediction_id):
+                        pipe.unwatch()
+                        return False
+                    pipe.multi()
+                    pipe.hdel(key_open, prediction_id)
+                    pipe.lpush(key_log, json.dumps(resolved_rec))
+                    pipe.ltrim(key_log, 0, cap - 1)
+                    pipe.execute()
+                    return True
+                except redis.WatchError:
+                    continue
+
+    def load_praesagium_resolved(self, *, limit: int = 50) -> list[dict]:
+        """Newest-first resolved-prediction records. A non-positive *limit*
+        returns []. Mirrors load_conscientia_verdicts' corrupt-degrade-to-[]
+        guard: this is the PR6 audit trail, so a corrupt entry indicates
+        broader corruption worth surfacing, not skipping."""
+        if limit <= 0:
+            return []
+        raw = cast(
+            list[Any],
+            self._r.lrange("augur:praesagium:predictions:log", 0, limit - 1),
+        )
+        try:
+            return [json.loads(x) for x in raw]
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            log.warning(
+                "augur:praesagium:predictions:log contained a corrupt entry; "
+                "returning []"
+            )
+            return []

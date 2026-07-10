@@ -108,17 +108,33 @@ def _derive_domain(feedback: dict) -> str:
        session was entirely correlated; post-Task-8 correlated records carry
        the real primary domain so this is meaningful).
     3. DEFAULT_DOMAIN as last resort.
+
+    Praesagium forewarnings are excluded from candidate counting at both
+    levels: they are a detector-loop domain, not a real advice domain, and
+    analyze_utility already filters them out of its own scoring. Without this
+    exclusion here too, a session where praesagium events are the numeric
+    majority could still derive domain="praesagium" while a minority real
+    domain's poor utility trips needs_prompt_mutation -- sending the earned
+    mutate_prompt call (a live LLM call) to praesagium instead of the real
+    domain, plus a dead prompt write nothing loads. If every event is
+    praesagium, fall through to the existing DEFAULT_DOMAIN behaviour.
     """
     advice_events = feedback.get("advice_events", [])
     standalone_domains = [
         ev.get("domain")
         for ev in advice_events
-        if ev.get("domain") and not ev.get("correlation_found")
+        if ev.get("domain")
+        and ev.get("domain") != "praesagium"
+        and not ev.get("correlation_found")
     ]
     if standalone_domains:
         return Counter(standalone_domains).most_common(1)[0][0]
     # Round-3 fallback: post-Task-8, correlated records have a real domain too.
-    all_domains = [ev.get("domain") for ev in advice_events if ev.get("domain")]
+    all_domains = [
+        ev.get("domain")
+        for ev in advice_events
+        if ev.get("domain") and ev.get("domain") != "praesagium"
+    ]
     if all_domains:
         return Counter(all_domains).most_common(1)[0][0]
     return DEFAULT_DOMAIN
@@ -153,7 +169,12 @@ def analyze_precision(
     weighted_totals: dict[str, float] = defaultdict(float)
     weighted_useful: dict[str, float] = defaultdict(float)
 
+    # Praesagium forewarnings have no sensor and no Vigil threshold to tune
+    # (detector-loop containment, spec 2026-07-09 §4.7) — excluded here so
+    # they never accumulate weighted signal toward a sigma adjustment.
     for ev in feedback.get("advice_events", []):
+        if ev.get("domain") == "praesagium":
+            continue
         weights = _attribution_weights(ev)
         useful = (
             ev.get("explicit_rating") == "y" or ev.get("behavioral_score", 0) >= 0.7
@@ -229,12 +250,20 @@ def analyze_utility(feedback: dict, config: AugurConfig) -> dict:
     prompt mutation only affects the single-domain DOMAIN_HANDLERS path;
     the correlation path uses build_correlation_prompt which is
     self-contained and not managed by PersistenceManager.save_prompt.
+
+    Also excludes praesagium-domain advice (detector-loop containment, spec
+    2026-07-09 §4.7) — a low-utility run of forewarnings must never trigger
+    an Ollama call to mutate a prompt nothing loads.
     """
     # Filter out correlated advice before computing the score that drives
     # prompt mutation. The correlation path is tuned by the matrix tuning
     # analysis in a later step of run_reflection, not by prompt mutation.
     all_events = feedback.get("advice_events", [])
-    advice_events = [e for e in all_events if not e.get("correlation_found")]
+    advice_events = [
+        e
+        for e in all_events
+        if not e.get("correlation_found") and e.get("domain") != "praesagium"
+    ]
 
     total = len(advice_events)
     if total == 0:
@@ -1529,6 +1558,20 @@ async def run_reflection(
         conscientia = {"error": str(exc)}
         log.warning("Conscientia review failed (non-fatal): %s", exc)
 
+    # 9. Praesagium mining pass — cross-session A→B pattern mining (spec 2026-07-09).
+    try:
+        from praesagium.miner import run_praesagium_mining
+
+        praesagium = run_praesagium_mining(session_id, pm, config)
+        log.info(
+            "Praesagium mining: %s",
+            praesagium.get("reason")
+            or f"active={praesagium.get('active', 0)} retired={praesagium.get('retired', 0)}",
+        )
+    except Exception as exc:
+        praesagium = {"error": str(exc)}
+        log.warning("Praesagium mining failed (non-fatal): %s", exc)
+
     # Build report
     report = {
         "session_id": session_id,
@@ -1543,6 +1586,7 @@ async def run_reflection(
             "memory": memory,
         },
         "conscientia": conscientia,
+        "praesagium": praesagium,
         "adjustments": {
             "sigma_adjusted": any_sigma_adjusted,
             "sigma_values": sigma_values_after,

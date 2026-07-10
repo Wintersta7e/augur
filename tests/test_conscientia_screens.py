@@ -1,5 +1,7 @@
 """Screen functions — pure verdicts over text/proposals."""
 
+import pytest
+
 from conscientia import charter
 from conscientia.screens import (
     CORRECTIVE_SUFFIX,
@@ -44,6 +46,37 @@ def test_disabled_screens_pass_everything():
 def test_non_string_and_empty_are_ok():
     assert screen_advice_text("", CFG).ok
     assert screen_advice_text(None, CFG).ok  # type: ignore[arg-type]
+
+
+def test_control_bytes_are_blocked():
+    # The anticipatory lane is the first non-LLM text path to vox, so a
+    # spoofed publisher can smuggle raw control/ANSI bytes past the substring
+    # valence screen. The structural check rejects C0/C1 controls (here an ANSI
+    # clear-screen escape) before any valence matching.
+    v = screen_advice_text("Rate elevated.\x1b[2J", CFG)
+    assert not v.ok
+    assert v.code == "control_chars"
+    assert v.principle == "restraint"
+
+
+def test_control_bytes_osc_sequence_blocked():
+    v = screen_advice_text("hi\x1b]0;evil\x07", CFG)
+    assert not v.ok
+    assert v.code == "control_chars"
+
+
+def test_newline_and_tab_still_pass():
+    # \t and \n are legitimate in LLM advice text — they must NOT be rejected.
+    assert screen_advice_text("Line one.\nLine two.\tIndented.", CFG).ok
+
+
+def test_control_bytes_pass_when_screen_disabled():
+    # C5 parity: with the screen off, EVERYTHING passes — even control bytes.
+    for cfg in (
+        AugurConfig(conscientia_enabled=False),
+        AugurConfig(conscientia_output_screen_enabled=False),
+    ):
+        assert screen_advice_text("Rate elevated.\x1b[2J", cfg).ok
 
 
 def test_taught_content_screens_both_fields():
@@ -137,3 +170,48 @@ def test_make_violation_shape():
 
 def test_corrective_suffix_has_slot():
     assert "{matched}" in CORRECTIVE_SUFFIX
+
+
+def test_bidi_controls_are_blocked():
+    # Unicode bidirectional controls (RLO, isolates, RLM) are
+    # unrenderable/deceptive codepoints in the SAME structural class as C0/C1 --
+    # they reorder rendered terminal text (Trojan-Source style) past the
+    # substring valence screen. Same Verdict code "control_chars".
+    for ch in ("‮", "⁦", "‏"):  # RLO, LRI, RLM
+        v = screen_advice_text(f"Rate elevated.{ch}", CFG)
+        assert not v.ok, ch
+        assert v.code == "control_chars", ch
+        assert v.principle == "restraint", ch
+
+
+def test_bidi_controls_pass_when_screen_disabled():
+    # C5 parity: with the screen off, EVERYTHING passes -- even BiDi controls.
+    for cfg in (
+        AugurConfig(conscientia_enabled=False),
+        AugurConfig(conscientia_output_screen_enabled=False),
+    ):
+        assert screen_advice_text("Rate elevated.‮", cfg).ok
+
+
+# -- CONTROL_CHARS_RE boundary sweep -----------------------------------------
+
+
+@pytest.mark.parametrize("ch", ["\x08", "\x0b", "\x1f", "\x7f", "\x9f", "‮"])
+def test_control_char_boundary_rejected(ch):
+    # Pins the exact reject edges of every excluded range in CONTROL_CHARS_RE
+    # (\x00-\x08, \x0b-\x1f, \x7f-\x9f) plus one BiDi control (RLO) -- a future
+    # regex edit that nudges a range boundary or drops the BiDi class fails
+    # this test instead of silently widening what reaches the terminal.
+    v = screen_advice_text(f"Rate elevated.{ch}", CFG)
+    assert not v.ok, ch
+    assert v.code == "control_chars", ch
+
+
+@pytest.mark.parametrize("ch", ["\x09", "\x0a", "\x20", "\x7e", "\xa0"])
+def test_control_char_boundary_allowed(ch):
+    # Pins the exact allow edges: tab/newline (deliberately excluded from the
+    # \x0b-\x1f range for multi-line advice text), the printable-ASCII
+    # boundary bytes (space, tilde), and the first byte past the C1 block
+    # (\xa0, non-breaking space -- NOT in \x7f-\x9f).
+    v = screen_advice_text(f"Rate elevated.{ch}", CFG)
+    assert v.ok, ch

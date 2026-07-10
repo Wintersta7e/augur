@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sys
 import time
 from collections.abc import Callable  # noqa: F401 — PEP-563 deferred annotations
@@ -735,6 +736,21 @@ def _build_advice_event(
         payload.get("combined_severity", primary.get("severity", "low"))
     ).lower()
 
+    # A forewarning has no "move". On the anticipatory path primary.move and
+    # primary.context.label are unclamped free text, so derive the alias from the
+    # clamp-validated antecedent -> consequent (control-free by construction)
+    # rather than reading them.
+    if payload.get("source") == "anticipatory":
+        block = payload.get("anticipatory") or {}
+        ante, cons = block.get("antecedent"), block.get("consequent")
+        move = (
+            f"{ante} → {cons}"
+            if isinstance(ante, str) and isinstance(cons, str)
+            else None
+        )
+    else:
+        move = primary.get("move", primary.get("context", {}).get("label", "?"))
+
     return {
         "domain": domain,
         "entity": entity,
@@ -752,7 +768,7 @@ def _build_advice_event(
         "escalation_rule": payload.get("escalation_rule"),
         # Compat aliases for console_display and feedback_collector
         "player": primary.get("entity", entity),
-        "move": primary.get("move", primary.get("context", {}).get("label", "?")),
+        "move": move,
         "think_time": primary.get("value", value),
         # Decision-time frozen baseline for the outcome metric (spec 1A/§4.3):
         # the detector emits these pre-update on every anomaly; thread them so
@@ -1400,6 +1416,19 @@ async def process_message(
 # ---------------------------------------------------------------------------
 
 
+# Any C0/C1/DEL control byte PLUS the Unicode bidirectional controls (LRM/RLM,
+# the embedding/override set U+202A-202E, the isolate set U+2066-2069). Identity
+# fields are single-line identifiers, so \t and \n are rejected too. An identity
+# field renders raw via vox with no valence screen to catch it, so a control or
+# text-reordering byte in one drops the whole envelope below; body text
+# (forewarning_text) is screened separately by the Conscientia output screen
+# (S2) and so is not checked here.
+_CONTROL_BYTES = re.compile(
+    r"[\x00-\x1f\x7f-\x9f"
+    r"\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+)
+
+
 def _clamp_foreseen(payload: dict) -> dict | None:
     """Validate + CLAMP a foreseen envelope at the Consilium boundary (PR1b).
 
@@ -1441,6 +1470,18 @@ def _clamp_foreseen(payload: dict) -> dict | None:
     entity = primary.get("entity")
     if not isinstance(entity, str) or not entity:
         return None
+    # Identity fields render raw via vox with no valence screen behind them, so
+    # reject control/ANSI bytes here. forewarning_text is exempt here: it is
+    # body text, screened for control bytes by the Conscientia output screen (S2).
+    for name, value in (
+        ("pattern_id", pattern_id),
+        ("antecedent", block.get("antecedent")),
+        ("consequent", block.get("consequent")),
+        ("entity", entity),
+    ):
+        if isinstance(value, str) and _CONTROL_BYTES.search(value):
+            log.warning("Dropping foreseen envelope: control bytes in %s", name)
+            return None
     # Force the never-exempt, medium-severity, single-path shape (PR1b).
     payload["correlation_found"] = False
     payload["correlated_events"] = []

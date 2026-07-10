@@ -294,6 +294,51 @@ _PR1B_MALFORMED = [
     _forged_valid(primary_anomaly={"domain": "praesagium", "entity": 42}),
     _forged_valid(primary_anomaly="not-a-dict"),
     _forged_valid(primary_anomaly=None),
+    # Control/ANSI bytes in an identity field render raw via vox (no valence
+    # screen catches them there), so the clamp DROPS them. Identity fields
+    # are single-line -> \t and \n are rejected too.
+    _forged_valid(
+        anticipatory={
+            "pattern_id": "pat\x1bDEAD",
+            "forewarning_text": "Forewarning: typing precedes activity.",
+            "antecedent": "typing:user",
+            "consequent": "activity:app",
+        }
+    ),
+    _forged_valid(
+        anticipatory={
+            "pattern_id": "patDEAD",
+            "forewarning_text": "Forewarning: typing precedes activity.",
+            "antecedent": "typing:\tuser",
+            "consequent": "activity:app",
+        }
+    ),
+    _forged_valid(
+        primary_anomaly={
+            "domain": "praesagium",
+            "entity": "pat\x07DEAD",
+            "severity": "high",
+            "value": 0.9,
+        }
+    ),
+    # A truthy-but-non-str pattern_id must still drop (the isinstance
+    # check, not a truthiness check, gates this field).
+    _forged_valid(
+        anticipatory={
+            "pattern_id": 123,
+            "forewarning_text": "t",
+            "antecedent": "typing:user",
+            "consequent": "activity:app",
+        }
+    ),
+    _forged_valid(
+        anticipatory={
+            "pattern_id": ["p"],
+            "forewarning_text": "t",
+            "antecedent": "typing:user",
+            "consequent": "activity:app",
+        }
+    ),
 ]
 
 

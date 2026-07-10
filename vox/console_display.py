@@ -13,12 +13,14 @@ import sys
 import textwrap
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import nats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tabula.config import AugurConfig  # noqa: E402
 from tabula.heartbeat import start_heartbeat  # noqa: E402
+from conscientia.screens import CONTROL_CHARS_RE  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging (minimal — this module IS the display)
@@ -65,6 +67,52 @@ WRAP_WIDTH = 80
 # Rendering helpers
 # ---------------------------------------------------------------------------
 
+
+def sanitize_external(value: object) -> str:
+    """Coerce an externally-sourced value to ``str`` and strip C0/C1/DEL control
+    bytes + Unicode bidirectional controls before it is interpolated into output.
+
+    ALWAYS-ON render backstop, independent of ``conscientia_enabled`` — this is
+    render mechanism, not policy. Reuses the single ``CONTROL_CHARS_RE`` exported
+    by the Conscientia output screen so the two character-class
+    definitions can never drift. ``\\t`` and ``\\n`` are preserved (that class
+    allows them). Callers pass raw dict values directly; only these external
+    VALUES are sanitized, while the trusted ANSI styling constants interpolated
+    around them are left intact, so colors/layout are never stripped.
+
+    Retained even though :func:`sanitize_payload` now scrubs the whole decoded
+    payload at the NATS boundary: the four legacy renderers below are also called
+    directly (with raw payloads) by unit tests, so their per-field sanitize is a
+    load-bearing, idempotent second line of defence — not dead code.
+    """
+    return CONTROL_CHARS_RE.sub("", str(value))
+
+
+def sanitize_payload(value: Any) -> Any:
+    """Recursively strip control/BiDi bytes from every ``str`` leaf of a decoded
+    payload, returning a NEW structure (the input is never mutated).
+
+    ALWAYS-ON structural backstop applied ONCE at the NATS decode
+    boundary — every ``on_*`` callback in :func:`_make_callbacks` runs the whole
+    decoded payload through this immediately after ``json.loads`` and BEFORE any
+    dedup or render call, so every current AND future renderer inherits
+    sanitization for free and no newly-added renderer can reopen the control-byte
+    gap. ``dict`` values and ``str`` keys are both walked; ``list`` elements are
+    walked; non-``str`` scalars (``int``/``float``/``bool``/``None``) pass through
+    untouched — NOT coerced to ``str`` (``0``/``0.0``/``False``/``None`` survive
+    as themselves). Reuses the single ``CONTROL_CHARS_RE`` shared with the
+    Conscientia output screen so the character class can never drift.
+    Idempotent.
+    """
+    if isinstance(value, str):
+        return CONTROL_CHARS_RE.sub("", value)
+    if isinstance(value, dict):
+        return {sanitize_payload(k): sanitize_payload(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [sanitize_payload(v) for v in value]
+    return value
+
+
 SEVERITY_STYLE = {
     "low": (FG_GREEN, "LOW"),
     "medium": (FG_YELLOW + BOLD, "MEDIUM"),
@@ -85,16 +133,16 @@ FORESEEN_BADGE = f"{BOLD}{FG_CYAN}[FORESEEN]{RESET}"
 
 def render_anomaly_line(data: dict) -> str:
     """One-line notification for low-severity anomalies."""
-    domain = data.get("domain", "?")
-    entity = data.get("entity", "?")
-    severity = data.get("severity", "low")
+    domain = data.get("domain", "?")  # raw: routing only; sanitized at interpolation
+    entity = sanitize_external(data.get("entity", "?"))
+    severity = sanitize_external(data.get("severity", "low"))
     badge = severity_badge(severity)
-    ts = _short_ts(data.get("timestamp", ""))
+    ts = sanitize_external(_short_ts(data.get("timestamp", "")))
     dev = data.get("deviation_score", 0)
 
     if domain == "chess":
-        player = data.get("player", "?")
-        move = data.get("move", "?")
+        player = sanitize_external(data.get("player", "?"))
+        move = sanitize_external(data.get("move", "?"))
         think = data.get("think_time", 0)
         return (
             f"{DIM}{ts}{RESET}  "
@@ -104,7 +152,7 @@ def render_anomaly_line(data: dict) -> str:
         )
 
     if domain == "typing":
-        wpm = (data.get("context") or {}).get("avg_wpm", "?")
+        wpm = sanitize_external((data.get("context") or {}).get("avg_wpm", "?"))
         return (
             f"{DIM}{ts}{RESET}  "
             f"{badge}  "
@@ -114,9 +162,9 @@ def render_anomaly_line(data: dict) -> str:
 
     if domain == "activity_focus":
         ctx = data.get("context", {}) or {}
-        active = ctx.get("active_dwell_s", "?")
-        new_app = ctx.get("new_app", "?")
-        baseline = data.get("baseline_mean", "?")
+        active = sanitize_external(ctx.get("active_dwell_s", "?"))
+        new_app = sanitize_external(ctx.get("new_app", "?"))
+        baseline = sanitize_external(data.get("baseline_mean", "?"))
         return (
             f"{DIM}{ts}{RESET}  "
             f"{badge}  "
@@ -127,9 +175,9 @@ def render_anomaly_line(data: dict) -> str:
 
     if domain == "activity_intensity":
         ctx = data.get("context", {}) or {}
-        value = data.get("value", "?")
-        keystrokes = ctx.get("keystroke_count", "?")
-        baseline = data.get("baseline_mean", "?")
+        value = sanitize_external(data.get("value", "?"))
+        keystrokes = sanitize_external(ctx.get("keystroke_count", "?"))
+        baseline = sanitize_external(data.get("baseline_mean", "?"))
         return (
             f"{DIM}{ts}{RESET}  "
             f"{badge}  "
@@ -138,12 +186,12 @@ def render_anomaly_line(data: dict) -> str:
         )
 
     # Generic fallback for unknown domains
-    value = data.get("value", "?")
-    baseline = data.get("baseline_mean", "?")
+    value = sanitize_external(data.get("value", "?"))
+    baseline = sanitize_external(data.get("baseline_mean", "?"))
     return (
         f"{DIM}{ts}{RESET}  "
         f"{badge}  "
-        f"{FG_GRAY}{domain}/{entity}: "
+        f"{FG_GRAY}{sanitize_external(domain)}/{entity}: "
         f"value={value} baseline={baseline} dev={dev:.1f}σ{RESET}"
     )
 
@@ -156,7 +204,7 @@ def render_correlation(data: dict) -> str:
     """
     primary = data.get("primary_anomaly", {})
     correlated = data.get("correlated_events", [])
-    combined = str(data.get("combined_severity", "?")).upper()
+    combined = sanitize_external(str(data.get("combined_severity", "?")).upper())
     rule = data.get("escalation_rule")
 
     color_map = {
@@ -168,31 +216,33 @@ def render_correlation(data: dict) -> str:
     badge = f"{color}[{combined}]{RESET}"
 
     if data.get("correlation_found"):
-        all_domains = [primary.get("domain", "?")] + [
-            e.get("domain", "?") for e in correlated
+        all_domains = [sanitize_external(primary.get("domain", "?"))] + [
+            sanitize_external(e.get("domain", "?")) for e in correlated
         ]
         header = (
-            f"{BOLD}\u26a0 CORRELATION{RESET} {badge}  "
+            f"{BOLD}⚠ CORRELATION{RESET} {badge}  "
             f"{FG_CYAN}{' + '.join(all_domains)}{RESET}"
         )
         lag = data.get("temporal_lag_seconds")
         lag_line = (
-            f"  {FG_GRAY}Temporal lag: {lag}s" if lag is not None else f"  {FG_GRAY}"
+            f"  {FG_GRAY}Temporal lag: {sanitize_external(lag)}s"
+            if lag is not None
+            else f"  {FG_GRAY}"
         )
         if rule:
-            lag_line += f"   rule: {rule}{RESET}"
+            lag_line += f"   rule: {sanitize_external(rule)}{RESET}"
         else:
             lag_line += f"{RESET}"
 
         sig_lines: list[str] = []
         for ev in [primary, *correlated]:
-            d = ev.get("domain", "?")
-            e = ev.get("entity", "?")
-            v = ev.get("value", "?")
-            b = ev.get("baseline_mean", "?")
-            dev = ev.get("deviation_score", "?")
+            d = sanitize_external(ev.get("domain", "?"))
+            e = sanitize_external(ev.get("entity", "?"))
+            v = sanitize_external(ev.get("value", "?"))
+            b = sanitize_external(ev.get("baseline_mean", "?"))
+            dev = sanitize_external(ev.get("deviation_score", "?"))
             sig_lines.append(
-                f"  {FG_WHITE}{d}{RESET}/{e}: value={v} baseline={b} dev={dev}\u03c3"
+                f"  {FG_WHITE}{d}{RESET}/{e}: value={v} baseline={b} dev={dev}σ"
             )
 
         return "\n".join(
@@ -209,18 +259,18 @@ def render_correlation(data: dict) -> str:
         )
 
     # Pass-through (standalone medium/high — no correlation)
-    domain = primary.get("domain", "?")
-    entity = primary.get("entity", "?")
-    value = primary.get("value", "?")
-    baseline = primary.get("baseline_mean", "?")
-    dev = primary.get("deviation_score", "?")
+    domain = sanitize_external(primary.get("domain", "?"))
+    entity = sanitize_external(primary.get("entity", "?"))
+    value = sanitize_external(primary.get("value", "?"))
+    baseline = sanitize_external(primary.get("baseline_mean", "?"))
+    dev = sanitize_external(primary.get("deviation_score", "?"))
     return "\n".join(
         [
             "",
             THICK_SEPARATOR,
             f"  {BOLD}STANDALONE{RESET} {badge}  {FG_CYAN}{domain}{RESET}/{entity}",
             SEPARATOR,
-            f"  value={value}  baseline={baseline}  dev={dev}\u03c3",
+            f"  value={value}  baseline={baseline}  dev={dev}σ",
             THICK_SEPARATOR,
             "",
         ]
@@ -290,7 +340,7 @@ def render_advice(data: dict) -> str:
     """Multi-line formatted block for LLM advice."""
     domain = data.get("domain", "?")
     severity = data.get("severity", "?")
-    advice_text = data.get("advice", "(no advice)")
+    advice_text = sanitize_external(data.get("advice", "(no advice)"))
     model = data.get("model", "?")
     latency_ms = data.get("latency_ms", 0)
 
@@ -327,7 +377,7 @@ def render_advice(data: dict) -> str:
         return "\n".join(lines)
 
     # Activity or typing domains
-    entity = data.get("entity", "?")
+    entity = sanitize_external(data.get("entity", "?"))
     lines = [
         "",
         THICK_SEPARATOR,
@@ -350,11 +400,11 @@ def render_suppression(data: dict) -> str:
     domain/entity, mirroring the low-severity one-liner style. Read-only
     operator surface — purely cosmetic, no state mutation here.
     """
-    domain = data.get("domain", "?")
-    entity = data.get("entity", "?")
-    severity = data.get("severity", "?")
-    reason = data.get("reason", "?")
-    ts = _short_ts(data.get("timestamp", ""))
+    domain = sanitize_external(data.get("domain", "?"))
+    entity = sanitize_external(data.get("entity", "?"))
+    severity = sanitize_external(data.get("severity", "?"))
+    reason = sanitize_external(data.get("reason", "?"))
+    ts = sanitize_external(_short_ts(data.get("timestamp", "")))
     return (
         f"{DIM}{ts}{RESET}  "
         f"{FG_GRAY}{domain}/{entity} {severity}  "
@@ -598,6 +648,138 @@ BANNER = f"""{FG_CYAN}{BOLD}
 # ---------------------------------------------------------------------------
 
 
+def _make_callbacks(
+    last_rendered: dict[str, tuple[str, str]],
+    last_violations: LastViolations,
+) -> dict[str, Any]:
+    """Build the per-subject NATS callbacks that share the dedup state dicts.
+
+    Extracted from :func:`run` so each callback is constructible (and drivable
+    with a synthetic Msg) in tests — the structural pin for boundary sanitization.
+
+    Every callback decodes, then runs the WHOLE payload through
+    :func:`sanitize_payload` ONCE — immediately after ``json.loads`` and BEFORE
+    any dedup or render call. Consequences, both intended:
+      * every renderer (current and future) sees only sanitized strings, so
+        control/BiDi bytes from a spoofed local publisher — or from the LLM
+        itself (``render_proposal`` rationale) — can never reach the terminal;
+      * the dedup keys (``last_rendered`` / ``last_violations``) are therefore
+        computed from sanitized values. That is correct and intended: two
+        payloads differing only in stripped control bytes dedup as identical.
+    """
+
+    async def on_anomaly(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = sanitize_payload(json.loads(msg.data.decode()))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        severity = data.get("severity", "low")
+        if severity == "low":
+            print(render_anomaly_line(data), flush=True)
+            update_last_rendered(last_rendered, data)
+
+    async def on_correlation(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = sanitize_payload(json.loads(msg.data.decode()))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        primary = data.get("primary_anomaly", {})
+        if dedup_should_suppress(last_rendered, primary):
+            # The primary already showed as a low-severity one-liner
+            # when it first arrived on augur.vigil.anomaly — do not
+            # render it again as part of the correlation block.
+            # The correlation block still prints (this flag only
+            # suppresses the earlier one-liner's retention).
+            pass
+        print(render_correlation(data), flush=True)
+
+    async def on_advice(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = sanitize_payload(json.loads(msg.data.decode()))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        print(render_advice(data), flush=True)
+
+    async def on_suppressed(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = sanitize_payload(json.loads(msg.data.decode()))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        print(render_suppression(data), flush=True)
+        # The suppressed payload carries the PRIMARY anomaly's domain/entity
+        # and the ORIGINATING anomaly's timestamp, so update_last_rendered
+        # keyed on those makes dedup_should_suppress fire for the same anomaly.
+        update_last_rendered(last_rendered, data)
+
+    async def on_reflection(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = sanitize_payload(json.loads(msg.data.decode()))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        print(render_reflection(data), flush=True)
+
+    async def on_health(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = sanitize_payload(json.loads(msg.data.decode()))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        print(render_health(data), flush=True)
+
+    async def on_auspices(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = sanitize_payload(json.loads(msg.data.decode()))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        print(render_auspices(data))
+
+    async def on_self_model(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = sanitize_payload(json.loads(msg.data.decode()))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        print(render_self_model(data))
+
+    async def on_proposal(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = sanitize_payload(json.loads(msg.data.decode()))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        print(render_proposal(data))
+
+    async def on_conscientia_violation(msg: nats.aio.client.Msg) -> None:
+        try:
+            data = sanitize_payload(json.loads(msg.data.decode()))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+
+        if dedup_should_suppress_violation(last_violations, data):
+            return
+        print(render_conscientia_violation(data), flush=True)
+        update_last_violations(last_violations, data)
+
+    return {
+        SUBJECT_ANOMALY: on_anomaly,
+        SUBJECT_CORRELATION: on_correlation,
+        SUBJECT_ADVICE: on_advice,
+        SUBJECT_SUPPRESSED: on_suppressed,
+        SUBJECT_REFLECT: on_reflection,
+        SUBJECT_HEALTH: on_health,
+        SUBJECT_AUSPICES: on_auspices,
+        SUBJECT_SELF_MODEL: on_self_model,
+        SUBJECT_PROPOSAL: on_proposal,
+        SUBJECT_CONSCIENTIA_VIOLATION: on_conscientia_violation,
+    }
+
+
 async def run() -> None:
     config = AugurConfig.from_env()
     nc = await nats.connect(
@@ -614,113 +796,12 @@ async def run() -> None:
 
     print(BANNER, flush=True)
 
-    async def on_anomaly(msg: nats.aio.client.Msg) -> None:
-        try:
-            data = json.loads(msg.data.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return
-
-        severity = data.get("severity", "low")
-        if severity == "low":
-            print(render_anomaly_line(data), flush=True)
-            update_last_rendered(last_rendered, data)
-
-    async def on_correlation(msg: nats.aio.client.Msg) -> None:
-        try:
-            data = json.loads(msg.data.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return
-
-        primary = data.get("primary_anomaly", {})
-        if dedup_should_suppress(last_rendered, primary):
-            # The primary already showed as a low-severity one-liner
-            # when it first arrived on augur.vigil.anomaly — do not
-            # render it again as part of the correlation block.
-            # The correlation block still prints (this flag only
-            # suppresses the earlier one-liner's retention).
-            pass
-        print(render_correlation(data), flush=True)
-
-    async def on_advice(msg: nats.aio.client.Msg) -> None:
-        try:
-            data = json.loads(msg.data.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return
-
-        print(render_advice(data), flush=True)
-
-    async def on_suppressed(msg: nats.aio.client.Msg) -> None:
-        try:
-            data = json.loads(msg.data.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return
-
-        print(render_suppression(data), flush=True)
-        # The suppressed payload carries the PRIMARY anomaly's domain/entity
-        # and the ORIGINATING anomaly's timestamp, so update_last_rendered
-        # keyed on those makes dedup_should_suppress fire for the same anomaly.
-        update_last_rendered(last_rendered, data)
-
-    async def on_reflection(msg: nats.aio.client.Msg) -> None:
-        try:
-            data = json.loads(msg.data.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return
-
-        print(render_reflection(data), flush=True)
-
-    async def on_health(msg: nats.aio.client.Msg) -> None:
-        try:
-            data = json.loads(msg.data.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return
-
-        print(render_health(data), flush=True)
-
-    async def on_auspices(msg: nats.aio.client.Msg) -> None:
-        try:
-            print(render_auspices(json.loads(msg.data.decode())))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-
-    async def on_self_model(msg: nats.aio.client.Msg) -> None:
-        try:
-            print(render_self_model(json.loads(msg.data.decode())))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-
-    async def on_proposal(msg: nats.aio.client.Msg) -> None:
-        try:
-            print(render_proposal(json.loads(msg.data.decode())))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-
-    async def on_conscientia_violation(msg: nats.aio.client.Msg) -> None:
-        try:
-            data = json.loads(msg.data.decode())
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return
-
-        if dedup_should_suppress_violation(last_violations, data):
-            return
-        print(render_conscientia_violation(data), flush=True)
-        update_last_violations(last_violations, data)
-
-    # LEAK-07: save subscription handles so unsubscribe() is called on
-    # shutdown rather than relying on nc.close() to tear them down abruptly
-    # mid-render.
-    sub_anomaly = await nc.subscribe(SUBJECT_ANOMALY, cb=on_anomaly)
-    sub_correlation = await nc.subscribe(SUBJECT_CORRELATION, cb=on_correlation)
-    sub_advice = await nc.subscribe(SUBJECT_ADVICE, cb=on_advice)
-    sub_suppressed = await nc.subscribe(SUBJECT_SUPPRESSED, cb=on_suppressed)
-    sub_reflect = await nc.subscribe(SUBJECT_REFLECT, cb=on_reflection)
-    sub_health = await nc.subscribe(SUBJECT_HEALTH, cb=on_health)
-    sub_auspices = await nc.subscribe(SUBJECT_AUSPICES, cb=on_auspices)
-    sub_self_model = await nc.subscribe(SUBJECT_SELF_MODEL, cb=on_self_model)
-    sub_proposal = await nc.subscribe(SUBJECT_PROPOSAL, cb=on_proposal)
-    sub_conscientia_violation = await nc.subscribe(
-        SUBJECT_CONSCIENTIA_VIOLATION, cb=on_conscientia_violation
-    )
+    # Save subscription handles so unsubscribe() is called on shutdown rather
+    # than relying on nc.close() to tear them down abruptly mid-render. Callbacks
+    # are built by _make_callbacks so the decode-boundary sanitization is shared
+    # and testable.
+    callbacks = _make_callbacks(last_rendered, last_violations)
+    subs = [await nc.subscribe(subject, cb=cb) for subject, cb in callbacks.items()]
 
     try:
         while True:
@@ -735,16 +816,8 @@ async def run() -> None:
             except asyncio.CancelledError:
                 pass
         try:
-            await sub_anomaly.unsubscribe()
-            await sub_correlation.unsubscribe()
-            await sub_advice.unsubscribe()
-            await sub_suppressed.unsubscribe()
-            await sub_reflect.unsubscribe()
-            await sub_health.unsubscribe()
-            await sub_auspices.unsubscribe()
-            await sub_self_model.unsubscribe()
-            await sub_proposal.unsubscribe()
-            await sub_conscientia_violation.unsubscribe()
+            for sub in subs:
+                await sub.unsubscribe()
         except Exception as exc:
             log.debug("Unsubscribe failed during shutdown: %s", exc)
         await nc.close()

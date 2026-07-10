@@ -5,10 +5,24 @@ disabled screens pass everything (kill-switch parity, invariant C5)."""
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 
 from conscientia import charter
+
+# C0/C1 control + DEL bytes EXCEPT \t (0x09) and \n (0x0a), which legitimate
+# multi-line LLM advice uses, PLUS the Unicode bidirectional controls (LRM/RLM,
+# the embedding/override set U+202A-202E, the isolate set U+2066-2069). A
+# structural mechanism (like CORRECTIVE_SUFFIX), not policy -- deliberately not
+# configurable. Catches raw ANSI/escape bytes AND deceptive text-reordering
+# (Trojan-Source) codepoints the substring valence screen would otherwise pass
+# through to the terminal. Public name: vox imports this so its render
+# backstop shares exactly one character-class definition with this screen.
+CONTROL_CHARS_RE = re.compile(
+    r"[\x00-\x08\x0b-\x1f\x7f-\x9f"
+    r"\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+)
 
 # Appended to the advice prompt for the single corrective regeneration
 # attempt (spec D3). Part of the mechanism, not policy — deliberately not
@@ -52,6 +66,13 @@ def screen_advice_text(text, cfg) -> Verdict:
         return Verdict(True)
     if not isinstance(text, str) or not text:
         return Verdict(True)
+    if CONTROL_CHARS_RE.search(text):
+        return Verdict(
+            False,
+            "control_chars",
+            "control or escape bytes in output text",
+            "restraint",
+        )
     hit = match_pattern(text, charter.output_patterns(cfg))
     if hit is None:
         return Verdict(True)

@@ -1281,7 +1281,9 @@ async def run_reflection(
     nc: nats.aio.client.Client,
     config: AugurConfig,
 ) -> dict[str, Any]:
-    """Execute all four analyses and build the reflection report."""
+    """Run the full reflection — every analysis pass reported under
+    ``analyses`` plus the Memoria and Conscientia sweeps — and build the
+    reflection report."""
     domain = _derive_domain(feedback)
     log.info(
         "Starting reflection for session %s (derived domain=%s)",

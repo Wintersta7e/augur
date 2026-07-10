@@ -47,6 +47,7 @@ from consilium.app_descriptor import (
     resolve_app_descriptor,
 )
 from conscientia import screens as conscientia_screens
+from conscientia.recording import record_violation_best_effort
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -208,10 +209,7 @@ async def conscientia_finalize_text(
             session_id=session_id,
             regenerated=retries > 0,
         )
-        try:
-            pm.save_conscientia_violation(record)
-        except Exception:
-            log.warning("conscientia violation record failed", exc_info=True)
+        record_violation_best_effort(pm, record)
         try:
             await nc.publish(
                 "augur.conscientia.violation",
@@ -1036,6 +1034,9 @@ async def _build_prompt_and_deliver(
     advice_payload = _build_advice_event(
         payload, advice_text=advice, model_used=config.ollama_model, decision=decision
     )
+    # First-generation latency only: a conscientia corrective regeneration's
+    # second LLM call is not re-timed (the payload flags it via
+    # conscientia_regenerated; the field is display-only in vox).
     advice_payload["latency_ms"] = round(latency_ms, 1)
     advice_payload["tier"] = tier
     if conscientia_regenerated:

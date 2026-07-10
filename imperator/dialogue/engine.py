@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable
 
 from conscientia import screens
+from conscientia.recording import record_violation_best_effort
 from imperator.dialogue import context as C, intents as I, persona, router as R
 
 log = logging.getLogger(__name__)
@@ -341,21 +342,16 @@ async def _handle_intent(
                 cfg,
             )
             if not v.ok:
-                try:
-                    pm.save_conscientia_violation(
-                        screens.make_violation(
-                            "teach",
-                            v.code or "refused",
-                            v.detail or "",
-                            v.principle or "",
-                            session_id=session_id,
-                        )
-                    )
-                except Exception:
-                    log.warning(
-                        "conscientia violation record failed (non-fatal)",
-                        exc_info=True,
-                    )
+                record_violation_best_effort(
+                    pm,
+                    screens.make_violation(
+                        "teach",
+                        v.code or "refused",
+                        v.detail or "",
+                        v.principle or "",
+                        session_id=session_id,
+                    ),
+                )
                 raise ValueError(
                     f"I won't store that: {v.detail} (principle: {v.principle})."
                 )

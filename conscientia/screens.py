@@ -29,6 +29,13 @@ class Verdict:
     principle: str | None = None
 
 
+# (original, lowered) pairs — lowered once at import; the original casing is
+# kept for the violation message.
+_PROTECTED_SURFACES_LOWER = tuple(
+    (prefix, prefix.lower()) for prefix in charter.PROTECTED_SURFACES
+)
+
+
 def match_pattern(text: str, patterns: tuple[str, ...]) -> str | None:
     low = text.lower()
     for pat in patterns:
@@ -98,8 +105,8 @@ def screen_proposal(p: dict, cfg) -> Verdict:
         )
     target = str(p.get("target") or "")
     low = target.lower()
-    for prefix in charter.PROTECTED_SURFACES:
-        if low.startswith(prefix.lower()):
+    for prefix, prefix_low in _PROTECTED_SURFACES_LOWER:
+        if low.startswith(prefix_low):
             return Verdict(
                 False,
                 "protected_surface",

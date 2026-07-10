@@ -247,28 +247,40 @@ def update_last_rendered(last_rendered: dict, anomaly: dict) -> None:
     last_rendered[domain] = (anomaly.get("entity"), anomaly.get("timestamp"))
 
 
-def dedup_should_suppress_violation(last_violations: dict, violation: dict) -> bool:
+# (surface, domain, entity) -> last rendered detail
+LastViolations = dict[tuple[str | None, str | None, str | None], str | None]
+
+
+def dedup_should_suppress_violation(
+    last_violations: LastViolations, violation: dict
+) -> bool:
     """Return True if an identical violation was already rendered.
 
-    Matches on (surface, domain, detail) — the same charter block repeated
-    verbatim (e.g. a habitually-triggered pattern) is suppressed; a
-    different detail for the same surface/domain still renders.
+    Matches on (surface, domain, entity, detail) — the same charter block
+    repeated verbatim (e.g. a habitually-triggered pattern) is suppressed; a
+    different detail for the same surface/domain/entity still renders, and so
+    does the same detail for a different entity.
     """
     surface = violation.get("surface")
     if surface is None:
         return False
-    prev_detail = last_violations.get((surface, violation.get("domain")))
+    prev_detail = last_violations.get(
+        (surface, violation.get("domain"), violation.get("entity"))
+    )
     if prev_detail is None:
         return False
     return prev_detail == violation.get("detail")
 
 
-def update_last_violations(last_violations: dict, violation: dict) -> None:
-    """Record this violation as the last rendered one for its (surface, domain)."""
+def update_last_violations(last_violations: LastViolations, violation: dict) -> None:
+    """Record this violation as the last rendered one for its
+    (surface, domain, entity)."""
     surface = violation.get("surface")
     if surface is None:
         return
-    last_violations[(surface, violation.get("domain"))] = violation.get("detail")
+    last_violations[(surface, violation.get("domain"), violation.get("entity"))] = (
+        violation.get("detail")
+    )
 
 
 def render_advice(data: dict) -> str:
@@ -592,7 +604,7 @@ async def run() -> None:
     )
 
     last_rendered: dict[str, tuple[str, str]] = {}
-    last_violations: dict[tuple[str | None, str | None], str | None] = {}
+    last_violations: LastViolations = {}
 
     print(BANNER, flush=True)
 

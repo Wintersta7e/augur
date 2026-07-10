@@ -140,6 +140,21 @@ def test_violating_fact_rationale_refused():
     assert pm.load_taught_facts() == []  # nothing stored
 
 
+def test_refusal_survives_violation_write_failure(monkeypatch):
+    # The bookkeeping write is best-effort: a Redis failure must not turn the
+    # refusal into a crash, and must not let the fact through.
+    pm, nc = _pm(), _NC()
+
+    def broken(record):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(pm, "save_conscientia_violation", broken)
+    out = _turn(pm, nc, _cfg(), _fact_query_fn("remind me to take a break every hour"))
+    assert out.needs_clarification is True
+    assert "won't store" in out.reply
+    assert pm.load_taught_facts() == []  # still nothing stored
+
+
 def test_clean_fact_routes():
     pm, nc = _pm(), _NC()
     out = _turn(pm, nc, _cfg(), _fact_query_fn("deep work happens in the mornings"))

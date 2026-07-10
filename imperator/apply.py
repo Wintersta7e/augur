@@ -9,6 +9,7 @@ import uuid as _uuid
 
 from consilium.prompt_safety import is_prompt_acceptable
 from conscientia import screens
+from conscientia.recording import record_violation_best_effort
 from memoria.fsrs import make_memory_id
 from nexus import matrix_ops
 from imperator import proposals as P
@@ -71,19 +72,17 @@ def _conscientia_refuses(pm, p: dict, *, cfg, session_id: str | None = None) -> 
         return True
     if v.ok:
         return False
-    try:
-        pm.save_conscientia_violation(
-            screens.make_violation(
-                "apply",
-                v.code or "refused",
-                v.detail or "",
-                v.principle or "",
-                state_key=f"{p.get('kind')}:{p.get('target')}",
-                session_id=session_id,
-            )
-        )
-    except Exception:
-        log.warning("conscientia violation record failed (non-fatal)", exc_info=True)
+    record_violation_best_effort(
+        pm,
+        screens.make_violation(
+            "apply",
+            v.code or "refused",
+            v.detail or "",
+            v.principle or "",
+            state_key=f"{p.get('kind')}:{p.get('target')}",
+            session_id=session_id,
+        ),
+    )
     log.info(
         "conscientia refused apply for %s/%s: %s",
         p.get("kind"),

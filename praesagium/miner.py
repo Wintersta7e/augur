@@ -97,10 +97,20 @@ def run_praesagium_mining(session_id: str, pm: Any, config: Any) -> dict:
     time_ordered = list(reversed(resolved))
 
     prev_watermark = 0.0
+    prev_watermark_ids: set[str] = set()
+    watermark_ids_known = True  # no prior blob at all -> nothing to migrate
     if isinstance(prev, dict):
         wm = _number(prev.get("hit_rate_watermark"))
         if wm is not None:
             prev_watermark = wm
+        wm_ids = prev.get("hit_rate_watermark_ids")
+        # A blob written before the exact-fold rule existed never carried this
+        # field at all -- distinct from a present-but-empty list, and must
+        # mirror patterns.py's merge_blob so this recount agrees with the
+        # actual fold. See praesagium/patterns.py::_fold_resolutions docstring.
+        watermark_ids_known = wm_ids is not None
+        if isinstance(wm_ids, list):
+            prev_watermark_ids = {x for x in wm_ids if isinstance(x, str)}
 
     # WARN when LTRIM has eaten unfolded resolutions: the oldest retained entry
     # postdates the previous watermark, so outcomes in (watermark, oldest) were
@@ -165,15 +175,25 @@ def run_praesagium_mining(session_id: str, pm: Any, config: Any) -> dict:
     prev_patterns = prev.get("patterns", {}) if isinstance(prev, dict) else {}
     if not isinstance(prev_patterns, dict):
         prev_patterns = {}
-    # merge_blob folds a resolution iff its ts > watermark, its outcome is
-    # recognised, and its pid is in union(prev, candidates); recomputing that
-    # exact filter here keeps the report honest without re-running the fold.
+    # merge_blob folds a resolution iff (ts > watermark) OR (ts == watermark and
+    # its prediction_id was not already folded there AND watermark_ids_known),
+    # its outcome is recognised, and its pid is in union(prev, candidates);
+    # recomputing that exact filter here keeps the report honest without
+    # re-running the fold.
     merged_pids = set(prev_patterns) | set(candidates)
     resolutions_folded = 0
     for r in time_ordered:
         ts = _resolved_ts(r)
-        if ts is None or ts <= prev_watermark:
+        if ts is None or ts < prev_watermark:
             continue
+        if ts == prev_watermark:
+            pred_id = r.get("prediction_id")
+            if (
+                not watermark_ids_known
+                or not isinstance(pred_id, str)
+                or pred_id in prev_watermark_ids
+            ):
+                continue
         if (
             r.get("outcome") in _RECOGNIZED_OUTCOMES
             and r.get("pattern_id") in merged_pids

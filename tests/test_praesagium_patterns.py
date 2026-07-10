@@ -298,6 +298,30 @@ def test_status_always_provisional():
         assert art["status"] == "provisional"
 
 
+# -- malformed episode entries are skipped, not fatal ------------------------
+
+
+def test_mine_corpus_malformed_episodes_skipped_valid_still_mines():
+    # A corpus mixing valid episodes with four malformed shapes -- missing
+    # "t", "t" as a bool, "t" as a str, and a bare non-dict element -- must
+    # not raise, and the valid (A, B) pattern must still mine exactly as it
+    # does over the clean corpus.
+    corpus = _basic_corpus()
+    corpus["s0"].append({"k": _A, "s": "low"})  # missing "t"
+    corpus["s1"].append({"k": _A, "s": "low", "t": True})  # "t" as bool
+    corpus["s2"].append({"k": _A, "s": "low", "t": "50"})  # "t" as str
+    corpus["s3"].append("garbage")  # bare non-dict element
+
+    result = mine_corpus(corpus, _cfg())  # must not raise
+
+    pid = pattern_id(_A, _B)
+    assert set(result.keys()) == {pid}  # malformed entries mined nothing extra
+    art = result[pid]
+    assert art["support_sessions"] == 5
+    assert art["n"] == 5
+    assert art["k"] == 5
+
+
 def test_empty_corpus_yields_nothing():
     assert mine_corpus({}, _cfg()) == {}
 
@@ -673,7 +697,14 @@ def test_merge_blob_shape():
     blob = merge_blob(None, _cands(_art()), [], _NOW, _cfg(), corpus_newest_ts=500.0)
     assert blob["version"] == 1
     assert blob["mined_at"] == _NOW
-    assert set(blob.keys()) == {"version", "mined_at", "hit_rate_watermark", "patterns"}
+    assert set(blob.keys()) == {
+        "version",
+        "mined_at",
+        "hit_rate_watermark",
+        "hit_rate_watermark_ids",
+        "patterns",
+    }
+    assert blob["hit_rate_watermark_ids"] == []
 
 
 def test_first_run_all_provisional_and_stamped():
@@ -842,6 +873,169 @@ def test_fold_is_time_ordered_not_list_ordered():
     p = blob["patterns"][pid]
     # time order is fulfilled@10 then expired@20 -> init 1.0 then 0.8, NOT 0.2.
     assert p["hit_rate"] == pytest.approx(0.8)
+
+
+# -- exact watermark fold -----------------------------------------------------
+
+
+def _pres(qid: str, pid: str, outcome: str, ts: float) -> dict:
+    """A resolution carrying its prediction_id (the exact-fold dedup identity)."""
+    return {
+        "prediction_id": qid,
+        "pattern_id": pid,
+        "outcome": outcome,
+        "resolved_ts": float(ts),
+    }
+
+
+def test_exact_fold_catches_same_ts_after_midbatch_snapshot():
+    # Three resolutions share resolved_ts=T. A mid-batch miner snapshot
+    # cuts the log after q1,q2; q3 is LPUSHed afterwards. Strict `>` would drop
+    # q3 forever (its ts == the watermark). The exact fold folds q3 exactly once
+    # next cycle and never re-folds q1,q2.
+    pid = pattern_id("c:A", "c:B")
+    T = 100.0
+    q1 = _pres("q1", pid, "fulfilled", T)
+    q2 = _pres("q2", pid, "fulfilled", T)
+    q3 = _pres("q3", pid, "expired", T)
+    prev = _prev(_pat(status="active", hit_rate=None, resolutions=0), watermark=0.0)
+
+    # Cycle N: snapshot saw only q1,q2.
+    blob_n = merge_blob(
+        prev, _cands(_art()), [q1, q2], _NOW, _cfg(), corpus_newest_ts=1.0
+    )
+    p_n = blob_n["patterns"][pid]
+    assert p_n["resolutions"] == 2
+    assert p_n["hit_rate"] == pytest.approx(1.0)  # both fulfilled
+    assert blob_n["hit_rate_watermark"] == T
+    assert blob_n["hit_rate_watermark_ids"] == ["q1", "q2"]
+
+    # Cycle N+1: the full log (q3 now present) is re-presented.
+    blob_n1 = merge_blob(
+        blob_n, _cands(_art()), [q1, q2, q3], _NOW, _cfg(), corpus_newest_ts=1.0
+    )
+    p_n1 = blob_n1["patterns"][pid]
+    # Exactly ONE new fold (q3): resolutions 2->3, not 2->5.
+    assert p_n1["resolutions"] == 3
+    # EWMA: 1.0 then 0.8*1.0 + 0.2*0.0 (q3 expired) = 0.8. A double-fold of
+    # q1,q2 would land elsewhere.
+    assert p_n1["hit_rate"] == pytest.approx(0.8)
+    assert blob_n1["hit_rate_watermark"] == T
+    assert blob_n1["hit_rate_watermark_ids"] == ["q1", "q2", "q3"]
+
+
+def test_exact_fold_idempotent_on_repeated_log():
+    # Re-presenting an identical log folds nothing new (every id already at the
+    # watermark).
+    pid = pattern_id("c:A", "c:B")
+    T = 100.0
+    log = [
+        _pres("q1", pid, "fulfilled", T),
+        _pres("q2", pid, "fulfilled", T),
+        _pres("q3", pid, "expired", T),
+    ]
+    prev = _prev(_pat(status="active", hit_rate=None, resolutions=0), watermark=0.0)
+    blob1 = merge_blob(prev, _cands(_art()), log, _NOW, _cfg(), corpus_newest_ts=1.0)
+    blob2 = merge_blob(blob1, _cands(_art()), log, _NOW, _cfg(), corpus_newest_ts=1.0)
+
+    p1 = blob1["patterns"][pid]
+    p2 = blob2["patterns"][pid]
+    assert p2["resolutions"] == p1["resolutions"] == 3  # zero new folds
+    assert p2["hit_rate"] == p1["hit_rate"]
+    assert (
+        blob2["hit_rate_watermark_ids"]
+        == blob1["hit_rate_watermark_ids"]
+        == ["q1", "q2", "q3"]
+    )
+
+
+def test_exact_fold_advancing_watermark_resets_ids():
+    # A later resolution advances the watermark; ids at the OLD watermark are
+    # discarded (they now sit strictly below the watermark, never re-folded).
+    pid = pattern_id("c:A", "c:B")
+    prev = _prev(_pat(status="active", hit_rate=None, resolutions=0), watermark=0.0)
+    log = [_pres("q1", pid, "fulfilled", 100.0), _pres("q2", pid, "fulfilled", 200.0)]
+    blob = merge_blob(prev, _cands(_art()), log, _NOW, _cfg(), corpus_newest_ts=1.0)
+    assert blob["hit_rate_watermark"] == 200.0
+    assert blob["hit_rate_watermark_ids"] == ["q2"]  # only ids AT the watermark
+
+
+def test_missing_ids_field_treats_watermark_ts_as_already_folded():
+    # A blob written before the exact-fold rule existed lacks
+    # hit_rate_watermark_ids ENTIRELY -- distinct from a present-but-empty
+    # list. The old strict-`>` code already folded
+    # whatever resolution(s) established this watermark on a prior mine, so a
+    # same-ts record must NOT re-fold just because the field is missing (that
+    # would double-count purely from the migration, not from new data). Only
+    # the genuinely newer resolution (T+10) folds.
+    pid = pattern_id("c:A", "c:B")
+    T = 50.0
+    prev = _prev(_pat(status="active", hit_rate=None, resolutions=0), watermark=T)
+    assert "hit_rate_watermark_ids" not in prev  # blob predates the exact-fold rule
+    log = [
+        _pres("q9", pid, "fulfilled", T),  # the watermark-setter -- already folded
+        _pres("q10", pid, "fulfilled", T + 10.0),  # genuinely new
+    ]
+    blob = merge_blob(prev, _cands(_art()), log, _NOW, _cfg(), corpus_newest_ts=1.0)
+    p = blob["patterns"][pid]
+    # Only q10 folds; q9 is skipped as already-folded by the legacy strict->
+    # code that established the watermark.
+    assert p["resolutions"] == 1
+    assert p["hit_rate"] == pytest.approx(1.0)
+    assert blob["hit_rate_watermark"] == T + 10.0
+    assert blob["hit_rate_watermark_ids"] == ["q10"]
+
+
+@pytest.mark.parametrize(
+    "garbage", ["not-a-list", 42, {"a": 1}], ids=["str", "int", "dict"]
+)
+def test_present_non_list_ids_field_still_folds_same_ts_like_empty(garbage):
+    # load_praesagium_patterns does no schema validation, so a
+    # corrupt/hand-edited blob can carry hit_rate_watermark_ids as a present
+    # but non-list garbage value. It IS present (watermark_ids_known=True,
+    # unlike test_missing_ids_field_treats_watermark_ts_as_already_folded's
+    # missing-field case above), but the
+    # isinstance(wm_ids, list) guard fails, so prev_watermark_ids stays the
+    # empty set -- functionally IDENTICAL to test_present_empty_ids_field_
+    # still_folds_same_ts below. A same-ts resolution must still fold.
+    pid = pattern_id("c:A", "c:B")
+    T = 50.0
+    prev = _prev(_pat(status="active", hit_rate=None, resolutions=0), watermark=T)
+    prev["hit_rate_watermark_ids"] = garbage  # present, but not a list
+    blob = merge_blob(
+        prev,
+        _cands(_art()),
+        [_pres("q9", pid, "fulfilled", T)],  # exactly at the watermark
+        _NOW,
+        _cfg(),
+        corpus_newest_ts=1.0,
+    )
+    p = blob["patterns"][pid]
+    assert p["resolutions"] == 1  # folded -- same as present-empty-list
+    assert blob["hit_rate_watermark_ids"] == ["q9"]
+
+
+def test_present_empty_ids_field_still_folds_same_ts():
+    # Contrast: a blob written after the exact-fold rule existed that genuinely
+    # folded NOTHING at its
+    # watermark (hit_rate_watermark_ids present but []) must still fold a
+    # brand-new same-ts resolution -- unlike the missing-field case above,
+    # nothing was already folded there, so this is real new data.
+    pid = pattern_id("c:A", "c:B")
+    T = 50.0
+    prev = _prev(_pat(status="active", hit_rate=None, resolutions=0), watermark=T)
+    prev["hit_rate_watermark_ids"] = []  # genuinely empty, NOT missing
+    blob = merge_blob(
+        prev,
+        _cands(_art()),
+        [_pres("q9", pid, "fulfilled", T)],  # exactly at the watermark
+        _NOW,
+        _cfg(),
+        corpus_newest_ts=1.0,
+    )
+    p = blob["patterns"][pid]
+    assert p["resolutions"] == 1  # folded -- watermark_ids_known and unseen
+    assert blob["hit_rate_watermark_ids"] == ["q9"]
 
 
 # -- retirement (Sec 4.6-4) --------------------------------------------------

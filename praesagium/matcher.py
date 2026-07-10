@@ -287,6 +287,11 @@ async def match_patterns(
     when no message went out). ``cooldowns[pid]`` is set at arm time regardless
     of emission. A cap-refused save is skipped with a WARN (defense in depth --
     unreachable by invariant PR4).
+
+    Every call also prunes ``cooldowns`` of any pid no longer present in the
+    freshly-loaded blob (retired/evicted patterns) -- otherwise the in-memory
+    dict grows without bound over weeks of mine cycles. Runs unconditionally
+    on every reach of a valid blob, even when no pattern in it matches *key*.
     """
     blob = pm.load_praesagium_patterns()
     if not isinstance(blob, dict):
@@ -294,6 +299,10 @@ async def match_patterns(
     patterns = blob.get("patterns")
     if not isinstance(patterns, dict):
         return
+
+    for pid in list(cooldowns):
+        if pid not in patterns:
+            del cooldowns[pid]
 
     session_id = payload.get("session_id")
     open_pattern_ids = {

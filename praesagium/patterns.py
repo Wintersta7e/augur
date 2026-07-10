@@ -502,38 +502,69 @@ def _fold_resolutions(
     merged: dict[str, dict],
     resolutions: list[dict],
     prev_watermark: float,
+    prev_watermark_ids: set[str],
+    watermark_ids_known: bool,
     cfg: Any,
-) -> float:
+) -> tuple[float, list[str]]:
     """Fold resolved outcomes into per-pattern EWMA hit rates (Sec 4.6-3).
 
-    Only resolutions with ``resolved_ts > prev_watermark`` are considered, in
-    strict time order (EWMA is order-dependent). Retired patterns keep folding
-    stragglers. The new watermark is the max considered ts (from DATA, not
-    ``mined_at``); it never regresses below *prev_watermark*.
+    A resolution folds iff ``resolved_ts > prev_watermark``, OR it lands EXACTLY
+    at the watermark (``resolved_ts == prev_watermark``) with a prediction_id not
+    already folded there (*prev_watermark_ids*). This exact fold catches same-ts
+    resolutions LPUSHed after a mid-batch miner snapshot, which a strict ``>``
+    comparison silently drops forever. A same-ts resolution lacking a
+    string prediction_id is skipped (unidentifiable -> can't dedup -> would
+    double-fold). Folds run in strict time order (EWMA is order-dependent);
+    retired patterns keep folding stragglers. Returns
+    ``(watermark, watermark_ids)``: the watermark from DATA (max considered ts,
+    never regressing below *prev_watermark*), and the prediction_ids folded AT
+    the new watermark ts -- accumulated with *prev_watermark_ids* when the
+    watermark does not advance (bounded by resolutions-per-anomaly at a single
+    ts, a handful).
+
+    *watermark_ids_known* is False iff the prior blob predates the exact-fold
+    rule and never carried ``hit_rate_watermark_ids`` at all -- that is NOT the
+    same as a present-but-empty set. A missing field means the old strict-`>`
+    code already folded whatever resolution(s) established *prev_watermark* on
+    a prior mine; without this flag, an empty *prev_watermark_ids* looks
+    identical to "nothing folded there yet" and the watermark-establishing
+    resolution re-folds once on the first post-upgrade mine (extra
+    ``resolutions`` increment + extra EWMA step, i.e. a migration double-fold).
+    When NOT known, every ``ts == prev_watermark`` resolution is treated as
+    already-folded (old strict-`>` semantics, for this one migration mine
+    only).
     """
     alpha = float(cfg.praesagium_hit_rate_alpha)
-    considered: list[tuple[float, str | None, float | None]] = []
+    considered: list[tuple[float, str | None, str | None, float | None]] = []
     for r in resolutions:
         if not isinstance(r, dict):
             continue
         ts = _finite_or_none(r.get("resolved_ts"))
-        if ts is None or ts <= prev_watermark:
+        if ts is None or ts < prev_watermark:
+            continue
+        pred_raw = r.get("prediction_id")
+        pred = pred_raw if isinstance(pred_raw, str) else None
+        if ts == prev_watermark and (
+            not watermark_ids_known or pred is None or pred in prev_watermark_ids
+        ):
+            # Already folded at the watermark: known-migration (ids missing),
+            # unidentifiable, or a known duplicate. Skip.
             continue
         outcome = r.get("outcome")
         if outcome in _RECOGNIZED_OUTCOMES:
             value = 1.0 if outcome == "fulfilled" else 0.0
-            considered.append((ts, r.get("pattern_id"), value))
+            considered.append((ts, r.get("pattern_id"), pred, value))
         else:
             # Unrecognised outcome: advances the watermark (seen) but folds
             # into no belief -- prevents a garbage record pinning the watermark.
-            considered.append((ts, None, None))
+            considered.append((ts, None, pred, None))
 
     if not considered:
-        return prev_watermark
+        return prev_watermark, sorted(prev_watermark_ids)
 
     considered.sort(key=lambda x: x[0])
     watermark = prev_watermark
-    for fold_ts, fold_pid, fold_value in considered:
+    for fold_ts, fold_pid, _pred, fold_value in considered:
         if fold_ts > watermark:
             watermark = fold_ts
         if fold_pid is None or fold_value is None:
@@ -547,7 +578,14 @@ def _fold_resolutions(
         else:
             p["hit_rate"] = (1.0 - alpha) * float(current) + alpha * fold_value
         p["resolutions"] = int(p.get("resolutions") or 0) + 1
-    return watermark
+
+    new_ids: set[str] = (
+        set(prev_watermark_ids) if watermark == prev_watermark else set()
+    )
+    for fold_ts, _fold_pid, pred, _fold_value in considered:
+        if fold_ts == watermark and pred is not None:
+            new_ids.add(pred)
+    return watermark, sorted(new_ids)
 
 
 def _apply_hit_rate_retire(merged: dict[str, dict], now: float, cfg: Any) -> None:
@@ -612,11 +650,15 @@ def merge_blob(
     *resolutions* should already be time-ordered by the caller (the miner
     reverses the newest-first log); this function additionally sorts defensively
     before the order-dependent EWMA fold. Returns the new blob
-    ``{"version", "mined_at", "hit_rate_watermark", "patterns"}`` -- every
-    pattern carries numeric ``created_at``/``mined_at`` and only finite floats.
+    ``{"version", "mined_at", "hit_rate_watermark", "hit_rate_watermark_ids",
+    "patterns"}`` -- every pattern carries numeric ``created_at``/``mined_at``
+    and only finite floats. ``hit_rate_watermark_ids`` are the prediction_ids
+    folded AT the watermark ts (the exact-fold dedup set).
     """
     prev_patterns: dict[str, dict] = {}
     prev_watermark = 0.0
+    prev_watermark_ids: set[str] = set()
+    watermark_ids_known = True  # no prior blob at all -> nothing to migrate
     if isinstance(prev, dict):
         pp = prev.get("patterns")
         if isinstance(pp, dict):
@@ -624,6 +666,13 @@ def merge_blob(
         wm = _finite_or_none(prev.get("hit_rate_watermark"))
         if wm is not None:
             prev_watermark = wm
+        wm_ids = prev.get("hit_rate_watermark_ids")
+        # A blob written before the exact-fold rule existed never carried this
+        # field at all -- distinct from a present-but-empty list. See
+        # _fold_resolutions docstring.
+        watermark_ids_known = wm_ids is not None
+        if isinstance(wm_ids, list):
+            prev_watermark_ids = {x for x in wm_ids if isinstance(x, str)}
 
     merged: dict[str, dict] = {}
     for pid in set(prev_patterns) | set(candidates):
@@ -631,7 +680,14 @@ def merge_blob(
             pid, prev_patterns.get(pid), candidates.get(pid), now, corpus_newest_ts
         )
 
-    new_watermark = _fold_resolutions(merged, resolutions, prev_watermark, cfg)
+    new_watermark, new_watermark_ids = _fold_resolutions(
+        merged,
+        resolutions,
+        prev_watermark,
+        prev_watermark_ids,
+        watermark_ids_known,
+        cfg,
+    )
     _apply_hit_rate_retire(merged, now, cfg)
     _bound(merged, cfg)
 
@@ -639,5 +695,6 @@ def merge_blob(
         "version": 1,
         "mined_at": float(now),
         "hit_rate_watermark": float(new_watermark),
+        "hit_rate_watermark_ids": new_watermark_ids,
         "patterns": merged,
     }

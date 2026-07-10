@@ -1532,23 +1532,41 @@ class PersistenceManager:
         """Merge *fields* into an existing open prediction; no-op if
         *prediction_id* is not present (already resolved or never existed).
 
-        Load-merge-save against the hash field, bypassing the cap check
-        (the id already exists, so this can never grow the hash).
+        WATCH/MULTI CAS on the open hash (the resolve_praesagium_prediction
+        precedent): the field is re-read INSIDE the watch and the merged hset
+        commits in one MULTI, so a concurrent HDEL (a miner expiry sweep on a
+        born-expired prediction landing between the read and the write) cannot
+        RESURRECT a resolved record -- the execute aborts, the retry re-reads the
+        now-absent field, and the update no-ops. A field vanished (or corrupt) by
+        the time we read is a true no-op. Bypasses the cap check (the id already
+        exists, so this can never grow the hash).
         """
         key = "augur:praesagium:predictions:open"
-        raw = cast(Any, self._r.hget(key, prediction_id))
-        if raw is None:
-            return
-        try:
-            rec = json.loads(raw)
-        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
-            log.warning(
-                "augur:praesagium:predictions:open field %s corrupt; dropping update",
-                prediction_id,
-            )
-            return
-        rec.update(fields)
-        self._r.hset(key, prediction_id, json.dumps(rec))
+        with self._r.pipeline() as pipe:
+            while True:
+                try:
+                    pipe.watch(key)
+                    raw = cast(Any, pipe.hget(key, prediction_id))
+                    if raw is None:
+                        pipe.unwatch()
+                        return
+                    try:
+                        rec = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                        pipe.unwatch()
+                        log.warning(
+                            "augur:praesagium:predictions:open field %s corrupt; "
+                            "dropping update",
+                            prediction_id,
+                        )
+                        return
+                    rec.update(fields)
+                    pipe.multi()
+                    pipe.hset(key, prediction_id, json.dumps(rec))
+                    pipe.execute()
+                    return
+                except redis.WatchError:
+                    continue
 
     def resolve_praesagium_prediction(
         self,

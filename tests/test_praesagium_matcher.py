@@ -477,6 +477,51 @@ def test_match_no_patterns_blob_is_noop():
     assert pm.load_praesagium_open_predictions() == []
 
 
+# -- stale cooldown pruning on blob reload -----------------------------------
+
+
+def test_match_prunes_stale_cooldowns_on_blob_reload():
+    # A pid retired/evicted from the patterns blob must be dropped from the
+    # in-memory cooldowns dict on every reload -- nothing else ever prunes it,
+    # so it would otherwise accumulate forever.
+    pm = _pm()
+    _seed_patterns(pm, _pattern(pid="live", antecedent="typing:user"))
+    cooldowns = {"stale-gone": 500.0, "live": 500.0}
+    asyncio.run(
+        match_patterns(
+            pm,
+            RecordingPublish(),
+            "typing:user",
+            ts=1000.0 + 700.0,  # past live's cooldown -> re-arms and refreshes it
+            payload={"session_id": "s"},
+            cfg=_cfg(),
+            cooldowns=cooldowns,
+        )
+    )
+    assert "stale-gone" not in cooldowns
+    assert "live" in cooldowns
+
+
+def test_match_prunes_stale_cooldowns_even_when_no_pattern_matches_key():
+    # The prune runs unconditionally on a valid blob, independent of whether
+    # any pattern's antecedent matches this call's key.
+    pm = _pm()
+    _seed_patterns(pm, _pattern(pid="live", antecedent="typing:user"))
+    cooldowns = {"stale-gone": 1.0}
+    asyncio.run(
+        match_patterns(
+            pm,
+            RecordingPublish(),
+            "activity:browser",  # matches no pattern's antecedent
+            ts=1000.0,
+            payload={"session_id": "s"},
+            cfg=_cfg(),
+            cooldowns=cooldowns,
+        )
+    )
+    assert cooldowns == {}
+
+
 # -- resolve_open_predictions -------------------------------------------------
 
 
@@ -621,6 +666,54 @@ def test_resolve_publish_failure_swallowed_but_counts():
     assert n == 1  # resolution counted despite publish failure
     assert len(pm.load_praesagium_resolved()) == 1
     assert pub.subjects() == [SUBJECT_RESOLVED]  # attempt was made
+
+
+# -- corrupt open-prediction records are skipped, not fatal ------------------
+
+
+def test_resolve_corrupt_open_records_skipped_valid_still_resolves():
+    # Three corrupt shapes coexisting with one valid open record: a non-dict
+    # JSON value, a dict missing "prediction_id", and a dict with a
+    # non-numeric "deadline_ts". None of these may raise or be counted; the
+    # valid record must resolve normally and the corrupt hash entries must be
+    # left untouched (resolve_open_predictions never writes to them).
+    pm = _pm()
+    key = "augur:praesagium:predictions:open"
+    pm._r.hset(key, "bad-nondict", json.dumps("not-a-dict"))
+    pm._r.hset(
+        key,
+        "bad-missing-pid",
+        json.dumps({"deadline_ts": 9999.0, "consequent": "activity:editor"}),
+    )
+    pm._r.hset(
+        key,
+        "bad-deadline",
+        json.dumps(
+            {
+                "prediction_id": "bad-deadline",
+                "deadline_ts": "soon",
+                "consequent": "activity:editor",
+            }
+        ),
+    )
+    _arm(pm, "p1", "typing:user", "activity:editor", created_ts=1000.0)
+
+    pub = RecordingPublish()
+    n = asyncio.run(
+        resolve_open_predictions(
+            pm, pub, "activity:editor", "medium", 1050.0, cfg=_cfg()
+        )
+    )
+
+    assert n == 1  # only the valid record resolves; corrupt ones uncounted
+    resolved = pm.load_praesagium_resolved()
+    assert len(resolved) == 1
+    assert resolved[0]["prediction_id"] == "pred-p1"
+    # The 3 corrupt entries remain in the hash exactly as seeded (untouched);
+    # the valid one was removed on resolve.
+    assert pm._r.hlen(key) == 3
+    remaining_ids = set(pm._r.hkeys(key))
+    assert remaining_ids == {b"bad-nondict", b"bad-missing-pid", b"bad-deadline"}
 
 
 # -- self-review: resolve-then-match ordering ---------------------------------

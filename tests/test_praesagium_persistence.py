@@ -128,6 +128,63 @@ def test_open_predictions_loader_skips_corrupt_entries():
     assert [r["prediction_id"] for r in got] == ["p1"]
 
 
+class _HdelBetweenReadWrite:
+    """Wraps a real pipeline; fires a concurrent HDEL right after the FIRST
+    ``hget`` (inside the WATCH), simulating a miner expiry sweep deleting a
+    born-expired prediction between the CAS read and its write. Under a blind
+    hget->hset RMW this would RESURRECT the resolved record; under WATCH/CAS the
+    execute() aborts (WatchError) and the retry re-reads the now-absent field."""
+
+    def __init__(self, real, client, key, pid):
+        self._real = real
+        self._client = client
+        self._key = key
+        self._pid = pid
+        self._armed = True
+
+    def __enter__(self):
+        self._real.__enter__()
+        return self
+
+    def __exit__(self, *a):
+        return self._real.__exit__(*a)
+
+    def hget(self, *a, **k):
+        val = self._real.hget(*a, **k)
+        if self._armed:
+            self._armed = False
+            self._client.hdel(self._key, self._pid)  # concurrent expiry sweep
+        return val
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_update_open_prediction_cas_no_resurrect_on_concurrent_hdel():
+    # A concurrent HDEL between the read and the write must NOT resurrect
+    # a resolved record. The blind RMW would hset the merged record back.
+    pm = _pm()
+    key = "augur:praesagium:predictions:open"
+    pm.save_praesagium_open_prediction({"prediction_id": "x1", "pattern_id": "p"})
+    real_pipeline = pm._r.pipeline
+    pm._r.pipeline = lambda *a, **k: _HdelBetweenReadWrite(
+        real_pipeline(*a, **k), pm._r, key, "x1"
+    )
+    pm.update_praesagium_open_prediction("x1", {"status": "armed"})
+    pm._r.pipeline = real_pipeline  # restore
+    assert pm.load_praesagium_open_predictions() == []
+    assert pm._r.hexists(key, "x1") in (False, 0)
+
+
+def test_update_open_prediction_corrupt_field_is_dropped(caplog):
+    pm = _pm()
+    key = "augur:praesagium:predictions:open"
+    pm._r.hset(key, "bad", b"{not json")
+    pm.update_praesagium_open_prediction("bad", {"status": "armed"})  # no raise
+    # The corrupt field is left untouched, not overwritten with the merge.
+    assert pm._r.hget(key, "bad") == b"{not json"
+
+
 # -- resolve (atomic, exactly-once — PR6) ----------------------------------------
 
 

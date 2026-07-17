@@ -23,8 +23,21 @@ if str(PROJECT_ROOT) not in sys.path:
 from tabula.config import AugurConfig  # noqa: E402
 from tabula.contracts import PerceptionEvent  # noqa: E402
 from tabula.persistence import PersistenceManager  # noqa: E402
+from tests.integration.cell_guard import check_test_cell  # noqa: E402
 
 _config = AugurConfig.from_env()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _require_test_cell() -> None:
+    """Abort the whole suite unless we are in the test cell.
+
+    autouse + session scope so this runs before any fixture writes. The suite
+    deletes every augur:* key; against the live cell that is data loss.
+    """
+    reason = check_test_cell(_config)
+    if reason is not None:
+        pytest.exit(f"REFUSING TO RUN: {reason}", returncode=2)
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +114,9 @@ async def redis_client() -> AsyncIterator[redis.Redis]:  # type: ignore[type-arg
     if keys:
         r.delete(*keys)
     yield r
+    leftover = r.keys("augur:*")
+    if leftover:
+        r.delete(*leftover)
     r.close()
 
 
@@ -173,11 +189,18 @@ async def pipeline(
     requested: list[str] = getattr(request, "param", [])
     procs: dict[str, asyncio.subprocess.Process] = {}
 
+    cell_env = {
+        **os.environ,
+        "AUGUR_REDIS_URL": _config.redis_url,
+        "AUGUR_NATS_URL": _config.nats_url,
+    }
+
     for name in requested:
         cmd = component_commands[name]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(PROJECT_ROOT),
+            env=cell_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

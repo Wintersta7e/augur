@@ -96,6 +96,7 @@ def _new_redis() -> redis.Redis:
     return redis.Redis(
         host=_config.redis_host,
         port=_config.redis_port,
+        db=_config.redis_db,
         socket_connect_timeout=_config.redis_connect_timeout,
     )
 

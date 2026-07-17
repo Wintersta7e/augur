@@ -37,8 +37,15 @@ def resolve_latest_reflection(pm) -> dict | None:
         if sid not in candidates:
             candidates.append(sid)
 
+    from tabula.provenance import ProvenanceMode, get_provenance_mode
+
+    enforcing = get_provenance_mode() is ProvenanceMode.ENFORCE
     best, best_ts = None, float("-inf")
     for sid in candidates:
+        # CL11/§4.3e: a non-learnable session's reflection is excluded from the
+        # Imperator read-models at READ time (OFF/REPORT leave it untouched).
+        if enforcing and not pm.is_learnable_session(sid):
+            continue
         report = pm.load_reflection(sid)
         if report is None:
             continue

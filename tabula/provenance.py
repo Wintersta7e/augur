@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -76,7 +77,22 @@ class ProvenanceMode(str, Enum):
     """Withhold learned writes for non-learnable sessions."""
 
 
-_mode = ProvenanceMode.OFF
+def _mode_from_env() -> ProvenanceMode:
+    """Initial mode from ``AUGUR_PROVENANCE_MODE`` (off|report|enforce), default OFF.
+
+    This is the single flip switch: a deployment sets the env var and every
+    faculty process picks it up at import — no per-faculty wiring. An unknown
+    value fails safe to OFF (never accidentally enforce or crash a faculty).
+    """
+    raw = os.environ.get("AUGUR_PROVENANCE_MODE", "off").strip().lower()
+    try:
+        return ProvenanceMode(raw)
+    except ValueError:
+        log.warning("invalid AUGUR_PROVENANCE_MODE=%r; defaulting to OFF", raw)
+        return ProvenanceMode.OFF
+
+
+_mode = _mode_from_env()
 
 
 def get_provenance_mode() -> ProvenanceMode:

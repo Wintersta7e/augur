@@ -317,12 +317,20 @@ class PersistenceManager:
         return self._get_json(key)
 
     def get_all_feedback(self, limit: int = 50) -> list[dict]:
+        # CL11: under ENFORCE, a non-learnable session's feedback is excluded from
+        # this cross-session learning pool at READ time (spec §4.3d). OFF/REPORT
+        # leave the pool untouched, so pre-enforcement behaviour is unchanged.
+        from tabula.provenance import ProvenanceMode, get_provenance_mode
+
+        enforcing = get_provenance_mode() is ProvenanceMode.ENFORCE
         session_ids = cast(
             list[Any], self._r.lrange("augur:responsum:_index", 0, limit - 1)
         )
         results: list[dict] = []
         for sid in session_ids:
             sid_str = sid.decode() if isinstance(sid, bytes) else sid
+            if enforcing and not self.is_learnable_session(sid_str):
+                continue
             fb = self.get_feedback(sid_str)
             if fb is not None:
                 fb["session_id"] = sid_str

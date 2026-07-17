@@ -80,6 +80,12 @@ async def main() -> int:
         REDIS_URL, decode_responses=True, socket_connect_timeout=5
     )
     pm = PersistenceManager(r)
+
+    def _synth(sid: str) -> str:
+        """Record a driver-minted session as synthetic (non-learnable) provenance."""
+        pm.save_session_meta(sid, origin="synthetic", created_by="gate_probe_test")
+        return sid
+
     nc = await nats.connect(NATS_URL, connect_timeout=5)
 
     anomalies: list[dict] = []
@@ -168,7 +174,7 @@ async def main() -> int:
 
     # ---------------- P1: absolute refractory right after a delivery
     print("\n=== P1: absolute refractory (45s) after a HIGH delivery ===", flush=True)
-    e1, sid1 = f"refr_{rid}", f"probe1-{rid}"
+    e1, sid1 = f"refr_{rid}", _synth(f"probe1-{rid}")
     await baseline(e1, sid1)
     await emit("typing", e1, 19.0, sid1)
     delivered = await wait_for(lambda: len(fires(e1)) >= 1, args.llm_wait)
@@ -194,7 +200,7 @@ async def main() -> int:
         "starvation release ===",
         flush=True,
     )
-    e2, sid2 = f"strv_{rid}", f"probe2-{rid}"
+    e2, sid2 = f"strv_{rid}", _synth(f"probe2-{rid}")
     await baseline(e2, sid2)
     for i in range(12):
         await anchor(e2, sid2, n=4)
@@ -220,7 +226,7 @@ async def main() -> int:
 
     # ---------------- P3: HIGH + correlated is exempt (invariant B)
     print("\n=== P3: high+correlated always fires (invariant B) ===", flush=True)
-    e3t, e3a, sid3 = f"exm_{rid}", f"exa_{rid}", f"probe3-{rid}"
+    e3t, e3a, sid3 = f"exm_{rid}", f"exa_{rid}", _synth(f"probe3-{rid}")
     await baseline(e3t, sid3)
     await baseline(
         e3a,
@@ -275,7 +281,7 @@ async def main() -> int:
     print("\n=== P5: computed medium-band spike (informational) ===", flush=True)
     observed = []
     for attempt in range(3):
-        e5, sid5 = f"med{attempt}_{rid}", f"probe5-{attempt}-{rid}"
+        e5, sid5 = f"med{attempt}_{rid}", _synth(f"probe5-{attempt}-{rid}")
         await baseline(e5, sid5, n=30)
         stats = pm.load_baseline("typing", e5) or {}
         mean = float(stats.get("ewma_mean", 3.55))

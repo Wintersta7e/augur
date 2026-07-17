@@ -19,3 +19,13 @@ All four connect to the **deploy stack** (or dev pipeline): NATS on `127.0.0.1:4
 `host.docker.internal` (from WSL, export `AUGUR_OLLAMA_URL=http://<default-gateway-ip>:11434`).
 Use run-unique entity/session IDs so each run gets a fresh baseline or dialogue context.
 For a clean, fully-attributable run, flush Redis and restart the faculty containers first.
+
+Every perception-injecting driver (`inject_and_observe`, `complete_loop_test`,
+`stress_soak`, `chaos_test`, `taught_e2e_test`, `gate_probe_test`) records its
+session as `origin="synthetic"` provenance (`augur:session:meta:<sid>`,
+`learnable=False`) before it injects. Even run against the live deploy stack
+their events are **explicitly** non-learnable, so they cannot train the real
+system once provenance enforcement lands. The `taught_e2e_test` dialogue turns
+ride separate `dlg-*` sessions and are not affected. A static guard
+(`tests/test_synthetic_driver_provenance.py`) fails if a perception driver ever
+omits this mint.

@@ -30,6 +30,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from tabula.contracts import PerceptionEvent  # noqa: E402
+from tabula.persistence import PersistenceManager  # noqa: E402
 
 NATS_URL = "nats://127.0.0.1:4222"
 REDIS_URL = "redis://127.0.0.1:6379"
@@ -70,6 +71,11 @@ async def main() -> int:
 
     r = redis_lib.Redis.from_url(
         REDIS_URL, decode_responses=True, socket_connect_timeout=5
+    )
+    # Runs against the live stack: record this session as synthetic so its
+    # injected perception is explicitly non-learnable, not merely unprovenanced.
+    PersistenceManager(r).save_session_meta(
+        session_id, origin="synthetic", created_by="inject_and_observe"
     )
     nc = await nats.connect(NATS_URL, connect_timeout=5)
     observed: dict[str, list] = {s: [] for s in OBSERVE_SUBJECTS}

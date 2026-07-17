@@ -101,6 +101,16 @@ async def main() -> int:
         REDIS_URL, decode_responses=True, socket_connect_timeout=5
     )
     pm = PersistenceManager(r)
+
+    def _synth(sid: str) -> str:
+        """Record a driver-minted perception session as synthetic (non-learnable).
+
+        The taught directives themselves ride separate ``dlg-*`` dialogue
+        sessions; only the injected perception is marked non-learnable here.
+        """
+        pm.save_session_meta(sid, origin="synthetic", created_by="taught_e2e_test")
+        return sid
+
     nc = await nats.connect(NATS_URL, connect_timeout=5)
     http_client = httpx.AsyncClient(timeout=cfg.ollama_timeout)
 
@@ -261,7 +271,7 @@ async def main() -> int:
 
     # ---------- F. Staleness refusal (run first: forces stale-latest state)
     print("\n=== F: staleness refusal (stale focus events only) ===", flush=True)
-    sid_f = f"e2e-f-{rid}"
+    sid_f = _synth(f"e2e-f-{rid}")
     stale_ts = iso(-(getattr(cfg, "focused_app_max_age_s", 300.0) + 100.0))
     await emit(
         "activity_focus",
@@ -303,7 +313,7 @@ async def main() -> int:
 
     # ---------- A. Taught fact -> advice plumbing
     print("\n=== A: taught fact -> Consilium injection block ===", flush=True)
-    sid_a = f"e2e-a-{rid}"
+    sid_a = _synth(f"e2e-a-{rid}")
     dlg_a = f"dlg-a-{rid}"
     ent_a = f"user_a_{rid}"
     fact_intent = {
@@ -362,7 +372,7 @@ async def main() -> int:
 
     # ---------- B. Server-authoritative predicate
     print("\n=== B: server-authoritative directive predicate ===", flush=True)
-    sid_b = f"e2e-b-{rid}"
+    sid_b = _synth(f"e2e-b-{rid}")
     dlg_b = f"dlg-b-{rid}"
     await publish_fresh_app(app, sid_b)
     live = pm.load_focused_app(now=time.time(), max_age_s=cfg.focused_app_max_age_s)
@@ -388,7 +398,7 @@ async def main() -> int:
 
     # ---------- C. Suppression while focused app matches
     print("\n=== C: HIGH spike suppressed by taught directive ===", flush=True)
-    sid_c = f"e2e-c-{rid}"
+    sid_c = _synth(f"e2e-c-{rid}")
     ent_c = f"user_c_{rid}"
     await publish_fresh_app(app, sid_c)  # re-stamp freshness
     await typing_spike(ent_c, sid_c)
@@ -420,7 +430,7 @@ async def main() -> int:
 
     # ---------- D. Undo -> fires again
     print("\n=== D: undo directive -> advice flows again ===", flush=True)
-    sid_d = f"e2e-d-{rid}"
+    sid_d = _synth(f"e2e-d-{rid}")
     ent_d = f"user_d_{rid}"
     undone = await undo(dlg_b)
     d_removed = not any(
@@ -437,7 +447,7 @@ async def main() -> int:
 
     # ---------- E. Scope isolation (directive scoped to another domain)
     print("\n=== E: chess-scoped directive must not gate typing ===", flush=True)
-    sid_e = f"e2e-e-{rid}"
+    sid_e = _synth(f"e2e-e-{rid}")
     dlg_e = f"dlg-e-{rid}"
     ent_e = f"user_e_{rid}"
     await publish_fresh_app(app, sid_e)
@@ -462,7 +472,7 @@ async def main() -> int:
 
     # ---------- G. Downgrade directive -> Tier-1 note
     print("\n=== G: downgrade directive -> Tier-1 note ===", flush=True)
-    sid_g = f"e2e-g-{rid}"
+    sid_g = _synth(f"e2e-g-{rid}")
     dlg_g = f"dlg-g-{rid}"
     ent_g = f"user_g_{rid}"
     await publish_fresh_app(app, sid_g)

@@ -1,18 +1,18 @@
 """learned_write / non_learning_write — report-only groundwork (spec §7 CL10, step 5.3).
 
-These decorators are the machinery the enforcement flip will stand on. They are
-inert in the tree today: applied to no production writer yet, and the global mode
-defaults to OFF. This pins their contract in isolation so the later per-writer
-migration builds on tested ground:
+These decorators are the machinery the enforcement flip stands on. Contract:
 
-- ``learned_write`` structurally REQUIRES a ``LearnContext`` in hand (you cannot
-  forget provenance);
-- OFF is a pure passthrough;
-- REPORT logs what a non-learnable session WOULD have withheld, then writes anyway
-  (measure blast radius against real traffic before enforcing);
-- ENFORCE actually withholds a non-learnable write;
-- ``non_learning_write`` records deliberate non-learning intent (+ reason) and is a
-  runtime passthrough, so the CL10 discovery pass can tell it from an unguarded write.
+- ``learned_write`` finds a ``LearnContext`` among the call's arguments
+  (conventionally a keyword-only ``ctx``). ``ctx`` is *optional in the signature*
+  — a migration convenience so the ~300 existing storage tests keep running in OFF
+  without edits — but it is **mandatory under ENFORCE**.
+- **OFF** is a pure passthrough (``ctx`` not inspected).
+- **REPORT** logs what a non-learnable session would withhold (and logs an
+  un-migrated caller that passes no ctx), then writes anyway.
+- **ENFORCE** withholds a non-learnable write and **raises** on a missing ctx, so
+  provenance cannot be silently forgotten where it is enforced.
+- ``non_learning_write`` records deliberate non-learning intent + reason; runtime
+  passthrough.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class _Writer:
         self.writes: list = []
 
     @learned_write
-    def save(self, ctx: LearnContext, value):
+    def save(self, value, *, ctx: LearnContext | None = None):
         self.writes.append(value)
         return "wrote"
 
@@ -56,32 +56,27 @@ class _Writer:
         return "audited"
 
 
-# -- OFF: pure passthrough ---------------------------------------------------
+# -- OFF: pure passthrough, ctx not even required ----------------------------
 
 
-def test_off_writes_for_both_learnable_and_not() -> None:
+def test_off_writes_with_or_without_ctx(caplog) -> None:
     set_provenance_mode(ProvenanceMode.OFF)
     w = _Writer()
-    assert w.save(REAL, "a") == "wrote"
-    assert w.save(SYNTH, "b") == "wrote"
-    assert w.writes == ["a", "b"]
-
-
-def test_off_does_not_log(caplog) -> None:
-    set_provenance_mode(ProvenanceMode.OFF)
     with caplog.at_level(logging.WARNING, logger="provenance"):
-        _Writer().save(SYNTH, "x")
+        assert w.save("a") == "wrote"  # no ctx — fine in OFF
+        assert w.save("b", ctx=SYNTH) == "wrote"  # non-learnable — still writes
+    assert w.writes == ["a", "b"]
     assert not caplog.records
 
 
-# -- REPORT: log the non-learnable, but still write --------------------------
+# -- REPORT: log, but still write --------------------------------------------
 
 
-def test_report_learnable_writes_without_logging(caplog) -> None:
+def test_report_learnable_writes_silently(caplog) -> None:
     set_provenance_mode(ProvenanceMode.REPORT)
     w = _Writer()
     with caplog.at_level(logging.WARNING, logger="provenance"):
-        assert w.save(REAL, "a") == "wrote"
+        assert w.save("a", ctx=REAL) == "wrote"
     assert w.writes == ["a"]
     assert not caplog.records
 
@@ -90,22 +85,31 @@ def test_report_nonlearnable_writes_but_logs(caplog) -> None:
     set_provenance_mode(ProvenanceMode.REPORT)
     w = _Writer()
     with caplog.at_level(logging.WARNING, logger="provenance"):
-        assert w.save(SYNTH, "b") == "wrote"  # still writes — report only
+        assert w.save("b", ctx=SYNTH) == "wrote"  # still writes — report only
     assert w.writes == ["b"]
     assert len(caplog.records) == 1
     msg = caplog.records[0].getMessage()
-    assert "s-synth" in msg and "synthetic" in msg
-    assert "save" in msg
+    assert "s-synth" in msg and "synthetic" in msg and "save" in msg
 
 
-# -- ENFORCE: withhold the non-learnable write -------------------------------
+def test_report_missing_ctx_writes_but_logs_unmigrated(caplog) -> None:
+    set_provenance_mode(ProvenanceMode.REPORT)
+    w = _Writer()
+    with caplog.at_level(logging.WARNING, logger="provenance"):
+        assert w.save("c") == "wrote"  # un-migrated caller — surfaced, not blocked
+    assert w.writes == ["c"]
+    assert len(caplog.records) == 1
+    assert "un-migrated" in caplog.records[0].getMessage()
+
+
+# -- ENFORCE: withhold the non-learnable, refuse a missing ctx ---------------
 
 
 def test_enforce_withholds_nonlearnable(caplog) -> None:
     set_provenance_mode(ProvenanceMode.ENFORCE)
     w = _Writer()
     with caplog.at_level(logging.WARNING, logger="provenance"):
-        assert w.save(SYNTH, "b") is None  # withheld
+        assert w.save("b", ctx=SYNTH) is None  # withheld
     assert w.writes == []
     assert len(caplog.records) == 1
 
@@ -113,23 +117,15 @@ def test_enforce_withholds_nonlearnable(caplog) -> None:
 def test_enforce_allows_learnable() -> None:
     set_provenance_mode(ProvenanceMode.ENFORCE)
     w = _Writer()
-    assert w.save(REAL, "a") == "wrote"
+    assert w.save("a", ctx=REAL) == "wrote"
     assert w.writes == ["a"]
 
 
-# -- Structural: provenance cannot be forgotten ------------------------------
-
-
-def test_learned_write_requires_a_context() -> None:
-    w = _Writer()
-    with pytest.raises(TypeError):
-        w.save("not-a-context", "x")  # no LearnContext in hand
-
-
-def test_context_passed_as_keyword_is_found() -> None:
+def test_enforce_requires_a_context() -> None:
     set_provenance_mode(ProvenanceMode.ENFORCE)
     w = _Writer()
-    assert w.save(ctx=SYNTH, value="b") is None
+    with pytest.raises(TypeError):
+        w.save("x")  # no ctx under ENFORCE — provenance cannot be forgotten
     assert w.writes == []
 
 

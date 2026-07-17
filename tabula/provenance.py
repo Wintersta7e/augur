@@ -97,28 +97,44 @@ def _find_context(args: tuple, kwargs: dict) -> LearnContext | None:
 def learned_write(func: Callable) -> Callable:
     """Mark a Redis-mutating method as LEARNED and gate it on provenance.
 
-    The wrapped callable MUST be called with a ``LearnContext`` in hand
-    (``TypeError`` otherwise) — provenance cannot be forgotten. Runtime behaviour
-    follows the global :class:`ProvenanceMode`:
+    The wrapped callable takes a ``LearnContext`` (conventionally the keyword-only
+    ``ctx``); the decorator finds it among the arguments. Runtime behaviour follows
+    the global :class:`ProvenanceMode`:
 
-    - **OFF** — pure passthrough.
-    - **REPORT** — a non-learnable context logs what *would* be withheld, then the
-      write proceeds anyway (blast-radius measurement, no behaviour change).
-    - **ENFORCE** — a non-learnable context is withheld: the write is skipped and
-      ``None`` returned.
+    - **OFF** — pure passthrough; ``ctx`` is not even inspected. Storage tests and
+      any not-yet-migrated caller run here unchanged.
+    - **REPORT** — a non-learnable ``ctx`` logs what *would* be withheld, then the
+      write proceeds anyway (blast-radius measurement); a *missing* ``ctx`` logs an
+      un-migrated caller and still writes. No behaviour change.
+    - **ENFORCE** — a missing ``ctx`` **raises** ``TypeError`` (provenance cannot be
+      forgotten *where it is enforced* — a silent non-learnable drop of real
+      learning is the one failure we refuse); a non-learnable ``ctx`` is withheld
+      (``None`` returned); a learnable ``ctx`` writes.
 
-    Sets ``__learned_write__`` so the CL10 discovery pass can find the marker.
+    The optional-``ctx`` signature is a migration convenience: it lets the ~300
+    existing storage tests keep running in OFF without edits, while ENFORCE still
+    makes provenance mandatory in production. Sets ``__learned_write__`` so the CL10
+    discovery pass can find the marker.
     """
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if _mode is ProvenanceMode.OFF:
+            return func(*args, **kwargs)
         ctx = _find_context(args, kwargs)
         if ctx is None:
-            raise TypeError(
-                f"{func.__qualname__} is a @learned_write and must be called with "
-                "a LearnContext (provenance in hand)"
+            if _mode is ProvenanceMode.ENFORCE:
+                raise TypeError(
+                    f"{func.__qualname__} is a @learned_write and requires a "
+                    "LearnContext under ENFORCE (provenance in hand)"
+                )
+            log.warning(
+                "provenance report: %s called without a LearnContext "
+                "(un-migrated caller)",
+                func.__qualname__,
             )
-        if ctx.dry_run and _mode is not ProvenanceMode.OFF:
+            return func(*args, **kwargs)
+        if ctx.dry_run:
             log.warning(
                 "provenance %s: %s learned write %s for session=%s origin=%s",
                 _mode.value,

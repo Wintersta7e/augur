@@ -32,6 +32,7 @@ from nexus import matrix_ops  # noqa: E402
 from tabula.config import AugurConfig  # noqa: E402
 from tabula.contracts import PerceptionEvent  # noqa: E402
 from tabula.persistence import PersistenceManager  # noqa: E402
+from tabula.provenance import non_learning_write  # noqa: E402
 
 log = logging.getLogger("augur.mcp")
 
@@ -1121,6 +1122,7 @@ async def submit_feedback(decision_id: str, rating: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@non_learning_write(reason="operator admin flush; deliberate wipe, not learning")
 def flush_state(confirm: bool = False) -> dict[str, Any]:
     """Delete all augur:* keys from Redis.
 

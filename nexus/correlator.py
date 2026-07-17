@@ -29,6 +29,7 @@ from tabula.config import AugurConfig
 from tabula.connections import connect_redis
 from tabula.heartbeat import start_heartbeat
 from tabula.persistence import PersistenceManager
+from tabula.provenance import non_learning_write
 from nexus import matrix_ops
 
 # ---------------------------------------------------------------------------
@@ -213,6 +214,7 @@ def _decode_member(member: bytes | str) -> dict:
     return json.loads(member)
 
 
+@non_learning_write(reason="ephemeral per-session correlation window")
 def add_to_window(r: redis.Redis, anomaly: dict, prune_window_s: float) -> None:
     """Add an anomaly to the correlation window and prune old entries.
 
@@ -459,7 +461,8 @@ def flush_graph_to_redis(
     converted to a list by the JSON round-trip inside PersistenceManager.
     """
     graph_data = json_graph.node_link_data(graph)
-    pm.save_correlation_graph(session_id, graph_data)
+    ctx = pm.resolve_learn_context(session_id)
+    pm.save_correlation_graph(session_id, graph_data, ctx=ctx)
     log.info(
         "Flushed correlation graph for session %s (%d nodes, %d edges)",
         session_id,

@@ -118,69 +118,12 @@ EXEMPT = {
 
 # The migration backlog (spec §10 step 5.4). Remove a key when its writer is
 # marked @learned_write / @non_learning_write. RATCHET: this set only shrinks.
-PENDING_MIGRATION = frozenset(
-    {
-        "augur_mcp/augur_server.py::flush_state",
-        "nexus/correlator.py::add_to_window",
-        "nexus/matrix_ops.py::apply_matrix_update",
-        "sensus/chess_board.py::publish_move_redis",
-        "tabula/persistence.py::PersistenceManager.add_dialogue_directive",
-        "tabula/persistence.py::PersistenceManager.add_self_tolerance",
-        "tabula/persistence.py::PersistenceManager.append_dialogue_audit",
-        "tabula/persistence.py::PersistenceManager.append_event",
-        "tabula/persistence.py::PersistenceManager.append_praesagium_episode",
-        "tabula/persistence.py::PersistenceManager.apply_memory_sweep",
-        "tabula/persistence.py::PersistenceManager.clear_dialogue_pending",
-        "tabula/persistence.py::PersistenceManager.mark_mrt_rating_session",
-        "tabula/persistence.py::PersistenceManager.mark_proposal_applied",
-        "tabula/persistence.py::PersistenceManager.mark_tuning_applied",
-        "tabula/persistence.py::PersistenceManager.remove_dialogue_directive",
-        "tabula/persistence.py::PersistenceManager.remove_self_tolerance",
-        "tabula/persistence.py::PersistenceManager.resolve_praesagium_prediction",
-        "tabula/persistence.py::PersistenceManager.rollback_prompt",
-        "tabula/persistence.py::PersistenceManager.save_advice_rate",
-        "tabula/persistence.py::PersistenceManager.save_app_descriptor",
-        "tabula/persistence.py::PersistenceManager.save_auspices",
-        "tabula/persistence.py::PersistenceManager.save_baseline",
-        "tabula/persistence.py::PersistenceManager.save_channel_stats",
-        "tabula/persistence.py::PersistenceManager.save_conscientia_verdict",
-        "tabula/persistence.py::PersistenceManager.save_conscientia_violation",
-        "tabula/persistence.py::PersistenceManager.save_correlation_graph",
-        "tabula/persistence.py::PersistenceManager.save_cost_tier_memory",
-        "tabula/persistence.py::PersistenceManager.save_credibility",
-        "tabula/persistence.py::PersistenceManager.save_delivery_failure",
-        "tabula/persistence.py::PersistenceManager.save_dialogue_pending",
-        "tabula/persistence.py::PersistenceManager.save_dialogue_turn",
-        "tabula/persistence.py::PersistenceManager.save_emission",
-        "tabula/persistence.py::PersistenceManager.save_escalation_matrix",
-        "tabula/persistence.py::PersistenceManager.save_feedback",
-        "tabula/persistence.py::PersistenceManager.save_gate_tuning_state",
-        "tabula/persistence.py::PersistenceManager.save_habituation",
-        "tabula/persistence.py::PersistenceManager.save_habituation_floor",
-        "tabula/persistence.py::PersistenceManager.save_health_snapshot",
-        "tabula/persistence.py::PersistenceManager.save_last_advice",
-        "tabula/persistence.py::PersistenceManager.save_last_anomaly",
-        "tabula/persistence.py::PersistenceManager.save_memory_state",
-        "tabula/persistence.py::PersistenceManager.save_observed",
-        "tabula/persistence.py::PersistenceManager.save_praesagium_open_prediction",
-        "tabula/persistence.py::PersistenceManager.save_praesagium_patterns",
-        "tabula/persistence.py::PersistenceManager.save_prompt",
-        "tabula/persistence.py::PersistenceManager.save_proposal",
-        "tabula/persistence.py::PersistenceManager.save_reflection",
-        "tabula/persistence.py::PersistenceManager.save_reservoir",
-        "tabula/persistence.py::PersistenceManager.save_rule_confidence",
-        "tabula/persistence.py::PersistenceManager.save_rule_window_state",
-        "tabula/persistence.py::PersistenceManager.save_self_model",
-        "tabula/persistence.py::PersistenceManager.save_session_meta",
-        "tabula/persistence.py::PersistenceManager.save_silence_record",
-        "tabula/persistence.py::PersistenceManager.save_thresholds",
-        "tabula/persistence.py::PersistenceManager.save_tuning_state",
-        "tabula/persistence.py::PersistenceManager.update_current_prompt_score",
-        "tabula/persistence.py::PersistenceManager.update_praesagium_open_prediction",
-        "tabula/session.py::SessionManager.end",
-        "tabula/session.py::SessionManager.start",
-    }
-)
+# Empty: every Redis writer is now MARKED (@learned_write / @non_learning_write).
+# A newly-added writer must be marked or listed here — the ratchet keeps it honest.
+# NB: CL10 asserts the MARKER exists; threading a LearnContext to each learned
+# writer's call sites (so ENFORCE has provenance in hand) is a separate concern,
+# verified per-faculty and gated at the flip (spec §10 step 5.4/5.5).
+PENDING_MIGRATION = frozenset()
 
 _MARKERS = {"learned_write", "non_learning_write"}
 

@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 
 import redis
 
+from tabula.provenance import non_learning_write
+
 log = logging.getLogger("session")
 
 REDIS_KEY_CURRENT = "augur:session:current"
@@ -45,6 +47,7 @@ class SessionManager:
         self._redis = r
         self.session_id = str(uuid.uuid4())
 
+    @non_learning_write(reason="session lifecycle bookkeeping")
     def start(self, *, origin: str = "real", created_by: str = "") -> str:
         """Record session start (current + provenance) and return the id.
 
@@ -76,6 +79,7 @@ class SessionManager:
         log.info("Session started: %s", self.session_id)
         return self.session_id
 
+    @non_learning_write(reason="session lifecycle bookkeeping")
     def end(self) -> None:
         """Record session end in Redis."""
         raw = self._redis.get(REDIS_KEY_CURRENT)

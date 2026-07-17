@@ -257,3 +257,17 @@ class TestCorrelationWindowBounds:
         with patch.dict("os.environ", {"AUGUR_CORRELATION_WINDOW_MIN_S": "0"}):
             with pytest.raises(ValueError, match="correlation_window_min_s"):
                 AugurConfig.from_env()
+
+
+class TestRedisDb:
+    def test_db_index_parsed_from_url_path(self) -> None:
+        assert AugurConfig(redis_url="redis://127.0.0.1:6379/1").redis_db == 1
+
+    def test_defaults_to_zero_when_absent(self) -> None:
+        assert AugurConfig(redis_url="redis://127.0.0.1:6379").redis_db == 0
+
+    def test_non_numeric_path_is_zero(self) -> None:
+        assert AugurConfig(redis_url="redis://127.0.0.1:6379/notadb").redis_db == 0
+
+    def test_bare_slash_is_zero(self) -> None:
+        assert AugurConfig(redis_url="redis://127.0.0.1:6379/").redis_db == 0

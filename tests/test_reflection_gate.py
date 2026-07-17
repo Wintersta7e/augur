@@ -8,18 +8,21 @@ Deterministic fabricated records + explicit expected values throughout.
 
 from __future__ import annotations
 
+import time
 
 import fakeredis
 import pytest
 
 from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
+from limen.gate import Gate, build_signature
 from disciplina.reflection_engine import (
     GATE_CHRONIC_MIN_PRESENCE,
     GATE_DISMISSAL_MIN,
     analyze_gate,
     reconstruct_state_key,
 )
+from tests.conftest import SINGLE_MEDIUM_TYPING
 
 CONFIG = AugurConfig()
 
@@ -558,3 +561,55 @@ class TestRunReflectionWiring:
         )
         assert report["analyses"]["correlation_tuning"].get("skipped") is True
         assert report["analyses"]["gate"].get("skipped") is not True
+
+
+# ── timestamp fields must hold timestamps (round-trip into the gate) ─────────
+
+
+class TestGateTuningTimestamps:
+    """The offline pass writes decay clocks the gate later parses as floats.
+
+    Regression: the pass stored ``session_id`` in ``last_fb_ts``/``last_ts``,
+    so the gate's ``float()`` raised ValueError and Arm 6 failed open — the
+    credibility arm silently stopped suppressing instead of erroring loudly.
+    """
+
+    def test_credibility_last_fb_ts_is_a_timestamp(self) -> None:
+        pm = _pm()
+        events = [
+            _advice(domain="typing", entity="user", severity="medium", explicit="y")
+        ]
+        pm.save_feedback("sess-1", _feedback("sess-1", advice_events=events))
+
+        before = time.time()
+        analyze_gate("sess-1", pm, CONFIG)
+        after = time.time()
+
+        entry = pm.load_credibility("typing:medium")
+        assert entry, "expected a credibility entry for typing:medium"
+        last_fb_ts = entry.get("last_fb_ts")
+        assert isinstance(last_fb_ts, (int, float)) and not isinstance(
+            last_fb_ts, bool
+        ), f"last_fb_ts must be numeric, got {last_fb_ts!r}"
+        assert before <= float(last_fb_ts) <= after
+
+    def test_gate_reads_the_credibility_the_pass_wrote(self) -> None:
+        """Round-trip: whatever the pass persists, Arm 6 must consume.
+
+        Every other Arm-6 test hand-seeds a numeric ``last_fb_ts``; none reads
+        back what the offline pass actually wrote, which is how the ValueError
+        survived. ``gate_reservoir_enabled=False`` isolates Arm 6 (an unseeded
+        channel would otherwise be held by Arm 5 first).
+        """
+        pm = _pm()
+        events = [
+            _advice(domain="typing", entity="user", severity="medium", explicit="n")
+        ]
+        pm.save_feedback("sess-1", _feedback("sess-1", advice_events=events))
+        analyze_gate("sess-1", pm, CONFIG)
+
+        cfg = AugurConfig(gate_reservoir_enabled=False)
+        gate = Gate()
+        # Must not raise: a ValueError here escapes to the advisor, which fails
+        # open to FIRE (inv. C) — suppression silently stops instead of erroring.
+        gate.evaluate(build_signature(SINGLE_MEDIUM_TYPING), pm, cfg, now=time.time())

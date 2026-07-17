@@ -1147,11 +1147,15 @@ def analyze_gate(
     # ── Habituation floor: raise the floor for chronically-dismissed channels ─
     # A dismissed channel should habituate faster, so raise its floor (which
     # caps responsiveness) one conservative step toward GATE_FLOOR_MAX.
+    # Decay clocks the gate reads back as floats (gate.py `_arm_habituation` /
+    # `_arm_signaller_credibility`) — must be wall-clock, never the session id.
+    now_ts = time.time()
+
     floors: dict[str, dict] = {}
     for sk in tolerance_add:
         prev = float((pm.load_habituation_floor(sk) or {}).get("floor", 0.0) or 0.0)
         new_floor = round(min(prev + GATE_FLOOR_STEP, GATE_FLOOR_MAX), 4)
-        floors[sk] = {"floor": new_floor, "last_ts": session_id}
+        floors[sk] = {"floor": new_floor, "last_ts": now_ts}
 
     # ── Class credibility: EWMA from genuine explicit ratings per class ──────
     class_ratings: dict[str, list[float]] = {}
@@ -1173,7 +1177,7 @@ def analyze_gate(
         prev = float(entry.get("cred", config.gate_cred_mid))
         n = int(entry.get("n", 0)) + len(vals)
         new_cred = round(prev + alpha * (observed - prev), 4)
-        credibility[cls] = {"cred": new_cred, "n": n, "last_fb_ts": session_id}
+        credibility[cls] = {"cred": new_cred, "n": n, "last_fb_ts": now_ts}
 
     # ── Advice-rate operating point: EWMA of the delivered-advice burden ─────
     # Derive the dismissal rate over delivered advice; nudge the stored

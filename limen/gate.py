@@ -917,8 +917,20 @@ class Gate:
         # a stale (no recent feedback) class relaxes to neutral and self-heals.
         # (A stored last_fb_ts of 0.0 is a real timestamp, not "missing", so do
         # NOT collapse it with `or now`.)
+        # A corrupt/legacy non-numeric stamp must not take the arm down: an
+        # exception here escapes to the advisor, which fails open to FIRE
+        # (inv. C) and silently disables suppression for the class. Treat it
+        # as "no decay clock" — the same fallback as an absent field.
         last_fb_ts_raw = entry.get("last_fb_ts")
-        last_fb_ts = float(last_fb_ts_raw if last_fb_ts_raw is not None else now)
+        try:
+            last_fb_ts = float(last_fb_ts_raw if last_fb_ts_raw is not None else now)
+        except (TypeError, ValueError):
+            log.warning(
+                "gate: non-numeric last_fb_ts %r for %s — treating as now",
+                last_fb_ts_raw,
+                sig.state_key,
+            )
+            last_fb_ts = now
         dt = max(0.0, now - last_fb_ts)
         cred_eff = prior + (cred - prior) * math.exp(
             -config.gate_credibility_decay_alpha * dt

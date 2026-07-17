@@ -13,6 +13,29 @@ log = logging.getLogger("session")
 
 REDIS_KEY_CURRENT = "augur:session:current"
 REDIS_KEY_COUNT = "augur:session:count"
+REDIS_KEY_META = "augur:session:meta:{sid}"
+# Provenance must outlive the longest session-scoped record (reflection reports,
+# 30 days) or a late reflection would find no provenance and fail closed,
+# silently stopping a real session from training. A test pins this relationship.
+SESSION_META_TTL_S = 30 * 24 * 3600
+
+
+def build_session_meta(
+    session_id: str, *, origin: str, created_by: str, started_at: str
+) -> dict:
+    """Provenance record for a session.
+
+    ``learnable`` is derived from ``origin`` here so the two can never drift:
+    only an ``origin`` of ``"real"`` may train the system; ``"synthetic"`` and
+    ``"unattributed"`` never do.
+    """
+    return {
+        "session_id": session_id,
+        "origin": origin,
+        "learnable": origin == "real",
+        "created_by": created_by,
+        "started_at": started_at,
+    }
 
 
 class SessionManager:

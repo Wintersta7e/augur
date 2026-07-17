@@ -12,6 +12,7 @@ import redis
 
 from memoria.fsrs import make_memory_id
 from tabula.contracts import PerceptionEvent
+from tabula.session import REDIS_KEY_META, SESSION_META_TTL_S
 
 log = logging.getLogger("persistence")
 
@@ -82,6 +83,8 @@ MAX_PRAESAGIUM_EPISODES: int = 2000
 # save methods if you need a persistent key.
 SESSION_KEY_TTL_S = 30 * 24 * 3600  # 30 days
 
+PROVENANCE_TTL_S = SESSION_META_TTL_S
+
 # TTL for the correlation-tuning idempotency marker. Long enough to survive
 # manual reflect-trigger replays of a recent session, short enough to prevent
 # the key from lingering indefinitely.
@@ -127,6 +130,26 @@ class PersistenceManager:
         if raw is None:
             return default
         return json.loads(raw)
+
+    # -- Session provenance ---------------------------------------------------
+
+    def is_learnable_session(self, session_id: str | None) -> bool:
+        """Return True only for a session recorded as learnable. Fails CLOSED.
+
+        A session id is not evidence; only a durable record that this system
+        wrote makes a session learnable. Unknown / missing / corrupt / expired
+        provenance, or any Redis error, returns False. Never raises.
+        """
+        if not session_id:
+            return False
+        try:
+            raw = self._r.get(REDIS_KEY_META.format(sid=session_id))
+            if raw is None:
+                return False
+            data = json.loads(raw)
+            return isinstance(data, dict) and data.get("learnable") is True
+        except Exception:
+            return False
 
     # -- Baseline persistence ------------------------------------------------
 

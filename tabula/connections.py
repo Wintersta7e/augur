@@ -32,8 +32,9 @@ def connect_redis(config: AugurConfig) -> redis.Redis:
     client = redis.Redis(
         host=config.redis_host,
         port=config.redis_port,
+        db=config.redis_db,
         socket_connect_timeout=config.redis_connect_timeout,
     )
     client.ping()
-    log.info("Redis connected (%s)", config.redis_url)
+    log.info("Redis connected (%s, db=%d)", config.redis_url, config.redis_db)
     return client

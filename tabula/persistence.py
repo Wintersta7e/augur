@@ -12,7 +12,7 @@ import redis
 
 from memoria.fsrs import make_memory_id
 from tabula.contracts import PerceptionEvent
-from tabula.session import REDIS_KEY_META, SESSION_META_TTL_S
+from tabula.session import REDIS_KEY_META, SESSION_META_TTL_S, build_session_meta
 
 log = logging.getLogger("persistence")
 
@@ -150,6 +150,26 @@ class PersistenceManager:
             return isinstance(data, dict) and data.get("learnable") is True
         except Exception:
             return False
+
+    def save_session_meta(
+        self,
+        session_id: str,
+        *,
+        origin: str,
+        created_by: str,
+        started_at: str | None = None,
+    ) -> None:
+        """Write a session's provenance record (meta key only, no current).
+
+        For minters that do not use SessionManager (dialogue, Responsum's
+        orphan-feedback fallback). TTL matches the session-record lifetime so a
+        late reflection can still resolve provenance.
+        """
+        stamp = started_at or datetime.now(timezone.utc).isoformat()
+        meta = build_session_meta(
+            session_id, origin=origin, created_by=created_by, started_at=stamp
+        )
+        self._set_json(REDIS_KEY_META.format(sid=session_id), meta, ex=PROVENANCE_TTL_S)
 
     # -- Baseline persistence ------------------------------------------------
 

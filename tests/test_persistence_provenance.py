@@ -90,3 +90,24 @@ def test_provenance_ttl_outlives_reflection_reports() -> None:
     from tabula.persistence import PROVENANCE_TTL_S, SESSION_KEY_TTL_S
 
     assert PROVENANCE_TTL_S >= SESSION_KEY_TTL_S
+
+
+class TestSaveSessionMeta:
+    def test_saves_learnable_real(self) -> None:
+        pm = _pm()
+        pm.save_session_meta("d1", origin="real", created_by="dialogue")
+        assert pm.is_learnable_session("d1") is True
+
+    def test_saves_non_learnable_unattributed(self) -> None:
+        pm = _pm()
+        pm.save_session_meta(
+            "f1", origin="unattributed", created_by="responsum_fallback"
+        )
+        assert pm.is_learnable_session("f1") is False
+
+    def test_sets_ttl(self) -> None:
+        pm = _pm()
+        pm.save_session_meta("d1", origin="real", created_by="dialogue")
+        from tabula.session import REDIS_KEY_META
+
+        assert pm._r.ttl(REDIS_KEY_META.format(sid="d1")) > 0

@@ -12,6 +12,7 @@ import redis
 
 from memoria.fsrs import make_memory_id
 from tabula.contracts import PerceptionEvent
+from tabula.provenance import LearnContext
 from tabula.session import REDIS_KEY_META, SESSION_META_TTL_S, build_session_meta
 
 log = logging.getLogger("persistence")
@@ -133,23 +134,38 @@ class PersistenceManager:
 
     # -- Session provenance ---------------------------------------------------
 
-    def is_learnable_session(self, session_id: str | None) -> bool:
-        """Return True only for a session recorded as learnable. Fails CLOSED.
+    def resolve_learn_context(self, session_id: str | None) -> LearnContext:
+        """Resolve a session's provenance ONCE, fail-closed. Never raises.
 
-        A session id is not evidence; only a durable record that this system
-        wrote makes a session learnable. Unknown / missing / corrupt / expired
-        provenance, or any Redis error, returns False. Never raises.
+        The single provenance reader — ``is_learnable_session`` delegates here so
+        the learnable bool and the origin can never be read inconsistently. A
+        session id is not evidence; only a durable record this system wrote makes
+        a session learnable. Unknown / missing / corrupt / expired provenance, or
+        any Redis error, yields a non-learnable ``"unknown"`` context.
         """
         if not session_id:
-            return False
+            return LearnContext.unknown(session_id)
         try:
             raw = self._r.get(REDIS_KEY_META.format(sid=session_id))
             if raw is None:
-                return False
+                return LearnContext.unknown(session_id)
             data = json.loads(raw)
-            return isinstance(data, dict) and data.get("learnable") is True
+            if not isinstance(data, dict):
+                return LearnContext.unknown(session_id)
+            origin = data.get("origin")
+            if not isinstance(origin, str) or not origin:
+                origin = "unknown"
+            return LearnContext(session_id, data.get("learnable") is True, origin)
         except Exception:
-            return False
+            return LearnContext.unknown(session_id)
+
+    def is_learnable_session(self, session_id: str | None) -> bool:
+        """Return True only for a session recorded as learnable. Fails CLOSED.
+
+        Thin wrapper over :meth:`resolve_learn_context` (the single provenance
+        reader); never raises.
+        """
+        return self.resolve_learn_context(session_id).learnable
 
     def save_session_meta(
         self,

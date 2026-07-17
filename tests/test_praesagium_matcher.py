@@ -219,6 +219,7 @@ def test_build_foreseen_payload_all_fields():
     assert payload["rule_window_s"] is None
     assert payload["involved_domains"] == ["praesagium"]
     assert isinstance(payload["timestamp"], str)
+    assert payload["session_id"] == "sess-9"  # top-level, not only nested
     assert payload["source"] == "anticipatory"
 
     ant = payload["anticipatory"]

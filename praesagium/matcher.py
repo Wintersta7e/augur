@@ -160,6 +160,7 @@ def build_foreseen_payload(
         "rule_window_s": None,
         "involved_domains": ["praesagium"],
         "timestamp": iso_now,
+        "session_id": session_id,
         "source": "anticipatory",
         "anticipatory": {
             "pattern_id": pid,

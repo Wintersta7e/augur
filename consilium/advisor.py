@@ -1488,6 +1488,10 @@ def _clamp_foreseen(payload: dict) -> dict | None:
     payload["combined_severity"] = "MEDIUM"
     primary["severity"] = "medium"
     payload["involved_domains"] = ["praesagium"]
+    # Event-level provenance must survive the clamp so on_foreseen can attribute
+    # the forewarning to the session that produced it (not "current"). Backfill
+    # from primary only when a publisher omitted the top-level field.
+    payload.setdefault("session_id", primary.get("session_id"))
     return payload
 
 

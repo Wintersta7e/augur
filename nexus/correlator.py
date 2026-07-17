@@ -288,6 +288,7 @@ def _build_correlation_payload(
 
     return {
         "primary_anomaly": primary,
+        "session_id": primary.get("session_id"),
         "correlated_events": correlated,
         "correlation_found": True,
         "temporal_lag_seconds": round(temporal_lag, 3),
@@ -307,6 +308,7 @@ def _build_passthrough_payload(primary: dict) -> dict:
     """Assemble the pass-through payload for standalone medium/high events."""
     return {
         "primary_anomaly": primary,
+        "session_id": primary.get("session_id"),
         "correlated_events": [],
         "correlation_found": False,
         "temporal_lag_seconds": None,

@@ -11,6 +11,13 @@
 #   session_mgr.start() (chess_board or typing_monitor) has already
 #   populated augur:session:current — the activity monitor reads, does
 #   not create, the session.
+#
+# Integration tests run in an isolated TEST CELL (Redis db 1 + NATS 4223),
+# never against the live cell. The suite refuses to start otherwise.
+#   docker compose --profile test up -d nats-test
+#   AUGUR_REDIS_URL=redis://127.0.0.1:6379/1 \
+#   AUGUR_NATS_URL=nats://127.0.0.1:4223 \
+#   AUGUR_TEST_STARTUP_WAIT_S=12 .venv/bin/pytest tests/integration/
 
 set -euo pipefail
 

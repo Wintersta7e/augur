@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 
 import httpx
@@ -12,6 +13,8 @@ from tabula.config import AugurConfig
 from tabula.connections import connect_redis
 from tabula.persistence import PersistenceManager
 from imperator.dialogue.engine import handle_turn
+
+log = logging.getLogger("dialogue.console")
 
 _QUIT = {"quit", "exit", ":q"}
 
@@ -28,8 +31,18 @@ async def _engine_turn(session_id, text, **kw):  # seam for tests
 
 
 def register_dialogue_session(pm: PersistenceManager, session_id: str) -> None:
-    """Record a dialogue session as real provenance — the user teaching Augur."""
-    pm.save_session_meta(session_id, origin="real", created_by="dialogue")
+    """Record a dialogue session as real provenance — the user teaching Augur.
+
+    Best-effort: registration must never crash the user's dialogue. If the write
+    fails, the session simply lacks a provenance record and degrades to
+    non-learnable (fail-closed), rather than taking the console down.
+    """
+    try:
+        pm.save_session_meta(session_id, origin="real", created_by="dialogue")
+    except Exception as exc:  # noqa: BLE001 — inert registration must not crash dialogue
+        log.warning(
+            "dialogue provenance registration failed for %s: %s", session_id, exc
+        )
 
 
 async def run_console(*, input_fn=input, output_fn=print) -> None:

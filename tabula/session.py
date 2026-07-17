@@ -45,19 +45,34 @@ class SessionManager:
         self._redis = r
         self.session_id = str(uuid.uuid4())
 
-    def start(self) -> str:
-        """Record session start in Redis and return the session_id."""
-        self._redis.incr(REDIS_KEY_COUNT)
-        self._redis.set(
-            REDIS_KEY_CURRENT,
-            json.dumps(
-                {
-                    "session_id": self.session_id,
-                    "started_at": datetime.now(timezone.utc).isoformat(),
-                    "status": "active",
-                }
-            ),
+    def start(self, *, origin: str = "real", created_by: str = "") -> str:
+        """Record session start (current + provenance) and return the id.
+
+        Writes ``current`` and ``meta`` in one pipeline so no consumer can
+        ever observe a ``current`` whose provenance record does not yet
+        exist; both share the same ``started_at``.
+        """
+        started_at = datetime.now(timezone.utc).isoformat()
+        current = {
+            "session_id": self.session_id,
+            "started_at": started_at,
+            "status": "active",
+        }
+        meta = build_session_meta(
+            self.session_id,
+            origin=origin,
+            created_by=created_by,
+            started_at=started_at,
         )
+        pipe = self._redis.pipeline()
+        pipe.incr(REDIS_KEY_COUNT)
+        pipe.set(REDIS_KEY_CURRENT, json.dumps(current))
+        pipe.set(
+            REDIS_KEY_META.format(sid=self.session_id),
+            json.dumps(meta),
+            ex=SESSION_META_TTL_S,
+        )
+        pipe.execute()
         log.info("Session started: %s", self.session_id)
         return self.session_id
 

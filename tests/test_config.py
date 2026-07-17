@@ -271,3 +271,6 @@ class TestRedisDb:
 
     def test_bare_slash_is_zero(self) -> None:
         assert AugurConfig(redis_url="redis://127.0.0.1:6379/").redis_db == 0
+
+    def test_unicode_digit_is_zero(self) -> None:
+        assert AugurConfig(redis_url="redis://127.0.0.1:6379/²").redis_db == 0

@@ -651,7 +651,7 @@ class AugurConfig:
         from anything using Redis.from_url.
         """
         path = (urlparse(self.redis_url).path or "").lstrip("/")
-        return int(path) if path.isdigit() else 0
+        return int(path) if path.isdecimal() else 0
 
     @property
     def effective_stall_window_s(self) -> float:

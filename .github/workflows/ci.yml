@@ -94,7 +94,7 @@ jobs:
 
       - name: Start NATS with JetStream
         run: |
-          docker run -d --name nats -p 4222:4222 -p 8222:8222 \
+          docker run -d --name nats -p 4223:4222 -p 8222:8222 \
             nats:2-alpine --jetstream --http_port 8222
 
       - name: Wait for services to become healthy
@@ -118,6 +118,9 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run fast integration tests
+        env:
+          AUGUR_REDIS_URL: redis://127.0.0.1:6379/1
+          AUGUR_NATS_URL: nats://127.0.0.1:4223
         run: pytest tests/integration/ -m "not slow" -v
 
       - name: Dump service logs on failure

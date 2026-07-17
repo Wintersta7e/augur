@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import Mock
 from imperator.dialogue import console
 
 
@@ -11,8 +12,9 @@ def test_console_loop_quits_and_echoes(monkeypatch):
 
         return DialogueTurn(reply=f"heard:{text}")
 
+    mock_pm = Mock()
     monkeypatch.setattr(console, "_engine_turn", fake_turn)
-    monkeypatch.setattr(console, "_connect", lambda cfg: (object(), None, None))
+    monkeypatch.setattr(console, "_connect", lambda cfg: (mock_pm, None, None))
     asyncio.run(
         console.run_console(input_fn=lambda _: next(lines), output_fn=out.append)
     )
@@ -30,8 +32,9 @@ def test_console_reports_turn_error_and_keeps_looping(monkeypatch):
             raise ConnectionError("redis down")
         return DialogueTurn(reply=f"heard:{text}")
 
+    mock_pm = Mock()
     monkeypatch.setattr(console, "_engine_turn", fake_turn)
-    monkeypatch.setattr(console, "_connect", lambda cfg: (object(), None, None))
+    monkeypatch.setattr(console, "_connect", lambda cfg: (mock_pm, None, None))
     asyncio.run(
         console.run_console(input_fn=lambda _: next(lines), output_fn=out.append)
     )
@@ -44,7 +47,8 @@ def test_console_eof_exits_gracefully(monkeypatch):
         raise EOFError
 
     out = []
-    monkeypatch.setattr(console, "_connect", lambda cfg: (object(), None, None))
+    mock_pm = Mock()
+    monkeypatch.setattr(console, "_connect", lambda cfg: (mock_pm, None, None))
     # Must not raise: EOF from input_fn is a graceful exit.
     asyncio.run(console.run_console(input_fn=raising_input, output_fn=out.append))
     assert len(out) >= 1  # greeting printed; exit was clean

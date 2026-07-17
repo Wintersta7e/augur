@@ -27,6 +27,11 @@ async def _engine_turn(session_id, text, **kw):  # seam for tests
     return await handle_turn(session_id, text, **kw)
 
 
+def register_dialogue_session(pm: PersistenceManager, session_id: str) -> None:
+    """Record a dialogue session as real provenance — the user teaching Augur."""
+    pm.save_session_meta(session_id, origin="real", created_by="dialogue")
+
+
 async def run_console(*, input_fn=input, output_fn=print) -> None:
     cfg = AugurConfig.from_env()
     pm, nc, http = (
@@ -35,6 +40,7 @@ async def run_console(*, input_fn=input, output_fn=print) -> None:
         else await _connect(cfg)
     )
     session_id = f"dialogue-{uuid.uuid4().hex[:8]}"
+    register_dialogue_session(pm, session_id)
     output_fn("Augur is listening. Type 'quit' to leave.")
     try:
         while True:

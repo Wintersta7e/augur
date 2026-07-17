@@ -149,7 +149,9 @@ async def maybe_prompt_withheld_rating(pending, config: AugurConfig, pm) -> bool
     )
     pending.withheld_rating_p = config.gate_mrt_withheld_rating_rate
     if getattr(pending, "session_id", None):
-        pm.mark_mrt_rating_session(pending.session_id)
+        pm.mark_mrt_rating_session(
+            pending.session_id, ctx=pm.resolve_learn_context(pending.session_id)
+        )
     return True
 
 

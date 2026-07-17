@@ -257,3 +257,66 @@ def test_exempt_helpers_are_real_writers() -> None:
     assert EXEMPT <= set(discovered), (
         f"EXEMPT names that are not discovered writers: {EXEMPT - set(discovered)}"
     )
+
+
+# -- CL13: every production call to a @learned_write passes a LearnContext -----
+#
+# CL10 proves each writer carries the MARKER; CL13 proves each production CALL
+# hands it a LearnContext (the `ctx=` kwarg). This is the ENFORCE-flip gate: with
+# ctx present at every call, flipping ProvenanceMode to ENFORCE cannot raise a
+# missing-ctx TypeError in production. Call sites that legitimately have no ctx
+# yet are listed in UNTHREADED_CALLERS (a ratchet — must stay empty now).
+
+UNTHREADED_CALLERS: frozenset = frozenset()
+
+
+def _learned_write_names() -> set[str]:
+    names: set[str] = set()
+    for d in PROD_DIRS:
+        base = ROOT / d
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for dec in node.decorator_list:
+                        if isinstance(dec, ast.Name) and dec.id == "learned_write":
+                            names.add(node.name)
+    return names
+
+
+def _unthreaded_learned_calls() -> list[str]:
+    learned = _learned_write_names()
+    offenders: list[str] = []
+    for d in PROD_DIRS:
+        base = ROOT / d
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("*.py")):
+            rel = str(path.relative_to(ROOT))
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in learned
+                ):
+                    continue
+                if not any(kw.arg == "ctx" for kw in node.keywords):
+                    offenders.append(f"{rel}:{node.lineno}:{node.func.attr}")
+    return offenders
+
+
+def test_learned_write_names_discovered() -> None:
+    # Guard the guard: the decorated set must be non-trivial.
+    assert len(_learned_write_names()) >= 30
+
+
+def test_every_learned_write_call_passes_ctx() -> None:
+    offenders = [c for c in _unthreaded_learned_calls() if c not in UNTHREADED_CALLERS]
+    assert not offenders, (
+        "these production calls to a @learned_write pass no ctx= (a LearnContext) "
+        "and would raise under ENFORCE — thread provenance or list them in "
+        f"UNTHREADED_CALLERS: {sorted(offenders)}"
+    )

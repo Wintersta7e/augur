@@ -32,7 +32,7 @@ from nexus import matrix_ops  # noqa: E402
 from tabula.config import AugurConfig  # noqa: E402
 from tabula.contracts import PerceptionEvent  # noqa: E402
 from tabula.persistence import PersistenceManager  # noqa: E402
-from tabula.provenance import non_learning_write  # noqa: E402
+from tabula.provenance import LearnContext, non_learning_write  # noqa: E402
 
 log = logging.getLogger("augur.mcp")
 
@@ -1019,6 +1019,7 @@ def set_escalation_matrix(
             rule_windows=rule_windows,
             version=version,
             mode="replace",
+            ctx=LearnContext.system(),
         )
 
 

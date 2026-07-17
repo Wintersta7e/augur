@@ -55,6 +55,13 @@ class LearnContext:
         """The fail-closed default: unresolvable provenance ⇒ non-learnable."""
         return cls(session_id=session_id, learnable=False, origin="unknown")
 
+    @classmethod
+    def system(cls) -> LearnContext:
+        """A system/bootstrap write that must always persist — seeding config
+        defaults, a migration, an operator action. Not user-perception learning,
+        but never withheld (it does not depend on any session)."""
+        return cls(session_id=None, learnable=True, origin="system")
+
 
 class ProvenanceMode(str, Enum):
     """How the write-boundary decorators behave. Watch-first default is OFF."""

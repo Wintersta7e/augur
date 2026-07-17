@@ -647,11 +647,14 @@ def enrich_activity_descriptor(
         return
     ctx = anomaly.setdefault("context", {})
     entity = anomaly.get("entity", "")
-    descriptor, needs_classification = resolve_app_descriptor(pm, entity, ctx)
+    learn_ctx = pm.resolve_learn_context(anomaly.get("session_id"))
+    descriptor, needs_classification = resolve_app_descriptor(
+        pm, entity, ctx, learn_ctx=learn_ctx
+    )
     if descriptor:
         ctx["app_descriptor"] = descriptor
     elif needs_classification:
-        lane.enqueue(entity)
+        lane.enqueue(entity, learn_ctx=learn_ctx)
 
 
 def build_correlation_prompt(payload: dict) -> str:
@@ -1122,6 +1125,7 @@ async def _build_prompt_and_deliver(
         decision=decision,
         tier=tier,
         audit_only=audit_only,
+        ctx=pm.resolve_learn_context(payload.get("session_id")),
     )
 
 
@@ -1256,7 +1260,13 @@ async def process_message(
     # ── suppress (authoritative record_suppression or FIRE) ──
     if decision.action == "suppress":
         try:
-            ok = gate.record_suppression(decision, signature, pm, now)
+            ok = gate.record_suppression(
+                decision,
+                signature,
+                pm,
+                now,
+                ctx=pm.resolve_learn_context(payload.get("session_id")),
+            )
         except Exception as exc:
             log.error("record_suppression failed open: %s", exc)
             ok = False
@@ -1381,7 +1391,12 @@ async def process_message(
             await publish_delivery_failure_event(nc, signature, decision, payload)
             return
         try:
-            tracked = gate.record_busy_skip(signature, pm, now)
+            tracked = gate.record_busy_skip(
+                signature,
+                pm,
+                now,
+                ctx=pm.resolve_learn_context(payload.get("session_id")),
+            )
         except Exception as exc:  # inv. C: a record_busy_skip bug must not silence
             log.error("record_busy_skip failed open: %s", exc)
             decision = decision.as_fire("gate_error_fail_open")

@@ -21,7 +21,12 @@ class _PM:
     def load_dialogue_pending(self, session_id):
         return None
 
-    def save_dialogue_turn(self, turn):
+    def resolve_learn_context(self, sid):
+        from tabula.provenance import LearnContext
+
+        return LearnContext(sid, True, "real")
+
+    def save_dialogue_turn(self, turn, *, ctx=None):
         self.saved = turn
 
 

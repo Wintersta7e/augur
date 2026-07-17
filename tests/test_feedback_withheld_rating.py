@@ -128,7 +128,12 @@ class _FakePM:
     def __init__(self):
         self.marked = []
 
-    def mark_mrt_rating_session(self, sid):
+    def resolve_learn_context(self, sid):
+        from tabula.provenance import LearnContext
+
+        return LearnContext(sid, True, "real")
+
+    def mark_mrt_rating_session(self, sid, *, ctx=None):
         self.marked.append(sid)
 
 

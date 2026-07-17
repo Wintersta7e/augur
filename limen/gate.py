@@ -1176,6 +1176,7 @@ class Gate:
         decision: GateDecision,
         tier: int | None,
         audit_only: bool = False,
+        ctx=None,
     ) -> None:
         """Advance gate state after a SUCCESSFUL publish (spec §4).
 
@@ -1232,10 +1233,10 @@ class Gate:
                 "severity": signature.severity,
             }
         )
-        self._advance_habituation(signature, pm, now)
-        self._advance_advice_rate(pm, now)
-        self._reset_channel_stats(signature, pm, now)
-        self._advance_cost_tier_memory(signature, pm, now, tier)
+        self._advance_habituation(signature, pm, now, ctx=ctx)
+        self._advance_advice_rate(pm, now, ctx=ctx)
+        self._reset_channel_stats(signature, pm, now, ctx=ctx)
+        self._advance_cost_tier_memory(signature, pm, now, tier, ctx=ctx)
 
     def record_suppression(
         self,
@@ -1243,6 +1244,8 @@ class Gate:
         signature: Signature,
         pm: Any,
         now: float,
+        *,
+        ctx=None,
     ) -> bool:
         """Write the authoritative silence record + advance accumulators (spec §4).
 
@@ -1280,7 +1283,7 @@ class Gate:
             # reservoir/observed/channel_stats).
             return True
 
-        self._advance_reservoir(signature, pm, now)
+        self._advance_reservoir(signature, pm, now, ctx=ctx)
         pm.save_observed(
             {
                 "ts": now,
@@ -1289,10 +1292,12 @@ class Gate:
                 "severity": signature.severity,
             }
         )
-        self._bump_suppression_stats(signature, pm, now)
+        self._bump_suppression_stats(signature, pm, now, ctx=ctx)
         return True
 
-    def record_busy_skip(self, signature: Signature, pm: Any, now: float) -> bool:
+    def record_busy_skip(
+        self, signature: Signature, pm: Any, now: float, *, ctx=None
+    ) -> bool:
         """Record an ordinary fire dropped because the lock was held (spec §4).
 
         Bumps ``channel_stats`` (so a hot trackable channel repeatedly
@@ -1315,7 +1320,7 @@ class Gate:
             return True
         if not pm.can_track_gate_state(_CHANNEL_STATS_KEY, signature.state_key):
             return False
-        self._bump_suppression_stats(signature, pm, now)
+        self._bump_suppression_stats(signature, pm, now, ctx=ctx)
         pm.save_delivery_failure(signature, "advisor_busy_skipped", now, "")
         return True
 
@@ -1375,7 +1380,9 @@ class Gate:
             "p_fire": decision.p_fire,
         }
 
-    def _advance_habituation(self, signature: Signature, pm: Any, now: float) -> None:
+    def _advance_habituation(
+        self, signature: Signature, pm: Any, now: float, *, ctx=None
+    ) -> None:
         """Advance per-channel habituation ``h`` after a non-probe delivery.
 
         A normal delivery decays the stored ``h`` to ``now`` then EWMAs it toward
@@ -1401,9 +1408,10 @@ class Gate:
         pm.save_habituation(
             signature.state_key,
             {"h": new_h, "last_event_ts": now, "count": count + 1},
+            ctx=ctx,
         )
 
-    def _advance_advice_rate(self, pm: Any, now: float) -> None:
+    def _advance_advice_rate(self, pm: Any, now: float, *, ctx=None) -> None:
         """Advance the global advice-rate EWMA after a non-probe delivery.
 
         Each delivery is a unit impulse EWMA'd with ``gate_pressure_alpha`` — the
@@ -1414,9 +1422,11 @@ class Gate:
         prev = float(rate.get("rate_ewma", 0.0) or 0.0)
         alpha = self._config.gate_pressure_alpha
         new_rate = alpha * 1.0 + (1.0 - alpha) * prev
-        pm.save_advice_rate({"rate_ewma": new_rate, "last_ts": now})
+        pm.save_advice_rate({"rate_ewma": new_rate, "last_ts": now}, ctx=ctx)
 
-    def _reset_channel_stats(self, signature: Signature, pm: Any, now: float) -> None:
+    def _reset_channel_stats(
+        self, signature: Signature, pm: Any, now: float, *, ctx=None
+    ) -> None:
         """Clear the suppression streak on a delivery (spec §6, invariant D).
 
         A delivery resets ``consecutive_suppressions`` to 0, clears
@@ -1429,10 +1439,10 @@ class Gate:
         stats["suppression_streak_started_ts"] = None
         stats["last_delivery_ts"] = now
         stats["last_ts"] = now
-        pm.save_channel_stats(signature.state_key, stats)
+        pm.save_channel_stats(signature.state_key, stats, ctx=ctx)
 
     def _advance_cost_tier_memory(
-        self, signature: Signature, pm: Any, now: float, tier: int | None
+        self, signature: Signature, pm: Any, now: float, tier: int | None, *, ctx=None
     ) -> None:
         """Advance per-channel ``cost_tier_memory`` online (spec §5 Arm 7).
 
@@ -1447,9 +1457,11 @@ class Gate:
         else:
             mem.setdefault("earned_tier2", False)
         mem["last_ts"] = now
-        pm.save_cost_tier_memory(signature.state_key, mem)
+        pm.save_cost_tier_memory(signature.state_key, mem, ctx=ctx)
 
-    def _advance_reservoir(self, signature: Signature, pm: Any, now: float) -> None:
+    def _advance_reservoir(
+        self, signature: Signature, pm: Any, now: float, *, ctx=None
+    ) -> None:
         """Advance the per-channel evidence reservoir on a suppression (spec §5).
 
         A suppressed single+medium event still legitimately accumulates evidence
@@ -1469,10 +1481,11 @@ class Gate:
                 "last_ts": now,
                 "suppressing": bool(res.get("suppressing", True)),
             },
+            ctx=ctx,
         )
 
     def _bump_suppression_stats(
-        self, signature: Signature, pm: Any, now: float
+        self, signature: Signature, pm: Any, now: float, *, ctx=None
     ) -> None:
         """Bump ``channel_stats`` on a suppression / busy-skip (spec §6, inv. D).
 
@@ -1489,4 +1502,4 @@ class Gate:
         if stats.get("suppression_streak_started_ts") is None:
             stats["suppression_streak_started_ts"] = now
         stats["last_ts"] = now
-        pm.save_channel_stats(signature.state_key, stats)
+        pm.save_channel_stats(signature.state_key, stats, ctx=ctx)

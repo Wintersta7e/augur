@@ -75,7 +75,7 @@ async def run_cycle(pm, cfg, *, now, session_id, generate_fn, client, publish):
         P.gate(p, cfg=cfg, recent_self_tuning=recent, applied_keys=applied)
         if p["status"] != "skipped":
             A.apply_proposal(pm, p, cfg=cfg, session_id=session_id)
-        pm.save_proposal(p)
+        pm.save_proposal(p, ctx=pm.resolve_learn_context(session_id))
         if p["status"] == "applied":
             applied.add(p["dedupe_key"])
         await _emit(publish, "augur.imperator.proposal", json.dumps(p).encode())

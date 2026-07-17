@@ -160,7 +160,10 @@ def run_praesagium_mining(session_id: str, pm: Any, config: Any) -> dict:
         }
         try:
             if pm.resolve_praesagium_prediction(
-                pid_rec, resolved_rec, cap=config.praesagium_predictions_cap
+                pid_rec,
+                resolved_rec,
+                cap=config.praesagium_predictions_cap,
+                ctx=pm.resolve_learn_context(rec.get("session_id")),
             ):
                 expired_open += 1
         except Exception as exc:  # one bad open must not abort the sweep
@@ -168,7 +171,11 @@ def run_praesagium_mining(session_id: str, pm: Any, config: Any) -> dict:
 
     # --- Persist + mark. -----------------------------------------------------
     pm.save_praesagium_patterns(blob)
-    pm.mark_tuning_applied(session_id, pass_name="praesagium")
+    pm.mark_tuning_applied(
+        session_id,
+        pass_name="praesagium",
+        ctx=pm.resolve_learn_context(session_id),
+    )
 
     # --- Report (Sec 4.7). ---------------------------------------------------
     patterns = blob["patterns"]

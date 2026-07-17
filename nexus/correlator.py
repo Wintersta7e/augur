@@ -29,7 +29,7 @@ from tabula.config import AugurConfig
 from tabula.connections import connect_redis
 from tabula.heartbeat import start_heartbeat
 from tabula.persistence import PersistenceManager
-from tabula.provenance import non_learning_write
+from tabula.provenance import LearnContext, non_learning_write
 from nexus import matrix_ops
 
 # ---------------------------------------------------------------------------
@@ -494,6 +494,7 @@ def ensure_matrix_seeded(pm: PersistenceManager) -> dict:
             rules=default_rules,
             version=DEFAULT_ESCALATION_MATRIX.get("version", "1.0"),
             mode="patch",
+            ctx=LearnContext.system(),
         )
         log.info("Seeded default escalation matrix (version=1.0)")
         return res.get("matrix", DEFAULT_ESCALATION_MATRIX)
@@ -510,7 +511,10 @@ def ensure_matrix_seeded(pm: PersistenceManager) -> dict:
     # Add ONLY the missing default rules via a CAS patch, so operator changes and a
     # concurrent Imperator-II patch to other rules/windows are never clobbered.
     res = matrix_ops.apply_matrix_update(
-        pm, rules={k: default_rules[k] for k in added}, mode="patch"
+        pm,
+        rules={k: default_rules[k] for k in added},
+        mode="patch",
+        ctx=LearnContext.system(),
     )
     log.info(
         "Seeded %d missing default rules into existing matrix: %s",

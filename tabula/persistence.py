@@ -1413,7 +1413,9 @@ class PersistenceManager:
         if st is None:
             return
         self.save_memory_state(
-            memory_id, review(st, active_session, session_id, AugurConfig.from_env())
+            memory_id,
+            review(st, active_session, session_id, AugurConfig.from_env()),
+            ctx=self.resolve_learn_context(session_id),
         )
 
     @learned_write
@@ -1548,7 +1550,9 @@ class PersistenceManager:
                 # non-empty replaces; None/empty preserves prior teaching text
                 **({"rationale": rationale} if rationale else {}),
             }
-            self.save_memory_state(mid, reviewed)
+            self.save_memory_state(
+                mid, reviewed, ctx=self.resolve_learn_context(session_id)
+            )
             return mid
         state: dict[str, Any] = {
             "memory_id": mid,
@@ -1564,7 +1568,7 @@ class PersistenceManager:
             "taught_by": source,
             "rationale": rationale,
         }
-        self.save_memory_state(mid, state)
+        self.save_memory_state(mid, state, ctx=self.resolve_learn_context(session_id))
         return mid
 
     def load_taught_facts(self) -> list[dict]:

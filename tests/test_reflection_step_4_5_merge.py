@@ -1,6 +1,6 @@
 """Tests for run_reflection: step 4 + step 5 merge into a single matrix CAS patch."""
 
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import ANY, AsyncMock, MagicMock, call
 import pytest
 
 from tabula.config import AugurConfig
@@ -157,7 +157,9 @@ async def test_marker_set_after_both_writes(monkeypatch):
 
     # The gate pass (pass_name="gate") also marks the session; assert the
     # correlation marker specifically was set.
-    pm.mark_tuning_applied.assert_any_call("session-Y", pass_name="correlation")
+    pm.mark_tuning_applied.assert_any_call(
+        "session-Y", pass_name="correlation", ctx=ANY
+    )
 
 
 @pytest.mark.asyncio
@@ -212,7 +214,7 @@ async def test_marker_NOT_set_when_matrix_save_fails(monkeypatch):
     # The independent gate pass may still mark pass_name="gate"; the correlation
     # marker specifically must NOT be set when the matrix save fails.
     assert (
-        call("session-FAIL", pass_name="correlation")
+        call("session-FAIL", pass_name="correlation", ctx=ANY)
         not in pm.mark_tuning_applied.call_args_list
     )
 
@@ -265,6 +267,6 @@ async def test_marker_NOT_set_when_state_save_fails(monkeypatch):
     )
 
     assert (
-        call("session-FAIL2", pass_name="correlation")
+        call("session-FAIL2", pass_name="correlation", ctx=ANY)
         not in pm.mark_tuning_applied.call_args_list
     )

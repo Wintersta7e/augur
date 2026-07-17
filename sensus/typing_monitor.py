@@ -316,7 +316,12 @@ async def run() -> None:
                     "ewma_mean": tracker.avg_interval_ms(),
                     "observation_count": tracker.keypress_count,
                 }
-                pm.save_baseline(DOMAIN, ENTITY, baseline_state)
+                pm.save_baseline(
+                    DOMAIN,
+                    ENTITY,
+                    baseline_state,
+                    ctx=pm.resolve_learn_context(event.session_id),
+                )
             except redis.RedisError as exc:
                 log.error("Failed to persist baseline: %s", exc)
 

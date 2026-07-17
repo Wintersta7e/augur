@@ -27,7 +27,7 @@ _FLOOR_MIN, _FLOOR_MAX = 0.0, 0.6
 _DIRECTIVE_ACTIONS = ("suppress", "downgrade")
 
 
-def _arm_gate(pm, p: dict, *, cfg) -> bool:
+def _arm_gate(pm, p: dict, *, cfg, ctx=None) -> bool:
     """Write the durable applied-marker that arms the one-move-per-(kind,target)
     anti-thrash gate. Returns True if armed, False if the write failed.
 
@@ -40,7 +40,9 @@ def _arm_gate(pm, p: dict, *, cfg) -> bool:
     """
     try:
         pm.mark_proposal_applied(
-            p["dedupe_key"], ttl_s=int(cfg.imperator_ii_dedupe_staleness_s)
+            p["dedupe_key"],
+            ttl_s=int(cfg.imperator_ii_dedupe_staleness_s),
+            ctx=ctx,
         )
         return True
     except Exception:
@@ -112,7 +114,7 @@ def _escalation_patch_error(p: dict, *, cfg) -> str | None:
     return matrix_ops.validate_patch(rules={p["target"]: action.get("target")})
 
 
-def _apply_escalation_rule(pm, p: dict) -> bool:
+def _apply_escalation_rule(pm, p: dict, *, ctx=None) -> bool:
     """Apply an escalation_rule proposal by updating the matrix and recording the
     rollback anchor. Returns True on success, False on validation error or write failure.
 
@@ -122,11 +124,11 @@ def _apply_escalation_rule(pm, p: dict) -> bool:
     action = p.get("action") or {}
     if "window" in action:
         res = matrix_ops.apply_matrix_update(
-            pm, rule_windows={p["target"]: action["window"]}, mode="patch"
+            pm, rule_windows={p["target"]: action["window"]}, mode="patch", ctx=ctx
         )
     else:
         res = matrix_ops.apply_matrix_update(
-            pm, rules={p["target"]: action.get("target")}, mode="patch"
+            pm, rules={p["target"]: action.get("target")}, mode="patch", ctx=ctx
         )
     if "error" in res:
         return False
@@ -137,7 +139,7 @@ def _apply_escalation_rule(pm, p: dict) -> bool:
     return True
 
 
-def _apply_prompt_strategy(pm, p: dict, *, cfg) -> bool:
+def _apply_prompt_strategy(pm, p: dict, *, cfg, ctx=None) -> bool:
     """Apply a prompt_strategy proposal: validate, arm the gate, save the new
     prompt text, and record the rollback anchor. Returns True on success, False
     if validation fails, no current prompt exists, or the gate cannot be armed.
@@ -169,12 +171,12 @@ def _apply_prompt_strategy(pm, p: dict, *, cfg) -> bool:
     if not _arm_gate(pm, p, cfg=cfg):
         return False
     if current != text:
-        pm.save_prompt(domain, text)
+        pm.save_prompt(domain, text, ctx=ctx)
     action["prior_text"] = current  # rollback anchor, after the write lands
     return True
 
 
-def _apply_sigma(pm, p: dict, *, cfg) -> bool:
+def _apply_sigma(pm, p: dict, *, cfg, ctx=None) -> bool:
     """Apply a sigma proposal: update the domain's detection sensitivity and
     record the rollback anchor. Returns True on success, False if validation
     fails or the gate cannot be armed.
@@ -208,11 +210,11 @@ def _apply_sigma(pm, p: dict, *, cfg) -> bool:
     if not _arm_gate(pm, p, cfg=cfg):
         return False
     a["prior_sigma"] = current.get("sigma_threshold")
-    pm.save_thresholds(domain, {**current, "sigma_threshold": sigma})
+    pm.save_thresholds(domain, {**current, "sigma_threshold": sigma}, ctx=ctx)
     return True
 
 
-def _apply_gate_calibration(pm, p: dict, *, cfg) -> bool:
+def _apply_gate_calibration(pm, p: dict, *, cfg, ctx=None) -> bool:
     """Apply a gate_calibration proposal: self_tolerance_add/remove or floor_set.
     Returns True on success, False if validation fails or the gate cannot be armed.
 
@@ -240,9 +242,9 @@ def _apply_gate_calibration(pm, p: dict, *, cfg) -> bool:
         if not _arm_gate(pm, p, cfg=cfg):
             return False
         if op == "self_tolerance_add":
-            pm.add_self_tolerance(sk)
+            pm.add_self_tolerance(sk, ctx=ctx)
         else:
-            pm.remove_self_tolerance(sk)
+            pm.remove_self_tolerance(sk, ctx=ctx)
         a["prior"] = prior  # anchor after the write lands (invariant 7)
         return True
     if op == "floor_set":
@@ -263,7 +265,7 @@ def _apply_gate_calibration(pm, p: dict, *, cfg) -> bool:
         if not _arm_gate(pm, p, cfg=cfg):
             return False
         new_entry = {**prior_entry, "floor": value, "last_ts": time.time()}
-        pm.save_gate_tuning_state(floors={sk: new_entry})
+        pm.save_gate_tuning_state(floors={sk: new_entry}, ctx=ctx)
         a["prior"] = prior_entry  # anchor after the write lands (invariant 7)
         return True
     return False
@@ -294,6 +296,7 @@ def apply_proposal(
     if _conscientia_refuses(pm, p, cfg=cfg, session_id=session_id):
         p["status"] = "logged"
         return p
+    learn_ctx = pm.resolve_learn_context(session_id)
     try:
         if p["kind"] == "escalation_rule":
             # Validate the isolated patch FIRST: a malformed patch commits
@@ -312,16 +315,16 @@ def apply_proposal(
                 return p
             # Arm the anti-thrash gate before the committing matrix write so the
             # write can never land behind an open gate (a failed arm aborts here).
-            if not _arm_gate(pm, p, cfg=cfg):
+            if not _arm_gate(pm, p, cfg=cfg, ctx=learn_ctx):
                 p["status"] = "logged"
                 return p
-            if not _apply_escalation_rule(pm, p):
+            if not _apply_escalation_rule(pm, p, ctx=learn_ctx):
                 p["status"] = "logged"
                 return p
         elif p["kind"] == "prompt_strategy":
             # Self-validating helper: validate -> arm gate -> save, with a single
             # load_prompt read shared by the check and the rollback anchor.
-            if not _apply_prompt_strategy(pm, p, cfg=cfg):
+            if not _apply_prompt_strategy(pm, p, cfg=cfg, ctx=learn_ctx):
                 p["status"] = "logged"
                 return p
         else:
@@ -335,7 +338,7 @@ def apply_proposal(
     return p
 
 
-def _apply_context_directive(pm, p: dict, *, cfg) -> bool:
+def _apply_context_directive(pm, p: dict, *, cfg, ctx=None) -> bool:
     """Apply a context_directive proposal: validate, arm the gate, write, and
     record the rollback anchor. Returns True on success, False if validation
     fails, the gate cannot be armed, or the store refuses a NEW id at cap.
@@ -375,7 +378,7 @@ def _apply_context_directive(pm, p: dict, *, cfg) -> bool:
         prior = pm.get_dialogue_directive(directive_id)  # rollback anchor, pre-delete
         if not _arm_gate(pm, p, cfg=cfg):
             return False
-        pm.remove_dialogue_directive(directive_id)
+        pm.remove_dialogue_directive(directive_id, ctx=ctx)
         a["prior_directive"] = prior
         return True
     # Creation path: validate the directive action enum -> mint directive_id if
@@ -400,7 +403,7 @@ def _apply_context_directive(pm, p: dict, *, cfg) -> bool:
         return False
     # Propagate the write's bool (True = written, False = NEW id refused at cap);
     # record the rollback anchor only when the directive was actually stored.
-    result = pm.add_dialogue_directive(directive)
+    result = pm.add_dialogue_directive(directive, ctx=ctx)
     if result:
         a["directive_id"] = directive_id
         a["prior_directive"] = prior
@@ -449,7 +452,11 @@ def _apply_semantic_fact(pm, p: dict, *, cfg, session_id: str | None) -> bool:
         if not _arm_gate(pm, p, cfg=cfg):
             return False
         if prior is not None:
-            pm.save_memory_state(mid, {**prior, "status": "archived"})
+            pm.save_memory_state(
+                mid,
+                {**prior, "status": "archived"},
+                ctx=pm.resolve_learn_context(session_id),
+            )
         a["prior_fact"] = prior
         return True
     pattern = a.get("pattern")
@@ -532,6 +539,7 @@ def _dispatch_confirmed(pm, p: dict, *, cfg, session_id: str | None = None) -> b
     handler), so a validation failure never leaves the dedupe marker set.
     semantic_fact is the only handler that reads session_id (threaded through
     to pm.create_user_taught_memory's FSRS review on re-teach)."""
+    learn_ctx = pm.resolve_learn_context(session_id)
     kind = p["kind"]
     if kind == "escalation_rule":
         # Same validate -> arm -> write ordering as the autonomous path: a
@@ -544,17 +552,17 @@ def _dispatch_confirmed(pm, p: dict, *, cfg, session_id: str | None = None) -> b
                 err,
             )
             return False
-        if not _arm_gate(pm, p, cfg=cfg):
+        if not _arm_gate(pm, p, cfg=cfg, ctx=learn_ctx):
             return False
-        return _apply_escalation_rule(pm, p)
+        return _apply_escalation_rule(pm, p, ctx=learn_ctx)
     if kind == "prompt_strategy":
-        return _apply_prompt_strategy(pm, p, cfg=cfg)
+        return _apply_prompt_strategy(pm, p, cfg=cfg, ctx=learn_ctx)
     if kind == "sigma":
-        return _apply_sigma(pm, p, cfg=cfg)
+        return _apply_sigma(pm, p, cfg=cfg, ctx=learn_ctx)
     if kind == "gate_calibration":
-        return _apply_gate_calibration(pm, p, cfg=cfg)
+        return _apply_gate_calibration(pm, p, cfg=cfg, ctx=learn_ctx)
     if kind == "context_directive":
-        return _apply_context_directive(pm, p, cfg=cfg)
+        return _apply_context_directive(pm, p, cfg=cfg, ctx=learn_ctx)
     if kind == "semantic_fact":
         return _apply_semantic_fact(pm, p, cfg=cfg, session_id=session_id)
     return False

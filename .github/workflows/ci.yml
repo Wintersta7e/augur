@@ -123,6 +123,16 @@ jobs:
           AUGUR_NATS_URL: nats://127.0.0.1:4223
         run: pytest tests/integration/ -m "not slow" -v
 
+      # The same suite with session-provenance enforcement on. Enforcement is
+      # off by default in production, so nothing else would catch a learned
+      # write that loses its provenance and starts failing closed in silence.
+      - name: Run fast integration tests with provenance enforcement
+        env:
+          AUGUR_REDIS_URL: redis://127.0.0.1:6379/1
+          AUGUR_NATS_URL: nats://127.0.0.1:4223
+          AUGUR_PROVENANCE_MODE: enforce
+        run: pytest tests/integration/ -m "not slow" -q
+
       - name: Dump service logs on failure
         if: failure()
         run: |

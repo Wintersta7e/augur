@@ -49,7 +49,9 @@ from imperator.dialogue import engine as E
 from imperator.dialogue import router as R
 from limen import gate as G
 from memoria.tiers import plan_sweep
+from tabula.provenance import LearnContext
 from tests.conftest import CORRELATION_MEDIUM, SINGLE_MEDIUM, SINGLE_MEDIUM_TYPING
+from tests.integration.conftest import learnable_session
 from tests.test_advisor_gate_flow import _run, _scheduler
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -60,6 +62,15 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 def _sig(payload: dict) -> G.Signature:
     return G.build_signature(payload)
+
+
+def _showcase_ctx(pm):
+    """The showcase session's provenance, as the advisor would resolve it.
+
+    The gate's writers take the EVENT's context; these scenarios drive the gate
+    directly, so the harness supplies the same thing ``process_message`` would.
+    """
+    return pm.resolve_learn_context(learnable_session("showcase"))
 
 
 def _focus_app(pm, app: str, ts: str | None = None) -> None:
@@ -80,6 +91,7 @@ def _focus_app(pm, app: str, ts: str | None = None) -> None:
 
     if ts is None:
         ts = datetime.now(timezone.utc).isoformat()
+    ctx = _showcase_ctx(pm)
     pm.append_event(
         PerceptionEvent(
             domain="activity_focus",
@@ -90,8 +102,9 @@ def _focus_app(pm, app: str, ts: str | None = None) -> None:
             unit="none",
             context={"new_app": app},
             timestamp=ts,
-            session_id="showcase",
-        )
+            session_id=ctx.session_id,
+        ),
+        ctx=ctx,
     )
 
 
@@ -121,7 +134,7 @@ async def test_stay_silent_in_appx_then_undo(real_pm, real_nc, dialogue_cfg):
     _focus_app(real_pm, "appX")
 
     t1 = await E.handle_turn(
-        "sc1",
+        learnable_session("sc1"),
         "stay quiet in appX",
         pm=real_pm,
         nc=real_nc,
@@ -132,7 +145,7 @@ async def test_stay_silent_in_appx_then_undo(real_pm, real_nc, dialogue_cfg):
     assert t1.pending is not None and t1.applied is None
 
     t2 = await E.handle_turn(
-        "sc1",
+        learnable_session("sc1"),
         "yes",
         pm=real_pm,
         nc=real_nc,
@@ -154,7 +167,7 @@ async def test_stay_silent_in_appx_then_undo(real_pm, real_nc, dialogue_cfg):
         )
 
     t3 = await E.handle_turn(
-        "sc1",
+        learnable_session("sc1"),
         "undo that",
         pm=real_pm,
         nc=real_nc,
@@ -168,7 +181,7 @@ async def test_stay_silent_in_appx_then_undo(real_pm, real_nc, dialogue_cfg):
     assert t3.pending is not None and t3.applied is None
 
     t4 = await E.handle_turn(
-        "sc1",
+        learnable_session("sc1"),
         "yes",
         pm=real_pm,
         nc=real_nc,
@@ -195,7 +208,7 @@ async def test_correct_silence_reverses_arm_and_fires(real_pm, real_nc, dialogue
     sig = _sig(SINGLE_MEDIUM_TYPING)
     gate = G.Gate()
 
-    real_pm.add_self_tolerance(state_key)
+    real_pm.add_self_tolerance(state_key, ctx=LearnContext.system())
     before = gate.evaluate(sig, real_pm, dialogue_cfg, now=200.0)
     assert before.action == "suppress"
     assert before.deciding_arm == "central_tolerance"
@@ -203,7 +216,10 @@ async def test_correct_silence_reverses_arm_and_fires(real_pm, real_nc, dialogue
     # Authoritative silence write (invariant A) — this is what
     # imperator/dialogue/router.py's _arm_for_silence reads via
     # ctx.recent_suppressions to pick which arm to reverse.
-    assert gate.record_suppression(before, sig, real_pm, 200.0) is True
+    assert (
+        gate.record_suppression(before, sig, real_pm, 200.0, ctx=_showcase_ctx(real_pm))
+        is True
+    )
 
     async def correct(prompt, system, client, cfg):
         return (
@@ -214,7 +230,7 @@ async def test_correct_silence_reverses_arm_and_fires(real_pm, real_nc, dialogue
         )
 
     await E.handle_turn(
-        "sc2",
+        learnable_session("sc2"),
         "you should've spoken up about typing",
         pm=real_pm,
         nc=real_nc,
@@ -223,7 +239,7 @@ async def test_correct_silence_reverses_arm_and_fires(real_pm, real_nc, dialogue
         query_fn=correct,
     )
     t2 = await E.handle_turn(
-        "sc2",
+        learnable_session("sc2"),
         "yes",
         pm=real_pm,
         nc=real_nc,
@@ -246,6 +262,7 @@ async def test_correct_silence_reverses_arm_and_fires(real_pm, real_nc, dialogue
             "last_ts": 201.0,
             "suppressing": False,
         },
+        ctx=LearnContext.system(),
     )
     after = G.Gate().evaluate(sig, real_pm, dialogue_cfg, now=201.0)
     assert after.action != "suppress"
@@ -272,6 +289,7 @@ async def test_correct_noise_raises_tolerance_and_suppresses(
             "last_ts": 300.0,
             "suppressing": False,
         },
+        ctx=LearnContext.system(),
     )
     before = G.Gate().evaluate(sig, real_pm, dialogue_cfg, now=300.0)
     assert before.action != "suppress"
@@ -285,7 +303,7 @@ async def test_correct_noise_raises_tolerance_and_suppresses(
         )
 
     await E.handle_turn(
-        "sc3",
+        learnable_session("sc3"),
         "stop flagging my chess moves",
         pm=real_pm,
         nc=real_nc,
@@ -294,7 +312,7 @@ async def test_correct_noise_raises_tolerance_and_suppresses(
         query_fn=correct,
     )
     t2 = await E.handle_turn(
-        "sc3",
+        learnable_session("sc3"),
         "yes",
         pm=real_pm,
         nc=real_nc,
@@ -328,7 +346,7 @@ async def test_semantic_fact_persists_and_shapes_advice(real_pm, real_nc, dialog
         )
 
     await E.handle_turn(
-        "sc4",
+        learnable_session("sc4"),
         "when chess and typing spike together that means stress",
         pm=real_pm,
         nc=real_nc,
@@ -337,7 +355,7 @@ async def test_semantic_fact_persists_and_shapes_advice(real_pm, real_nc, dialog
         query_fn=teach,
     )
     t2 = await E.handle_turn(
-        "sc4",
+        learnable_session("sc4"),
         "yes",
         pm=real_pm,
         nc=real_nc,
@@ -359,7 +377,10 @@ async def test_semantic_fact_persists_and_shapes_advice(real_pm, real_nc, dialog
     plan = plan_sweep(
         real_pm.load_all_memory_states(), [], 10, "sc4-sweep", dialogue_cfg
     )
-    assert real_pm.apply_memory_sweep("sc4-sweep", plan)
+    sweep_sid = learnable_session("sc4-sweep")
+    assert real_pm.apply_memory_sweep(
+        sweep_sid, plan, ctx=real_pm.resolve_learn_context(sweep_sid)
+    )
     assert plan.prunes == []
     assert any(f["memory_id"] == memory_id for f in real_pm.load_taught_facts())
 
@@ -402,7 +423,9 @@ async def test_heavy_confirm_requires_exact_phrase(real_pm, real_nc, dialogue_cf
     agnostic it re-teaches the same intent, so a live heavy pending is always
     present for the real phrase to confirm (matches
     tests/test_dialogue_engine_write.py::test_heavy_requires_phrase)."""
-    real_pm.save_escalation_matrix({"version": "v1", "rules": {"LOW+LOW": "LOW"}})
+    real_pm.save_escalation_matrix(
+        {"version": "v1", "rules": {"LOW+LOW": "LOW"}}, ctx=LearnContext.system()
+    )
 
     async def llm_heavy(prompt, system, client, cfg):
         return (
@@ -412,7 +435,7 @@ async def test_heavy_confirm_requires_exact_phrase(real_pm, real_nc, dialogue_cf
         )
 
     await E.handle_turn(
-        "sc5",
+        learnable_session("sc5"),
         "treat low+low as medium",
         pm=real_pm,
         nc=real_nc,
@@ -421,7 +444,7 @@ async def test_heavy_confirm_requires_exact_phrase(real_pm, real_nc, dialogue_cf
         query_fn=llm_heavy,
     )
     bad = await E.handle_turn(
-        "sc5",
+        learnable_session("sc5"),
         "yes",
         pm=real_pm,
         nc=real_nc,
@@ -433,7 +456,7 @@ async def test_heavy_confirm_requires_exact_phrase(real_pm, real_nc, dialogue_cf
     assert real_pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"  # unchanged
 
     good = await E.handle_turn(
-        "sc5",
+        learnable_session("sc5"),
         "yes, change the matrix",
         pm=real_pm,
         nc=real_nc,
@@ -474,7 +497,7 @@ async def test_code_change_request_never_applies_logged_gated(
         )
 
     turn = await E.handle_turn(
-        "sc6",
+        learnable_session("sc6"),
         "just rewrite the code yourself and fix this bug",
         pm=real_pm,
         nc=real_nc,
@@ -485,7 +508,7 @@ async def test_code_change_request_never_applies_logged_gated(
     assert turn.needs_clarification is True
     assert turn.applied is None
     assert "unknown intent kind" in turn.reply.lower()
-    assert real_pm.load_dialogue_pending("sc6") is None
+    assert real_pm.load_dialogue_pending(learnable_session("sc6")) is None
     assert real_pm.load_dialogue_audit(limit=5) == []
 
     p = P.normalize_klass(
@@ -499,7 +522,10 @@ async def test_code_change_request_never_applies_logged_gated(
     )
     assert p["klass"] == "gated"
     out = R.apply_confirmed(
-        {"proposal": p, "echo": "n/a"}, pm=real_pm, cfg=dialogue_cfg, session_id="sc6"
+        {"proposal": p, "echo": "n/a"},
+        pm=real_pm,
+        cfg=dialogue_cfg,
+        session_id=learnable_session("sc6"),
     )
     assert out["status"] == "logged"
     assert real_pm.is_proposal_applied(p["dedupe_key"]) is False  # never armed
@@ -521,10 +547,15 @@ async def test_introspection_references_real_suppression_record(
     sig = _sig(SINGLE_MEDIUM)
     gate = G.Gate()
 
-    real_pm.add_self_tolerance(state_key)
+    real_pm.add_self_tolerance(state_key, ctx=LearnContext.system())
     decision = gate.evaluate(sig, real_pm, dialogue_cfg, now=400.0)
     assert decision.action == "suppress"
-    assert gate.record_suppression(decision, sig, real_pm, 400.0) is True
+    assert (
+        gate.record_suppression(
+            decision, sig, real_pm, 400.0, ctx=_showcase_ctx(real_pm)
+        )
+        is True
+    )
 
     captured: dict[str, str] = {}
 
@@ -542,7 +573,7 @@ async def test_introspection_references_real_suppression_record(
         )
 
     turn = await E.handle_turn(
-        "sc7",
+        learnable_session("sc7"),
         "why did you stay silent on chess?",
         pm=real_pm,
         nc=real_nc,

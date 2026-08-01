@@ -30,25 +30,26 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from datetime import datetime, timezone
 from typing import Any
-
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from tabula.config import AugurConfig
-from tabula.persistence import PersistenceManager
-from vox.console_display import dedup_should_suppress, update_last_rendered
-from responsum.feedback_collector import PendingAdvice, _resolve_primary_domain
-from limen.gate import Gate, GateDecision, build_signature
-from limen.scheduler import MustFireScheduler
+import pytest
+
 from consilium.advisor import (
     PUBLISH_SUBJECT,
     SUBJECT_SUPPRESSED,
     process_message,
 )
 from disciplina.reflection_engine import analyze_gate
+from limen.gate import Gate, GateDecision, build_signature
+from limen.scheduler import MustFireScheduler
+from responsum.feedback_collector import PendingAdvice, _resolve_primary_domain
+from tabula.config import AugurConfig
+from tabula.persistence import PersistenceManager
+from tabula.provenance import LearnContext
+from tests.integration.conftest import learnable_session
+from vox.console_display import dedup_should_suppress, update_last_rendered
 
 pytestmark = pytest.mark.asyncio
 
@@ -130,7 +131,7 @@ async def test_suppress_logs_silence_publishes_suppressed_and_console_dedups(
     # central_tolerance suppresses a non-high single event whose state_key is in
     # the offline-learned self-tolerance set — a deterministic, real suppressor.
     state_key = "single:chess:white"
-    pm.add_self_tolerance(state_key)
+    pm.add_self_tolerance(state_key, ctx=LearnContext.system())
 
     received: list[dict] = []
     stop = asyncio.Event()
@@ -138,6 +139,7 @@ async def test_suppress_logs_silence_publishes_suppressed_and_console_dedups(
 
     origin_ts = datetime.now(timezone.utc).isoformat()
     payload = {
+        "session_id": learnable_session(),
         "combined_severity": "MEDIUM",
         "correlation_found": False,
         "primary_anomaly": {
@@ -213,6 +215,7 @@ async def test_exempt_fires_through_scheduler_with_lock_held(
     sub = await nats_conn.subscribe(PUBLISH_SUBJECT, cb=_cb)
 
     exempt_payload = {
+        "session_id": learnable_session(),
         "combined_severity": "HIGH",
         "correlation_found": True,
         "involved_domains": ["typing", "chess"],
@@ -293,6 +296,7 @@ async def test_tier1_note_published_and_reaches_feedback(
     sub = await nats_conn.subscribe(PUBLISH_SUBJECT, cb=_cb)
 
     payload = {
+        "session_id": learnable_session(),
         "combined_severity": "MEDIUM",
         "correlation_found": False,
         "primary_anomaly": {
@@ -307,7 +311,7 @@ async def test_tier1_note_published_and_reaches_feedback(
 
     # Force a downgrade to Tier-1 via a single-arm gate so the test targets the
     # cost-tier-router → downgrade(tier=1) path deterministically.
-    def _downgrade(gate, sig, state, config, now, rng):  # noqa: ANN001
+    def _downgrade(gate, sig, state, config, now, rng):
         return GateDecision.downgrade(
             "cost_tier_downgrade_note", deciding_arm="cost_tier_router", tier=1
         )
@@ -387,7 +391,7 @@ async def test_hot_reload_analyze_gate_tunes_self_tolerance_read_by_evaluate(
     # Fabricate a session's feedback: 6 advice events on this channel (chronic),
     # 4 explicitly dismissed ("n") — exceeds GATE_CHRONIC_MIN_PRESENCE=5 and
     # GATE_DISMISSAL_MIN=3, so analyze_gate adds it to self_tolerance.
-    session_id = str(uuid.uuid4())
+    session_id = learnable_session()
     advice_events = []
     for i in range(6):
         advice_events.append(
@@ -442,15 +446,21 @@ async def test_refuse_at_cap_fails_open_to_fire(
     config = AugurConfig()
 
     # Fill channel_stats to the cap with two existing (different) keys.
-    assert pm.save_channel_stats("single:chess:a", {"seen": 1}) is True
-    assert pm.save_channel_stats("single:typing:b", {"seen": 1}) is True
+    assert (
+        pm.save_channel_stats("single:chess:a", {"seen": 1}, ctx=LearnContext.system())
+        is True
+    )
+    assert (
+        pm.save_channel_stats("single:typing:b", {"seen": 1}, ctx=LearnContext.system())
+        is True
+    )
     # A brand-new key is now untrackable.
     new_key = "single:activity:newuser"
     assert pm.can_track_gate_state(_CHANNEL_STATS_KEY, new_key) is False
 
     # This new-key event would be suppressed by central_tolerance (we add it to
     # the tolerance set), but at cap it cannot be tracked → cap_fail_open.
-    pm.add_self_tolerance(new_key)
+    pm.add_self_tolerance(new_key, ctx=LearnContext.system())
     sig = build_signature(
         {
             "combined_severity": "MEDIUM",
@@ -470,7 +480,7 @@ async def test_refuse_at_cap_fails_open_to_fire(
 
     # An EXISTING key at cap still suppresses normally (cap only blocks new keys).
     existing_key = "single:chess:a"
-    pm.add_self_tolerance(existing_key)
+    pm.add_self_tolerance(existing_key, ctx=LearnContext.system())
     sig_existing = build_signature(
         {
             "combined_severity": "MEDIUM",
@@ -503,7 +513,7 @@ async def test_anti_starvation_releases_saturated_channel(
     state_key = f"single:{domain}:{entity}"
 
     # Make the channel suppressable (central_tolerance) AND saturate it.
-    pm.add_self_tolerance(state_key)
+    pm.add_self_tolerance(state_key, ctx=LearnContext.system())
     pm.save_channel_stats(
         state_key,
         {
@@ -512,6 +522,7 @@ async def test_anti_starvation_releases_saturated_channel(
             "suppression_streak_started_ts": NOW - 10.0,
             "last_ts": NOW - 1.0,
         },
+        ctx=LearnContext.system(),
     )
 
     sig = build_signature(
@@ -546,6 +557,7 @@ async def test_anti_starvation_releases_saturated_channel(
     sub = await nats_conn.subscribe(PUBLISH_SUBJECT, cb=_cb)
 
     payload = {
+        "session_id": learnable_session(),
         "combined_severity": "MEDIUM",
         "correlation_found": False,
         "primary_anomaly": {

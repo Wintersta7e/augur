@@ -18,6 +18,14 @@
 #   AUGUR_REDIS_URL=redis://127.0.0.1:6379/1 \
 #   AUGUR_NATS_URL=nats://127.0.0.1:4223 \
 #   AUGUR_TEST_STARTUP_WAIT_S=12 .venv/bin/pytest tests/integration/
+#
+# Every component reads AUGUR_PROVENANCE_MODE (off|report|enforce) at import,
+# so exporting it here covers the whole pipeline:
+#   AUGUR_PROVENANCE_MODE=report bash infrastructure/run_augur.sh
+# report logs what enforcement WOULD withhold without withholding it; enforce
+# stops non-learnable sessions from training the system. The deploy stack
+# defaults to report; this launcher inherits whatever the shell exports (off
+# when unset). Watch the report logs across a few real sessions before enforce.
 
 set -euo pipefail
 

@@ -51,6 +51,7 @@ from praesagium.matcher import SUBJECT_FORESEEN, SUBJECT_RESOLVED, make_on_anoma
 from praesagium.miner import run_praesagium_mining
 from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
+from tests.integration.conftest import learnable_session
 
 _ANTE_DOMAIN = "typing"
 _ANTE_ENTITY = "latency_spike"
@@ -111,17 +112,27 @@ async def test_praesagium_live_mining_and_foreseen_flow(
     round trip through the matcher callback."""
     pm = PersistenceManager(redis_client)
     cfg = _config()
+    ctx = {
+        sid: pm.resolve_learn_context(learnable_session(sid))
+        for sid in (_SESSION_1, _SESSION_2, _SESSION_3, _RUN_SESSION)
+    }
 
     base = time.time() - 7200.0  # comfortably before either mine's wall clock
 
     # -- Step 1: seed two synthetic sessions, each one A occurrence followed
     # by a medium-severity B occurrence ~60s later (inside the default
     # (lag_min=10s, lag_max=900s] discovery window). --
-    pm.append_praesagium_episode(_SESSION_1, _episode(_ANTE_KEY, "low", base))
-    pm.append_praesagium_episode(_SESSION_1, _episode(_CONS_KEY, "medium", base + 60.0))
-    pm.append_praesagium_episode(_SESSION_2, _episode(_ANTE_KEY, "low", base + 300.0))
     pm.append_praesagium_episode(
-        _SESSION_2, _episode(_CONS_KEY, "medium", base + 360.0)
+        _SESSION_1, _episode(_ANTE_KEY, "low", base), ctx=ctx[_SESSION_1]
+    )
+    pm.append_praesagium_episode(
+        _SESSION_1, _episode(_CONS_KEY, "medium", base + 60.0), ctx=ctx[_SESSION_1]
+    )
+    pm.append_praesagium_episode(
+        _SESSION_2, _episode(_ANTE_KEY, "low", base + 300.0), ctx=ctx[_SESSION_2]
+    )
+    pm.append_praesagium_episode(
+        _SESSION_2, _episode(_CONS_KEY, "medium", base + 360.0), ctx=ctx[_SESSION_2]
     )
 
     # -- Step 2 (first mine): the pair passes every Sec 4.4 promotion test
@@ -149,9 +160,13 @@ async def test_praesagium_live_mining_and_foreseen_flow(
     # 1's wall clock) for provisional -> active promotion (Sec 4.6-2).
     await asyncio.sleep(0.05)
     fresh_ts = time.time()
-    pm.append_praesagium_episode(_SESSION_3, _episode("typing:filler", "low", fresh_ts))
     pm.append_praesagium_episode(
-        _SESSION_3, _episode("activity:filler", "low", fresh_ts + 5.0)
+        _SESSION_3, _episode("typing:filler", "low", fresh_ts), ctx=ctx[_SESSION_3]
+    )
+    pm.append_praesagium_episode(
+        _SESSION_3,
+        _episode("activity:filler", "low", fresh_ts + 5.0),
+        ctx=ctx[_SESSION_3],
     )
 
     # -- Step 2 (second mine): the corpus now contains a session newer than

@@ -20,8 +20,10 @@ import pytest
 
 from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
+from tabula.provenance import LearnContext
 from nexus.correlator import DEFAULT_ESCALATION_MATRIX, ensure_matrix_seeded
 from disciplina.reflection_engine import run_reflection
+from tests.integration.conftest import learnable_session
 
 pytestmark = pytest.mark.asyncio
 
@@ -125,7 +127,7 @@ async def test_bad_feedback_lowers_confidence_but_stays_in_band(
     above 0.6 enable threshold at alpha=0.2), matrix unchanged."""
     pm = PersistenceManager(redis_client)
     ensure_matrix_seeded(pm)
-    session_id = str(uuid.uuid4())
+    session_id = learnable_session()
 
     feedback = _fabricate_feedback(
         session_id,
@@ -167,7 +169,7 @@ async def test_sustained_bad_feedback_disables_rule(
     # behavioral_avg doesn't default to 0.5)
     final_state = None
     for _ in range(6):
-        session_id = str(uuid.uuid4())
+        session_id = learnable_session()
         feedback = _fabricate_feedback(
             session_id,
             [_correlated_advice_event("LOW+LOW", "n", 0.01)],
@@ -193,7 +195,7 @@ async def test_run_reflection_is_idempotent_on_same_session(
     the EWMA update."""
     pm = PersistenceManager(redis_client)
     ensure_matrix_seeded(pm)
-    session_id = str(uuid.uuid4())
+    session_id = learnable_session()
 
     feedback = _fabricate_feedback(
         session_id,
@@ -229,7 +231,7 @@ async def test_run_reflection_no_correlated_advice_no_writes(
     idempotency marker untouched."""
     pm = PersistenceManager(redis_client)
     ensure_matrix_seeded(pm)
-    session_id = str(uuid.uuid4())
+    session_id = learnable_session()
 
     feedback = _fabricate_feedback(
         session_id,
@@ -269,10 +271,10 @@ async def test_manual_matrix_edit_preserved_through_disable_and_recovery(
             "LOW+LOW": "HIGH",  # operator override
         },
     }
-    pm.save_escalation_matrix(manual_matrix)
+    pm.save_escalation_matrix(manual_matrix, ctx=LearnContext.system())
 
     # First, one good session so restore_target gets captured as HIGH while healthy
-    session_id = str(uuid.uuid4())
+    session_id = learnable_session()
     feedback = _fabricate_feedback(
         session_id,
         [_correlated_advice_event("LOW+LOW", "y", 1.0)],
@@ -287,7 +289,7 @@ async def test_manual_matrix_edit_preserved_through_disable_and_recovery(
 
     # Now six bad sessions to disable the rule
     for _ in range(6):
-        sid = str(uuid.uuid4())
+        sid = learnable_session()
         bad_feedback = _fabricate_feedback(
             sid,
             [_correlated_advice_event("LOW+LOW", "n", 0.01)],
@@ -304,7 +306,7 @@ async def test_manual_matrix_edit_preserved_through_disable_and_recovery(
 
     # Now good sessions until recovery
     for _ in range(10):
-        sid = str(uuid.uuid4())
+        sid = learnable_session()
         good_feedback = _fabricate_feedback(
             sid,
             [_correlated_advice_event("LOW+LOW", "y", 1.0)],

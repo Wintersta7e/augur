@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from datetime import datetime, timezone
 
 import pytest
+
+from tests.integration.conftest import learnable_session
 
 pytestmark = pytest.mark.asyncio
 
@@ -51,7 +52,7 @@ async def test_session_end_flushes_graph_to_redis(
     nats_conn,
 ) -> None:
     """Correlation event + session.end → graph in Redis."""
-    sid = str(uuid.uuid4())
+    sid = learnable_session()
 
     # Warm chess baseline. Must be long enough that the detector's
     # min_observations gate flips to trained — pad to (gate + 5) so the test
@@ -191,7 +192,7 @@ async def test_session_end_with_no_correlations_still_saves_empty_graph(
     """A session with no cross-domain correlations still persists an
     empty graph so consumers can distinguish 'session ended cleanly with
     zero correlations' from 'session never existed'."""
-    sid = str(uuid.uuid4())
+    sid = learnable_session()
 
     # Publish session.end immediately — no perception events at all
     await nats_conn.publish(

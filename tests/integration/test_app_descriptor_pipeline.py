@@ -11,6 +11,7 @@ from tabula.connections import connect_redis
 from tabula.persistence import PersistenceManager
 from consilium.app_descriptor import ClassifierLane
 from consilium.advisor import enrich_activity_descriptor
+from tests.integration.conftest import learnable_session
 
 
 @pytest.fixture
@@ -28,6 +29,9 @@ def test_os_identity_cached_and_injected(pm):
     anomaly = {
         "domain": "activity_intensity",
         "entity": "alpha_app",
+        # A real vigil anomaly carries its session (anomaly_detector.py), which
+        # is where the descriptor cache write gets its provenance.
+        "session_id": learnable_session(),
         "context": {"app_identity": "Alpha Browser"},
     }
     enrich_activity_descriptor(pm, lane, anomaly)
@@ -39,6 +43,7 @@ def test_os_identity_cached_and_injected(pm):
 
 
 def test_llm_fallback_does_not_clobber_os_identity(pm):
-    pm.save_app_descriptor("alpha_app", "Alpha Browser", overwrite=True)
-    pm.save_app_descriptor("alpha_app", "some llm guess", overwrite=False)
+    ctx = pm.resolve_learn_context(learnable_session())
+    pm.save_app_descriptor("alpha_app", "Alpha Browser", overwrite=True, ctx=ctx)
+    pm.save_app_descriptor("alpha_app", "some llm guess", overwrite=False, ctx=ctx)
     assert pm.load_app_descriptor("alpha_app") == "Alpha Browser"

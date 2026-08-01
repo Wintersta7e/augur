@@ -28,14 +28,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import nats
+import redis as redis_lib
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from tabula.contracts import PerceptionEvent  # noqa: E402
+from tabula.persistence import PersistenceManager  # noqa: E402
 
 NATS_URL = "nats://127.0.0.1:4222"
+REDIS_URL = "redis://127.0.0.1:6379"
 _POOL = [3.2, 3.8, 3.5, 4.0, 3.1, 3.9, 3.3, 3.7, 3.4, 3.6]
 
 
@@ -57,6 +60,14 @@ async def main() -> int:
     args = ap.parse_args()
 
     sid = f"stress-{uuid.uuid4().hex[:8]}"
+    # Runs against the live stack: record this session as synthetic so its
+    # injected perception is explicitly non-learnable, not merely unprovenanced.
+    r = redis_lib.Redis.from_url(
+        REDIS_URL, decode_responses=True, socket_connect_timeout=5
+    )
+    PersistenceManager(r).save_session_meta(
+        sid, origin="synthetic", created_by="stress_soak"
+    )
     nc = await nats.connect(NATS_URL, connect_timeout=5)
     counts = {"anomaly": 0, "advice": 0, "suppressed": 0}
 

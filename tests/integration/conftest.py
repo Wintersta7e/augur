@@ -23,8 +23,21 @@ if str(PROJECT_ROOT) not in sys.path:
 from tabula.config import AugurConfig  # noqa: E402
 from tabula.contracts import PerceptionEvent  # noqa: E402
 from tabula.persistence import PersistenceManager  # noqa: E402
+from tests.integration.cell_guard import check_test_cell  # noqa: E402
 
 _config = AugurConfig.from_env()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _require_test_cell() -> None:
+    """Abort the whole suite unless we are in the test cell.
+
+    autouse + session scope so this runs before any fixture writes. The suite
+    deletes every augur:* key; against the live cell that is data loss.
+    """
+    reason = check_test_cell(_config)
+    if reason is not None:
+        pytest.exit(f"REFUSING TO RUN: {reason}", returncode=2)
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +114,9 @@ async def redis_client() -> AsyncIterator[redis.Redis]:  # type: ignore[type-arg
     if keys:
         r.delete(*keys)
     yield r
+    leftover = r.keys("augur:*")
+    if leftover:
+        r.delete(*leftover)
     r.close()
 
 
@@ -118,8 +134,13 @@ async def nats_conn() -> AsyncIterator[nats_client.NATS]:
 
 @pytest.fixture
 def session_id() -> str:
-    """Fresh UUID session identifier."""
-    return str(uuid4())
+    """Fresh session identifier, with its provenance recorded.
+
+    A live sensor mints provenance before its first event; the harness does the
+    same, so anything driven by this fixture can train (see
+    :func:`mint_session_provenance`).
+    """
+    return learnable_session()
 
 
 @pytest_asyncio.fixture
@@ -173,11 +194,18 @@ async def pipeline(
     requested: list[str] = getattr(request, "param", [])
     procs: dict[str, asyncio.subprocess.Process] = {}
 
+    cell_env = {
+        **os.environ,
+        "AUGUR_REDIS_URL": _config.redis_url,
+        "AUGUR_NATS_URL": _config.nats_url,
+    }
+
     for name in requested:
         cmd = component_commands[name]
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(PROJECT_ROOT),
+            env=cell_env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -211,6 +239,43 @@ async def pipeline(
 # ---------------------------------------------------------------------------
 
 
+_provenance_pm: PersistenceManager | None = None
+
+
+def mint_session_provenance(session_id: str, *, origin: str = "real") -> None:
+    """Record a test-cell session's provenance (spec §4.4).
+
+    Sessions in the test cell are real *within that cell* — nothing is withheld
+    there — but "real" still has to be RECORDED, because provenance is only ever
+    a durable record this system wrote, never an inference from a session id. So
+    the harness mints it exactly like a live sensor does, rather than the
+    provenance layer learning about cells.
+
+    Without this, ENFORCE correctly withholds every learned write the suite
+    triggers and the tuning assertions fail. Pass ``origin="synthetic"`` to
+    exercise the withholding path on purpose.
+    """
+    global _provenance_pm
+    if _provenance_pm is None:
+        _provenance_pm = PersistenceManager(
+            redis.Redis.from_url(_config.redis_url, decode_responses=True)
+        )
+    _provenance_pm.save_session_meta(
+        session_id, origin=origin, created_by="integration"
+    )
+
+
+def learnable_session(session_id: str | None = None, *, origin: str = "real") -> str:
+    """Mint a session id whose provenance is recorded, and return it.
+
+    The one-liner replacement for a bare ``str(uuid4())`` in a test that then
+    drives a learned write.
+    """
+    sid = session_id or str(uuid4())
+    mint_session_provenance(sid, origin=origin)
+    return sid
+
+
 async def inject_perception_event(
     nc: nats_client.NATS,
     domain: str,
@@ -220,8 +285,15 @@ async def inject_perception_event(
     unit: str,
     context: dict,
     session_id: str,
+    origin: str = "real",
 ) -> PerceptionEvent:
-    """Create a PerceptionEvent and publish it to the NATS perception subject."""
+    """Create a PerceptionEvent and publish it to the NATS perception subject.
+
+    Mints the session's provenance first (see :func:`mint_session_provenance`),
+    so the components that consume the event can resolve it — the live sensors
+    do the same thing before their first event.
+    """
+    mint_session_provenance(session_id, origin=origin)
     event = PerceptionEvent(
         domain=domain,
         stream_id=f"{domain}_stream",

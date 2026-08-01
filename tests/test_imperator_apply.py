@@ -1,12 +1,17 @@
 import fakeredis
 import pytest
 from tabula.persistence import PersistenceManager
+from tabula.provenance import LearnContext
 from imperator import apply as A, proposals as P
 
 
 def _pm():
     pm = PersistenceManager(fakeredis.FakeStrictRedis(decode_responses=False))
-    pm.save_escalation_matrix({"version": "v1", "rules": {"LOW+LOW": "LOW"}})
+    # Seeding the default matrix is a system write (as at real startup), so it
+    # persists whatever the provenance mode.
+    pm.save_escalation_matrix(
+        {"version": "v1", "rules": {"LOW+LOW": "LOW"}}, ctx=LearnContext.system()
+    )
     return pm
 
 
@@ -505,3 +510,81 @@ def test_apply_never_raises_on_unexpected_write_error(monkeypatch):
     # Gate armed-before-write -> marker left set after the failed write; pins the
     # documented anti-thrash behavior so a reorder to write-then-arm is caught.
     assert pm.is_proposal_applied(p["dedupe_key"])
+
+
+# ── provenance: the apply path must still work when enforcement is on ─────────
+
+
+@pytest.fixture
+def _enforcing():
+    from tabula.provenance import (
+        ProvenanceMode,
+        get_provenance_mode,
+        set_provenance_mode,
+    )
+
+    prev = get_provenance_mode()
+    set_provenance_mode(ProvenanceMode.ENFORCE)
+    yield
+    set_provenance_mode(prev)
+
+
+def _learnable(pm, sid: str) -> str:
+    pm.save_session_meta(sid, origin="real", created_by="test")
+    return sid
+
+
+@pytest.mark.parametrize(
+    "kind,target,action",
+    [
+        ("escalation_rule", "LOW+LOW", {"target": "MEDIUM"}),
+        (
+            "prompt_strategy",
+            "chess",
+            {"text": "Be concise and specific about the board position."},
+        ),
+    ],
+)
+def test_apply_still_commits_under_enforce(_enforcing, kind, target, action):
+    """A learnable session's apply must reach its committing write.
+
+    Every _apply_* helper arms the anti-thrash gate through _arm_gate, which
+    writes the applied-marker. If the helper does not FORWARD its context, the
+    marker write raises under ENFORCE, _arm_gate fails closed, and the whole
+    armed-apply path dies silently behind one log line.
+    """
+    pm = _pm()
+    sid = _learnable(pm, "s-real")
+    pm.save_prompt(
+        "chess", "An existing prompt long enough to pass.", ctx=LearnContext.system()
+    )
+    p = _safe(P.make_proposal(kind=kind, target=target, action=action, rationale="r"))
+    assert A.apply_proposal(pm, p, cfg=_Cfg(), session_id=sid)["status"] == "applied"
+    assert pm.is_proposal_applied(p["dedupe_key"])
+
+
+def test_apply_is_withheld_under_enforce_for_a_synthetic_session():
+    from tabula.provenance import (
+        ProvenanceMode,
+        get_provenance_mode,
+        set_provenance_mode,
+    )
+
+    prev = get_provenance_mode()
+    set_provenance_mode(ProvenanceMode.ENFORCE)
+    try:
+        pm = _pm()
+        pm.save_session_meta("s-synth", origin="synthetic", created_by="test")
+        p = _safe(
+            P.make_proposal(
+                kind="escalation_rule",
+                target="LOW+LOW",
+                action={"target": "MEDIUM"},
+                rationale="r",
+            )
+        )
+        A.apply_proposal(pm, p, cfg=_Cfg(), session_id="s-synth")
+        # The matrix is untouched: a synthetic session cannot change real policy.
+        assert pm.load_escalation_matrix()["rules"]["LOW+LOW"] == "LOW"
+    finally:
+        set_provenance_mode(prev)

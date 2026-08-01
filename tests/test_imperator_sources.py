@@ -109,12 +109,16 @@ def test_windowed_rates_excludes_probe(monkeypatch):
     monkeypatch.setattr(
         pm,
         "load_silence_records",
-        lambda limit: [{"ts": now - 10}, {"ts": now - 5}, {"ts": now - 5000}],
+        lambda limit, learnable_only=False: [
+            {"ts": now - 10},
+            {"ts": now - 5},
+            {"ts": now - 5000},
+        ],
     )
     monkeypatch.setattr(
         pm,
         "load_emissions",
-        lambda limit: [
+        lambda limit, learnable_only=False: [
             {"ts": now - 8, "probe": False},
             {"ts": now - 7, "probe": True},
             {"ts": now - 6, "audit_only": True},

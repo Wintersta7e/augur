@@ -160,6 +160,7 @@ def build_foreseen_payload(
         "rule_window_s": None,
         "involved_domains": ["praesagium"],
         "timestamp": iso_now,
+        "session_id": session_id,
         "source": "anticipatory",
         "anticipatory": {
             "pattern_id": pid,
@@ -245,7 +246,10 @@ async def resolve_open_predictions(
         }
         try:
             claimed = pm.resolve_praesagium_prediction(
-                pid_rec, resolved_rec, cap=cfg.praesagium_predictions_cap
+                pid_rec,
+                resolved_rec,
+                cap=cfg.praesagium_predictions_cap,
+                ctx=pm.resolve_learn_context(rec.get("session_id")),
             )
         except Exception as exc:  # one bad record must not abort the sweep
             log.warning("Praesagium resolve failed for %s: %s", pid_rec, exc)
@@ -305,6 +309,7 @@ async def match_patterns(
             del cooldowns[pid]
 
     session_id = payload.get("session_id")
+    ctx = pm.resolve_learn_context(session_id)
     open_pattern_ids = {
         r.get("pattern_id")
         for r in pm.load_praesagium_open_predictions()
@@ -343,7 +348,7 @@ async def match_patterns(
             "forewarning_text": render_forewarning(pattern),
         }
         saved = pm.save_praesagium_open_prediction(
-            prediction, cap=cfg.praesagium_open_predictions_cap
+            prediction, cap=cfg.praesagium_open_predictions_cap, ctx=ctx
         )
         if not saved:
             log.warning(
@@ -366,7 +371,7 @@ async def match_patterns(
             log.warning("Praesagium foreseen publish failed for %s: %s", pid, exc)
             continue
         pm.update_praesagium_open_prediction(
-            prediction["prediction_id"], {"emitted_at": ts}
+            prediction["prediction_id"], {"emitted_at": ts}, ctx=ctx
         )
 
 
@@ -419,6 +424,7 @@ def make_on_anomaly(
                             session_id,
                             entry,
                             cap=config.praesagium_episode_cap_per_session,
+                            ctx=pm.resolve_learn_context(session_id),
                         )
                     except Exception as exc:
                         log.warning("Praesagium episode append failed: %s", exc)

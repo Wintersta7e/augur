@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
@@ -693,7 +693,7 @@ async def test_descriptor_map_fills_on_silence(fake_pm, cfg, nc, http_client) ->
     )
     # enrich_payload_descriptors ran before the gate → the unclassified entity
     # (empty descriptor map, no app_identity) was enqueued for classification.
-    lane.enqueue.assert_called_once_with("someapp.exe")
+    lane.enqueue.assert_called_once_with("someapp.exe", learn_ctx=ANY)
     # Suppressed (no advice).
     from consilium.advisor import PUBLISH_SUBJECT
 

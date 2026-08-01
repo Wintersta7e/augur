@@ -643,6 +643,17 @@ class AugurConfig:
         return urlparse(self.redis_url).port or 6379
 
     @property
+    def redis_db(self) -> int:
+        """Database index from redis_url's path; 0 when absent/non-numeric.
+
+        Callers must pass this explicitly: a client built from host+port alone
+        silently lands on db 0 whatever index the URL names, which diverges
+        from anything using Redis.from_url.
+        """
+        path = (urlparse(self.redis_url).path or "").lstrip("/")
+        return int(path) if path.isdecimal() else 0
+
+    @property
     def effective_stall_window_s(self) -> float:
         """Resolved stall window: the field if set (>0), else max(300, 2*ollama_timeout).
         Lazy on purpose — from_env() builds defaults via asdict(cls()) BEFORE applying

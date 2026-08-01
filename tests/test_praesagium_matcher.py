@@ -219,6 +219,7 @@ def test_build_foreseen_payload_all_fields():
     assert payload["rule_window_s"] is None
     assert payload["involved_domains"] == ["praesagium"]
     assert isinstance(payload["timestamp"], str)
+    assert payload["session_id"] == "sess-9"  # top-level, not only nested
     assert payload["source"] == "anticipatory"
 
     ant = payload["anticipatory"]
@@ -859,9 +860,9 @@ def test_on_anomaly_happy_path_appends_episode_with_configured_cap():
     seen_caps: list[int] = []
     orig_append = pm.append_praesagium_episode
 
-    def _spy(session_id, entry, *, cap=None):
+    def _spy(session_id, entry, *, cap=None, ctx=None):
         seen_caps.append(cap)
-        return orig_append(session_id, entry, cap=cap)
+        return orig_append(session_id, entry, cap=cap, ctx=ctx)
 
     pm.append_praesagium_episode = _spy
     cb = make_on_anomaly(pm, cfg, pub, {})

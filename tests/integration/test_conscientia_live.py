@@ -19,11 +19,12 @@ import json
 import pytest
 
 from tabula.persistence import PersistenceManager
+from tests.integration.conftest import learnable_session
 
 # The gated proposal's target sits outside charter.PROTECTED_SURFACES, so the
 # rubric's recommendation is "needs_human" (not "reject").
 _PROPOSAL_ID = "conscientia-live-g1"
-_SESSION_ID = "conscientia-live"
+_SESSION_ID = "conscientia-live"  # provenance minted in the test body
 
 
 @pytest.mark.parametrize("pipeline", [["disciplina"]], indirect=True)
@@ -49,6 +50,7 @@ async def test_conscientia_verdict_from_live_reflection(
     # Seed one gated proposal and matching feedback. The feedback is required:
     # on_trigger bails before run_reflection if get_feedback(session_id) is None,
     # so without it the conscientia pass never runs.
+    learnable_session(_SESSION_ID)
     pm.save_proposal(
         {
             "proposal_id": _PROPOSAL_ID,
@@ -59,7 +61,8 @@ async def test_conscientia_verdict_from_live_reflection(
             "ts": 1.0,
             "action": {"patch": "x"},
             "status": "logged",
-        }
+        },
+        ctx=pm.resolve_learn_context(_SESSION_ID),
     )
     pm.save_feedback(_SESSION_ID, {"session_id": _SESSION_ID, "advice_events": []})
 

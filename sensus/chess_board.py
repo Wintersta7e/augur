@@ -21,6 +21,7 @@ from tabula.config import AugurConfig
 from tabula.connections import connect_redis
 from tabula.contracts import PerceptionEvent
 from tabula.session import SessionManager
+from tabula.provenance import non_learning_write
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -75,6 +76,7 @@ NATS_SUBJECT = "augur.sensus.chess"
 # the shared helper from tabula.connections (imported above).
 
 
+@non_learning_write(reason="legacy chess demo display buffer")
 def publish_move_redis(r: redis.Redis, payload: dict) -> None:
     raw = json.dumps(payload)
     r.set(REDIS_KEY_LAST, raw)

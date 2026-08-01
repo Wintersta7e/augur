@@ -736,7 +736,7 @@ def analyze_correlation_window_tuning(
 
 
 def maybe_rollback_prompt(
-    pm: PersistenceManager, domain: str, config: AugurConfig
+    pm: PersistenceManager, domain: str, config: AugurConfig, *, ctx=None
 ) -> bool:
     """Roll back if the current prompt's REALIZED score regressed past the margin
     vs its predecessor's realized score (spec 1E §9). Both scores must exist
@@ -746,7 +746,7 @@ def maybe_rollback_prompt(
     if cur is None or prev is None:
         return False
     if (prev - cur) > config.prompt_rollback_margin:
-        return pm.rollback_prompt(domain)
+        return pm.rollback_prompt(domain, ctx=ctx)
     return False
 
 
@@ -756,6 +756,8 @@ async def mutate_prompt(
     utility_result: dict,
     http_client: httpx.AsyncClient,
     config: AugurConfig,
+    *,
+    ctx=None,
 ) -> dict | None:
     """Ask Ollama to suggest a better system prompt based on feedback."""
     current_prompt = pm.load_prompt(domain)
@@ -769,7 +771,9 @@ async def mutate_prompt(
         # Persist the seed (with the current realized utility) BEFORE mutating so
         # the first mutation archives it into history → rollback has a target
         # (spec 1E, MEDIUM-2).
-        pm.save_prompt(domain, current_prompt, score=utility_result["utility_score"])
+        pm.save_prompt(
+            domain, current_prompt, score=utility_result["utility_score"], ctx=ctx
+        )
 
     prompt = f"""You are an AI prompt engineer. A chess advisor system has been receiving
 low utility scores from users (score: {utility_result["utility_score"]:.2f}/1.0).
@@ -815,7 +819,9 @@ Return ONLY the new prompt text, nothing else."""
             return {"mutated": False, "rejected": "forbidden_pattern"}
 
         # Save with the current utility score
-        pm.save_prompt(domain, new_prompt, score=utility_result["utility_score"])
+        pm.save_prompt(
+            domain, new_prompt, score=utility_result["utility_score"], ctx=ctx
+        )
         log.info(
             "Mutated prompt for '%s' (%.0fms, %d chars)",
             domain,
@@ -1147,11 +1153,15 @@ def analyze_gate(
     # ── Habituation floor: raise the floor for chronically-dismissed channels ─
     # A dismissed channel should habituate faster, so raise its floor (which
     # caps responsiveness) one conservative step toward GATE_FLOOR_MAX.
+    # Decay clocks the gate reads back as floats (gate.py `_arm_habituation` /
+    # `_arm_signaller_credibility`) — must be wall-clock, never the session id.
+    now_ts = time.time()
+
     floors: dict[str, dict] = {}
     for sk in tolerance_add:
         prev = float((pm.load_habituation_floor(sk) or {}).get("floor", 0.0) or 0.0)
         new_floor = round(min(prev + GATE_FLOOR_STEP, GATE_FLOOR_MAX), 4)
-        floors[sk] = {"floor": new_floor, "last_ts": session_id}
+        floors[sk] = {"floor": new_floor, "last_ts": now_ts}
 
     # ── Class credibility: EWMA from genuine explicit ratings per class ──────
     class_ratings: dict[str, list[float]] = {}
@@ -1173,7 +1183,7 @@ def analyze_gate(
         prev = float(entry.get("cred", config.gate_cred_mid))
         n = int(entry.get("n", 0)) + len(vals)
         new_cred = round(prev + alpha * (observed - prev), 4)
-        credibility[cls] = {"cred": new_cred, "n": n, "last_fb_ts": session_id}
+        credibility[cls] = {"cred": new_cred, "n": n, "last_fb_ts": now_ts}
 
     # ── Advice-rate operating point: EWMA of the delivered-advice burden ─────
     # Derive the dismissal rate over delivered advice; nudge the stored
@@ -1207,14 +1217,18 @@ def analyze_gate(
     for r in gate_rows:
         r["_arm"] = "withheld"
     reliability_audit = _behavioral_audit_per_arm(advice_rows + gate_rows, config)
+    # CL11: the readout tunes the gate, so it reads the LEARNING view of the
+    # logs — a synthetic driver's emissions/silences are excluded under ENFORCE
+    # (the online arms still read them unfiltered).
     mrt = _mrt_ipw_readout(
-        pm.load_emissions(limit=100),
-        pm.load_silence_records(limit=100),
+        pm.load_emissions(limit=100, learnable_only=True),
+        pm.load_silence_records(limit=100, learnable_only=True),
         advice_rows,
         gate_rows,
     )
 
     # ── Persist atomically + mark idempotent ─────────────────────────────────
+    gate_ctx = pm.resolve_learn_context(session_id)
     if floors or credibility or tolerance_add or advice_rate_update is not None:
         try:
             pm.save_gate_tuning_state(
@@ -1222,6 +1236,7 @@ def analyze_gate(
                 credibility=credibility or None,
                 tolerance_add=tolerance_add or None,
                 advice_rate=advice_rate_update,
+                ctx=gate_ctx,
             )
         except redis.RedisError as exc:
             log.error("Gate tuning-state save failed: %s", exc)
@@ -1231,7 +1246,7 @@ def analyze_gate(
                 "reason": str(exc),
             }
 
-    pm.mark_tuning_applied(session_id, pass_name="gate")
+    pm.mark_tuning_applied(session_id, pass_name="gate", ctx=gate_ctx)
 
     return {
         "analysis": "gate",
@@ -1285,14 +1300,15 @@ def run_memory_sweep(session_id: str, pm, config) -> dict:
         session_id,
         config,
     )
-    committed = pm.apply_memory_sweep(session_id, plan)
+    mem_ctx = pm.resolve_learn_context(session_id)
+    committed = pm.apply_memory_sweep(session_id, plan, ctx=mem_ctx)
     if not committed:
         return {
             "analysis": "memory",
             "skipped": True,
             "reason": "race_already_processed",
         }
-    pm.mark_tuning_applied(session_id, pass_name="memory")
+    pm.mark_tuning_applied(session_id, pass_name="memory", ctx=mem_ctx)
     return {"analysis": "memory", "active_session": active_session, **plan.counts()}
 
 
@@ -1314,6 +1330,10 @@ async def run_reflection(
     ``analyses`` plus the Memoria and Conscientia sweeps — and build the
     reflection report."""
     domain = _derive_domain(feedback)
+    # Resolve this reflection's provenance ONCE and thread it to every learned
+    # write below (spec §4.3a); a non-learnable session's tuning is withheld
+    # under ENFORCE while the passes still run and report.
+    learn_ctx = pm.resolve_learn_context(session_id)
     log.info(
         "Starting reflection for session %s (derived domain=%s)",
         session_id,
@@ -1344,7 +1364,7 @@ async def run_reflection(
     for dom, result in precision["per_domain"].items():
         if result["action"] in ("raise_sigma", "lower_sigma"):
             thresholds_per_domain[dom]["sigma_threshold"] = result["sigma_after"]
-            pm.save_thresholds(dom, thresholds_per_domain[dom])
+            pm.save_thresholds(dom, thresholds_per_domain[dom], ctx=learn_ctx)
             any_sigma_adjusted = True
         sigma_values_after[dom] = thresholds_per_domain[dom]["sigma_threshold"]
 
@@ -1367,8 +1387,8 @@ async def run_reflection(
     # behind a per-session marker so a re-run neither double-rolls nor re-mutates.
     mutation_result = None
     if not pm.is_tuning_applied(session_id, pass_name="prompt"):
-        pm.update_current_prompt_score(domain, utility["utility_score"])
-        if maybe_rollback_prompt(pm, domain, config):
+        pm.update_current_prompt_score(domain, utility["utility_score"], ctx=learn_ctx)
+        if maybe_rollback_prompt(pm, domain, config, ctx=learn_ctx):
             log.info("Auto-rolled-back regressed prompt for '%s'", domain)
         elif utility["needs_prompt_mutation"]:
             log.info(
@@ -1376,13 +1396,13 @@ async def run_reflection(
                 config.utility_mutation_threshold,
             )
             mutation_result = await mutate_prompt(
-                pm, domain, utility, http_client, config
+                pm, domain, utility, http_client, config, ctx=learn_ctx
             )
             if mutation_result and mutation_result.get("mutated"):
                 log.info("Prompt mutation successful")
             else:
                 log.warning("Prompt mutation skipped or failed")
-        pm.mark_tuning_applied(session_id, pass_name="prompt")
+        pm.mark_tuning_applied(session_id, pass_name="prompt", ctx=learn_ctx)
 
     # 3. Counterfactual analysis
     counterfactual = analyze_counterfactual(pm, domain, current_thresholds)
@@ -1456,6 +1476,7 @@ async def run_reflection(
                 rules=changed_rules or None,
                 rule_windows=changed_windows or None,
                 mode="patch",
+                ctx=learn_ctx,
             )
             if "error" in res:
                 matrix_save_ok = False
@@ -1484,6 +1505,7 @@ async def run_reflection(
                     pm.save_tuning_state(
                         confidence=confidence_to_save,
                         window_state=window_state_to_save,
+                        ctx=learn_ctx,
                     )
                 except redis.RedisError as exc:
                     state_save_ok = False
@@ -1504,7 +1526,7 @@ async def run_reflection(
             and matrix_save_ok
             and state_save_ok
         ):
-            pm.mark_tuning_applied(session_id, pass_name="correlation")
+            pm.mark_tuning_applied(session_id, pass_name="correlation", ctx=learn_ctx)
         elif not (matrix_save_ok and state_save_ok):
             log.warning(
                 "Skipping mark_tuning_applied because at least one tuning write failed; "

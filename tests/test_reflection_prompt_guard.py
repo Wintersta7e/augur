@@ -23,7 +23,7 @@ class _FakePM:
     def get_prompt_score_pair(self, domain):
         return self._cur, self._prev
 
-    def rollback_prompt(self, domain):
+    def rollback_prompt(self, domain, *, ctx=None):
         self.rolled_back = True
         return True
 

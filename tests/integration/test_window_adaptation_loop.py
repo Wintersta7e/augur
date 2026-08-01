@@ -22,6 +22,7 @@ from nexus.correlator import (
     ensure_matrix_seeded,
 )
 from disciplina.reflection_engine import run_reflection
+from tests.integration.conftest import learnable_session
 
 pytestmark = pytest.mark.asyncio
 
@@ -35,7 +36,7 @@ async def test_window_tunes_after_session_with_long_lag(
     ensure_matrix_seeded(pm)
 
     feedback = {
-        "session_id": "session-1-window",
+        "session_id": learnable_session("session-1-window"),
         "advice_events": [
             {
                 "advice_id": f"adv-{i}",

@@ -38,7 +38,7 @@ def descriptor_suffix(ctx: dict) -> str:
 
 
 def resolve_app_descriptor(
-    pm: PersistenceManager, entity: str, ctx: dict
+    pm: PersistenceManager, entity: str, ctx: dict, *, learn_ctx=None
 ) -> tuple[str | None, bool]:
     """Resolve an activity entity's descriptor.
 
@@ -52,7 +52,7 @@ def resolve_app_descriptor(
     identity = ctx.get("app_identity")
     if identity:
         try:
-            pm.save_app_descriptor(entity, identity, overwrite=True)
+            pm.save_app_descriptor(entity, identity, overwrite=True, ctx=learn_ctx)
         except redis.RedisError as exc:
             log.warning("app_descriptor: OS save failed for %s: %s", entity, exc)
         return identity, False
@@ -129,7 +129,7 @@ class ClassifierLane:
             config.ollama_classifier_model != config.ollama_model
         )
 
-    def enqueue(self, entity: str) -> None:
+    def enqueue(self, entity: str, *, learn_ctx=None) -> None:
         if (
             not self.enabled
             or self._closing
@@ -138,16 +138,20 @@ class ClassifierLane:
         ):
             return
         self._pending.add(entity)
-        task = asyncio.create_task(self._run(entity))
+        # Capture provenance at ENQUEUE time: the session may roll over before the
+        # background classification writes (spec §4.3c).
+        task = asyncio.create_task(self._run(entity, learn_ctx))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _run(self, entity: str) -> None:
+    async def _run(self, entity: str, learn_ctx=None) -> None:
         try:
             async with self._lock:  # single-flight on the classifier model
                 descriptor = await classify_app(entity, self._client, self._config)
             if descriptor:
-                self._pm.save_app_descriptor(entity, descriptor, overwrite=False)
+                self._pm.save_app_descriptor(
+                    entity, descriptor, overwrite=False, ctx=learn_ctx
+                )
         except (httpx.HTTPError, redis.RedisError, ValueError) as exc:
             log.warning("app_descriptor: classification failed for %s: %s", entity, exc)
         finally:

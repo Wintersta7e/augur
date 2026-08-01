@@ -13,6 +13,7 @@ import redis
 
 from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
+from tabula.provenance import LearnContext, learned_write
 
 # ---- MOVED VERBATIM from augur_mcp/augur_server.py ----
 _VALID_SEVERITIES = {"LOW", "MEDIUM", "HIGH"}
@@ -132,6 +133,7 @@ def validate_patch(
     return None
 
 
+@learned_write
 def apply_matrix_update(
     pm: PersistenceManager,
     *,
@@ -140,6 +142,7 @@ def apply_matrix_update(
     version: str | None = None,
     mode: str = "replace",
     _retries: int = 5,
+    ctx: LearnContext | None = None,
 ) -> dict:
     """Apply a validated patch or replace to augur:nexus:matrix under WATCH/CAS.
 

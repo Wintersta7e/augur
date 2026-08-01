@@ -149,7 +149,9 @@ async def maybe_prompt_withheld_rating(pending, config: AugurConfig, pm) -> bool
     )
     pending.withheld_rating_p = config.gate_mrt_withheld_rating_rate
     if getattr(pending, "session_id", None):
-        pm.mark_mrt_rating_session(pending.session_id)
+        pm.mark_mrt_rating_session(
+            pending.session_id, ctx=pm.resolve_learn_context(pending.session_id)
+        )
     return True
 
 
@@ -476,6 +478,37 @@ async def read_stdin_with_timeout(timeout: float) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Session resolution
+# ---------------------------------------------------------------------------
+
+
+def resolve_or_fabricate_session(
+    redis_client: redis.Redis, pm: PersistenceManager
+) -> str:
+    """Return the current session id, fabricating one on a record race.
+
+    Intentionally laxer than ``tabula.session.get_active_session``: accepts
+    ended sessions (so late-arriving feedback for a just-ended session is
+    still attributed correctly) and falls back to a fresh uuid rather than
+    dropping feedback when no session record is present. A real current
+    session is returned as-is — its provenance is never touched. A
+    fabricated id has no provenance, so it is registered as non-learnable
+    (fail-closed) rather than left unclassified.
+    """
+    raw = redis_client.get("augur:session:current")
+    if raw:
+        data = json.loads(raw)
+        session_id = data.get("session_id")
+        if session_id is not None:
+            return session_id
+    fabricated = str(uuid.uuid4())
+    pm.save_session_meta(
+        fabricated, origin="unattributed", created_by="responsum_fallback"
+    )
+    return fabricated
+
+
+# ---------------------------------------------------------------------------
 # Core loop
 # ---------------------------------------------------------------------------
 
@@ -509,18 +542,9 @@ async def run() -> None:
     tracked_decision_ids: set[str] = set()
 
     def get_session_id() -> str:
-        # Intentionally laxer than tabula.session.get_active_session:
-        # accepts ended sessions (so late-arriving feedback for a just-ended
-        # session is still attributed correctly) and falls back to a fresh
-        # uuid rather than dropping feedback on a session-record race.
         nonlocal current_session_id
         if current_session_id is None:
-            raw = redis_client.get("augur:session:current")
-            if raw:
-                data = json.loads(raw)
-                current_session_id = data.get("session_id", str(uuid.uuid4()))
-            else:
-                current_session_id = str(uuid.uuid4())
+            current_session_id = resolve_or_fabricate_session(redis_client, pm)
         return current_session_id
 
     def build_session_summary() -> dict:

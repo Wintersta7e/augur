@@ -1,6 +1,6 @@
 """The enrichment helper resolves + sets ctx['app_descriptor'] for activity events."""
 
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 from consilium.advisor import (
     enrich_activity_descriptor,
@@ -28,7 +28,7 @@ def test_enrich_enqueues_on_miss():
     anomaly = {"domain": "activity_focus", "entity": "gamma_app", "context": {}}
     enrich_activity_descriptor(pm, lane, anomaly)
     assert anomaly["context"].get("app_descriptor") is None
-    lane.enqueue.assert_called_once_with("gamma_app")
+    lane.enqueue.assert_called_once_with("gamma_app", learn_ctx=ANY)
 
 
 def test_enrich_skips_non_activity_domain():

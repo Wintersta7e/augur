@@ -135,7 +135,7 @@ def _save_turn(
     }
     if applied is not None:
         record["applied"] = applied
-    pm.save_dialogue_turn(record)
+    pm.save_dialogue_turn(record, ctx=pm.resolve_learn_context(session_id))
 
 
 def _undo_echo(prior: dict) -> str:
@@ -185,7 +185,12 @@ async def _handle_undo(
         "confirm_phrase": None,
         "prior": prior,
     }
-    pm.save_dialogue_pending(session_id, pending, ttl=cfg.dialogue_pending_ttl_s)
+    pm.save_dialogue_pending(
+        session_id,
+        pending,
+        ttl=cfg.dialogue_pending_ttl_s,
+        ctx=pm.resolve_learn_context(session_id),
+    )
     reply = (
         f"{base_reply}\n{echo} Confirm? (yes)"
         if base_reply
@@ -270,7 +275,9 @@ async def _resolve_pending(
         ok = I.matches_heavy_phrase(user_text, pending.get("confirm_phrase") or "")
     else:
         ok = I.is_affirmative(user_text)
-    pm.clear_dialogue_pending(session_id)  # cleared before apply: no double-apply
+    pm.clear_dialogue_pending(
+        session_id, ctx=pm.resolve_learn_context(session_id)
+    )  # cleared before apply: no double-apply
     if not ok:
         return None
     if pending.get("kind") == "undo":
@@ -357,7 +364,10 @@ async def _handle_intent(
                 )
         new_pending = R.route(valid, ctx, pm=pm, cfg=cfg)
         pm.save_dialogue_pending(
-            session_id, new_pending, ttl=cfg.dialogue_pending_ttl_s
+            session_id,
+            new_pending,
+            ttl=cfg.dialogue_pending_ttl_s,
+            ctx=pm.resolve_learn_context(session_id),
         )
         ask = (
             f" Confirm with '{new_pending['confirm_phrase']}'."

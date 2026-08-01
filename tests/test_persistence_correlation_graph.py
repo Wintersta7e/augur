@@ -11,6 +11,13 @@ from unittest.mock import MagicMock
 
 
 from tabula.persistence import PersistenceManager
+from tabula.provenance import (
+    LearnContext,
+    ProvenanceMode,
+    set_provenance_mode,
+)
+
+CTX = LearnContext("test-sess", True, "real")
 
 GRAPH_KEY_PREFIX = "augur:nexus:graph:"
 GRAPH_INDEX_KEY = "augur:nexus:graph:_index"
@@ -178,3 +185,38 @@ class TestRoundTrip:
         pm.save_correlation_graph("sess-round", SAMPLE_GRAPH_DATA)
 
         assert pm.load_correlation_graph("sess-round") == SAMPLE_GRAPH_DATA
+
+
+class TestProvenanceGate:
+    """CL7: a non-learnable session's correlation graph is withheld under ENFORCE.
+
+    save_correlation_graph is a @learned_write; the decorator gates it on the
+    LearnContext. Under the default OFF mode this is report-only (no withholding)
+    — the flip to ENFORCE happens only once every writer is migrated (CL10).
+    """
+
+    SYNTH = LearnContext("s", False, "synthetic")
+
+    def test_enforce_withholds_non_learnable(self) -> None:
+        prev = set_provenance_mode(ProvenanceMode.ENFORCE)
+        try:
+            pm = PersistenceManager(MagicMock())
+            pm.save_correlation_graph("sess-x", SAMPLE_GRAPH_DATA, ctx=self.SYNTH)
+            pm._r.set.assert_not_called()
+            pm._r.lpush.assert_not_called()
+        finally:
+            set_provenance_mode(prev)
+
+    def test_enforce_allows_learnable(self) -> None:
+        prev = set_provenance_mode(ProvenanceMode.ENFORCE)
+        try:
+            pm = PersistenceManager(MagicMock())
+            pm.save_correlation_graph("sess-y", SAMPLE_GRAPH_DATA, ctx=CTX)
+            pm._r.set.assert_called_once()
+        finally:
+            set_provenance_mode(prev)
+
+    def test_off_writes_even_for_non_learnable(self) -> None:
+        pm = PersistenceManager(MagicMock())
+        pm.save_correlation_graph("sess-z", SAMPLE_GRAPH_DATA, ctx=self.SYNTH)
+        pm._r.set.assert_called_once()  # default OFF: report-only, still writes

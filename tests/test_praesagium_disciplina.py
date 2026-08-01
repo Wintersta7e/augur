@@ -162,9 +162,9 @@ async def test_praesagium_only_feedback_writes_no_thresholds(monkeypatch) -> Non
     save_calls: list[tuple] = []
     orig_save = pm.save_thresholds
 
-    def _tracking_save(domain, thresholds_dict):
+    def _tracking_save(domain, thresholds_dict, *, ctx=None):
         save_calls.append((domain, thresholds_dict))
-        return orig_save(domain, thresholds_dict)
+        return orig_save(domain, thresholds_dict, ctx=ctx)
 
     monkeypatch.setattr(pm, "save_thresholds", _tracking_save)
     monkeypatch.setattr(
@@ -195,7 +195,9 @@ async def test_praesagium_only_feedback_never_mutates_prompt(monkeypatch) -> Non
 
     mutate_calls: list[tuple] = []
 
-    async def _tracking_mutate(pm, domain, utility_result, http_client, config):
+    async def _tracking_mutate(
+        pm, domain, utility_result, http_client, config, *, ctx=None
+    ):
         mutate_calls.append((pm, domain, utility_result, http_client, config))
         return None
 
@@ -295,9 +297,11 @@ async def test_majority_praesagium_session_mutates_real_domain_not_praesagium(
     mutate_calls: list[str] = []
     orig_mutate = disciplina.reflection_engine.mutate_prompt
 
-    async def _spy(pm_, domain, utility_result, http_client, config_):
+    async def _spy(pm_, domain, utility_result, http_client, config_, *, ctx=None):
         mutate_calls.append(domain)
-        return await orig_mutate(pm_, domain, utility_result, http_client, config_)
+        return await orig_mutate(
+            pm_, domain, utility_result, http_client, config_, ctx=ctx
+        )
 
     monkeypatch.setattr("disciplina.reflection_engine.mutate_prompt", _spy)
     monkeypatch.setattr(

@@ -29,7 +29,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff pip-audit mypy pytest-cov
+          # ruff is PINNED: it gates the build, and its default rule set moves
+          # between minor releases -- 0.16 flagged 392 findings across untouched
+          # files. Bump deliberately, with the findings, never as a side effect.
+          pip install "ruff==0.15.12" pip-audit mypy pytest-cov
 
       - name: Audit pinned deps for known CVEs
         run: pip-audit -r requirements.txt
@@ -94,7 +97,7 @@ jobs:
 
       - name: Start NATS with JetStream
         run: |
-          docker run -d --name nats -p 4222:4222 -p 8222:8222 \
+          docker run -d --name nats -p 4223:4222 -p 8222:8222 \
             nats:2-alpine --jetstream --http_port 8222
 
       - name: Wait for services to become healthy
@@ -118,7 +121,20 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run fast integration tests
+        env:
+          AUGUR_REDIS_URL: redis://127.0.0.1:6379/1
+          AUGUR_NATS_URL: nats://127.0.0.1:4223
         run: pytest tests/integration/ -m "not slow" -v
+
+      # The same suite with session-provenance enforcement on. Enforcement is
+      # off by default in production, so nothing else would catch a learned
+      # write that loses its provenance and starts failing closed in silence.
+      - name: Run fast integration tests with provenance enforcement
+        env:
+          AUGUR_REDIS_URL: redis://127.0.0.1:6379/1
+          AUGUR_NATS_URL: nats://127.0.0.1:4223
+          AUGUR_PROVENANCE_MODE: enforce
+        run: pytest tests/integration/ -m "not slow" -q
 
       - name: Dump service logs on failure
         if: failure()

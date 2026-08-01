@@ -462,15 +462,16 @@ async def run() -> None:
         # Update baseline
         bl.update(value, th["ewma_alpha"])
 
-        # Persist baseline
+        # Persist baseline + history under the event's provenance
+        learn_ctx = pm.resolve_learn_context(event.session_id)
         try:
-            pm.save_baseline(domain, entity, bl.to_state_dict())
+            pm.save_baseline(domain, entity, bl.to_state_dict(), ctx=learn_ctx)
         except redis.RedisError as exc:
             log.error("Failed to persist baseline (%s, %s): %s", domain, entity, exc)
 
         # Persist event to history
         try:
-            pm.append_event(event)
+            pm.append_event(event, ctx=learn_ctx)
         except redis.RedisError as exc:
             log.error("Failed to persist event: %s", exc)
 

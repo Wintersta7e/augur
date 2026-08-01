@@ -13,7 +13,9 @@ import pytest
 
 from tabula.config import AugurConfig
 from tabula.persistence import PersistenceManager
+from tabula.provenance import LearnContext
 from disciplina.reflection_engine import run_reflection
+from tests.integration.conftest import learnable_session
 
 pytestmark = pytest.mark.asyncio
 
@@ -23,17 +25,16 @@ async def test_correlated_feedback_lowers_sigma_in_both_domains(
     nats_conn,
 ) -> None:
     pm = PersistenceManager(redis_client)
-    pm.save_thresholds(
-        "chess",
-        {"sigma_threshold": 2.0, "ewma_alpha": 0.3, "hst_threshold": 0.7},
-    )
-    pm.save_thresholds(
-        "typing",
-        {"sigma_threshold": 2.0, "ewma_alpha": 0.3, "hst_threshold": 0.7},
-    )
+    for domain in ("chess", "typing"):
+        pm.save_thresholds(
+            domain,
+            {"sigma_threshold": 2.0, "ewma_alpha": 0.3, "hst_threshold": 0.7},
+            ctx=LearnContext.system(),
+        )
+    session_id = learnable_session("session-multi")
 
     feedback = {
-        "session_id": "session-multi",
+        "session_id": session_id,
         "advice_events": [
             {
                 "advice_id": f"adv-{i}",
@@ -52,12 +53,12 @@ async def test_correlated_feedback_lowers_sigma_in_both_domains(
         ],
         "session_summary": {"total_advice": 5},
     }
-    pm.save_feedback("session-multi", feedback)
+    pm.save_feedback(session_id, feedback)
 
     http_client = httpx.AsyncClient()
     try:
         report = await run_reflection(
-            "session-multi",
+            session_id,
             feedback,
             pm,
             redis_client,

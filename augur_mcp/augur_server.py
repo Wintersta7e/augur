@@ -32,6 +32,7 @@ from nexus import matrix_ops  # noqa: E402
 from tabula.config import AugurConfig  # noqa: E402
 from tabula.contracts import PerceptionEvent  # noqa: E402
 from tabula.persistence import PersistenceManager  # noqa: E402
+from tabula.provenance import LearnContext, non_learning_write  # noqa: E402
 
 log = logging.getLogger("augur.mcp")
 
@@ -96,6 +97,7 @@ def _new_redis() -> redis.Redis:
     return redis.Redis(
         host=_config.redis_host,
         port=_config.redis_port,
+        db=_config.redis_db,
         socket_connect_timeout=_config.redis_connect_timeout,
     )
 
@@ -1017,6 +1019,7 @@ def set_escalation_matrix(
             rule_windows=rule_windows,
             version=version,
             mode="replace",
+            ctx=LearnContext.system(),
         )
 
 
@@ -1120,6 +1123,7 @@ async def submit_feedback(decision_id: str, rating: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@non_learning_write(reason="operator admin flush; deliberate wipe, not learning")
 def flush_state(confirm: bool = False) -> dict[str, Any]:
     """Delete all augur:* keys from Redis.
 

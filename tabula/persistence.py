@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -12,6 +13,8 @@ import redis
 
 from memoria.fsrs import make_memory_id
 from tabula.contracts import PerceptionEvent
+from tabula.provenance import LearnContext, learned_write, non_learning_write
+from tabula.session import REDIS_KEY_META, SESSION_META_TTL_S, build_session_meta
 
 log = logging.getLogger("persistence")
 
@@ -82,6 +85,15 @@ MAX_PRAESAGIUM_EPISODES: int = 2000
 # save methods if you need a persistent key.
 SESSION_KEY_TTL_S = 30 * 24 * 3600  # 30 days
 
+PROVENANCE_TTL_S = SESSION_META_TTL_S
+
+# Provenance-cache bounds (spec §4.3.1). Under ENFORCE every event on the
+# Vigil/Limen hot paths resolves its session, which would otherwise be a Redis
+# GET per event. Only LEARNABLE contexts are cached, and never longer than this
+# — nor longer than the metadata's own remaining TTL, whichever is shorter.
+LEARN_CONTEXT_CACHE_TTL_S = 60.0
+MAX_LEARN_CONTEXT_CACHE = 256
+
 # TTL for the correlation-tuning idempotency marker. Long enough to survive
 # manual reflect-trigger replays of a recent session, short enough to prevent
 # the key from lingering indefinitely.
@@ -93,6 +105,8 @@ class PersistenceManager:
 
     def __init__(self, r: redis.Redis) -> None:
         self._r = r
+        # session_id -> (monotonic expiry, LearnContext). Positives only.
+        self._learn_ctx_cache: dict[str, tuple[float, LearnContext]] = {}
 
     # -- JSON get/set helpers ------------------------------------------------
     # Collapse the uniform "set(key, json.dumps(x))" / "raw = get(key); return
@@ -128,9 +142,147 @@ class PersistenceManager:
             return default
         return json.loads(raw)
 
+    # -- Session provenance ---------------------------------------------------
+
+    def resolve_learn_context(self, session_id: str | None) -> LearnContext:
+        """Resolve a session's provenance ONCE, fail-closed. Never raises.
+
+        The single provenance reader — ``is_learnable_session`` delegates here so
+        the learnable bool and the origin can never be read inconsistently. A
+        session id is not evidence; only a durable record this system wrote makes
+        a session learnable. Unknown / missing / corrupt / expired provenance, or
+        any Redis error, yields a non-learnable ``"unknown"`` context.
+
+        Learnable results are cached (§4.3.1, see :meth:`_cache_learn_context`);
+        a non-learnable one never is, so this stays a Redis read per event for
+        exactly the sessions that are not training anything.
+        """
+        if not session_id:
+            return LearnContext.unknown(session_id)
+        cached = self._learn_ctx_cache.get(session_id)
+        if cached is not None:
+            expires_at, ctx = cached
+            if time.monotonic() < expires_at:
+                return ctx
+            del self._learn_ctx_cache[session_id]
+        key = REDIS_KEY_META.format(sid=session_id)
+        try:
+            raw = self._r.get(key)
+            if raw is None:
+                return LearnContext.unknown(session_id)
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                return LearnContext.unknown(session_id)
+            origin = data.get("origin")
+            if not isinstance(origin, str) or not origin:
+                origin = "unknown"
+            ctx = LearnContext(session_id, data.get("learnable") is True, origin)
+        except Exception:
+            return LearnContext.unknown(session_id)
+        if ctx.learnable:
+            self._cache_learn_context(session_id, key, ctx)
+        return ctx
+
+    def _cache_learn_context(
+        self, session_id: str, meta_key: str, ctx: LearnContext
+    ) -> None:
+        """Cache a LEARNABLE context, never past the metadata's own expiry (§4.3.1).
+
+        Both halves matter. Caching a negative would let a lookup that raced
+        metadata creation drop a real session's learning for the life of the
+        process. Letting a positive outlive its key would train on a session
+        whose provenance has expired — and expired means non-learnable — so the
+        entry's lifetime is capped by the key's remaining ``PTTL``.
+
+        Best-effort throughout: a Redis error here costs a cache entry, never a
+        wrong answer, since every miss re-reads the truth.
+        """
+        try:
+            pttl_ms = int(self._r.pttl(meta_key))
+        except Exception:
+            return  # unreadable TTL (or a stubbed client): resolve every time
+        if pttl_ms == -2:  # key vanished between the GET and here
+            return
+        ttl = LEARN_CONTEXT_CACHE_TTL_S
+        if pttl_ms >= 0:
+            ttl = min(ttl, pttl_ms / 1000.0)
+        if ttl <= 0:
+            return
+        if len(self._learn_ctx_cache) >= MAX_LEARN_CONTEXT_CACHE:
+            now = time.monotonic()
+            self._learn_ctx_cache = {
+                sid: entry
+                for sid, entry in self._learn_ctx_cache.items()
+                if entry[0] > now
+            }
+            if len(self._learn_ctx_cache) >= MAX_LEARN_CONTEXT_CACHE:
+                return  # still full of live entries: skip rather than thrash
+        self._learn_ctx_cache[session_id] = (time.monotonic() + ttl, ctx)
+
+    def filter_learnable_records(self, records: list[dict]) -> list[dict]:
+        """Drop records whose session may not train (CL11) — ENFORCE only.
+
+        For logs that are written unconditionally but read by BOTH a runtime
+        consumer and a learning one: the writer stays ``@non_learning_write`` (so
+        the online path always sees what really happened) and only the learning
+        reader opts in here. Provenance is resolved once per distinct session,
+        not once per record — a gate-log window is thousands of rows over a
+        handful of sessions. A record with no ``session_id`` is fail-closed:
+        no evidence it may train, so it is excluded.
+        """
+        from tabula.provenance import ProvenanceMode, get_provenance_mode
+
+        if get_provenance_mode() is not ProvenanceMode.ENFORCE:
+            return records
+        learnable: dict[Any, bool] = {}
+        out: list[dict] = []
+        for rec in records:
+            sid = rec.get("session_id")
+            if sid not in learnable:
+                learnable[sid] = self.resolve_learn_context(sid).learnable
+            if learnable[sid]:
+                out.append(rec)
+        return out
+
+    def is_learnable_session(self, session_id: str | None) -> bool:
+        """Return True only for a session recorded as learnable. Fails CLOSED.
+
+        Thin wrapper over :meth:`resolve_learn_context` (the single provenance
+        reader); never raises.
+        """
+        return self.resolve_learn_context(session_id).learnable
+
+    @non_learning_write(reason="provenance record, not learned state")
+    def save_session_meta(
+        self,
+        session_id: str,
+        *,
+        origin: str,
+        created_by: str,
+        started_at: str | None = None,
+    ) -> None:
+        """Write a session's provenance record (meta key only, no current).
+
+        For minters that do not use SessionManager (dialogue, Responsum's
+        orphan-feedback fallback). TTL matches the session-record lifetime so a
+        late reflection can still resolve provenance.
+        """
+        stamp = started_at or datetime.now(timezone.utc).isoformat()
+        meta = build_session_meta(
+            session_id, origin=origin, created_by=created_by, started_at=stamp
+        )
+        self._set_json(REDIS_KEY_META.format(sid=session_id), meta, ex=PROVENANCE_TTL_S)
+
     # -- Baseline persistence ------------------------------------------------
 
-    def save_baseline(self, domain: str, entity: str, state_dict: dict) -> None:
+    @learned_write
+    def save_baseline(
+        self,
+        domain: str,
+        entity: str,
+        state_dict: dict,
+        ctx: LearnContext | None = None,
+    ) -> None:
         key = f"augur:vigil:profile:{domain}:{entity}"
         self._set_json(key, state_dict)
         log.debug("Saved baseline %s", key)
@@ -173,7 +325,10 @@ class PersistenceManager:
 
     # -- Event history -------------------------------------------------------
 
-    def append_event(self, event: PerceptionEvent) -> None:
+    @learned_write
+    def append_event(
+        self, event: PerceptionEvent, ctx: LearnContext | None = None
+    ) -> None:
         key = f"augur:vigil:history:{event.domain}"
         self._r.lpush(key, event.to_json())
         self._r.ltrim(key, 0, HISTORY_MAX - 1)
@@ -227,6 +382,9 @@ class PersistenceManager:
 
     # -- Feedback storage ----------------------------------------------------
 
+    @non_learning_write(
+        reason="stored always; excluded from learning at read via get_all_feedback (CL11)"
+    )
     def save_feedback(self, session_id: str, feedback_dict: dict) -> None:
         key = f"augur:responsum:{session_id}"
         feedback_dict.setdefault(
@@ -244,12 +402,20 @@ class PersistenceManager:
         return self._get_json(key)
 
     def get_all_feedback(self, limit: int = 50) -> list[dict]:
+        # CL11: under ENFORCE, a non-learnable session's feedback is excluded from
+        # this cross-session learning pool at READ time (spec §4.3d). OFF/REPORT
+        # leave the pool untouched, so pre-enforcement behaviour is unchanged.
+        from tabula.provenance import ProvenanceMode, get_provenance_mode
+
+        enforcing = get_provenance_mode() is ProvenanceMode.ENFORCE
         session_ids = cast(
             list[Any], self._r.lrange("augur:responsum:_index", 0, limit - 1)
         )
         results: list[dict] = []
         for sid in session_ids:
             sid_str = sid.decode() if isinstance(sid, bytes) else sid
+            if enforcing and not self.is_learnable_session(sid_str):
+                continue
             fb = self.get_feedback(sid_str)
             if fb is not None:
                 fb["session_id"] = sid_str
@@ -258,11 +424,13 @@ class PersistenceManager:
 
     # -- Prompt versioning ---------------------------------------------------
 
+    @learned_write
     def save_prompt(
         self,
         domain: str,
         prompt_text: str,
         score: float | None = None,
+        ctx: LearnContext | None = None,
     ) -> None:
         current_key = f"augur:consilium:prompts:{domain}:current"
         history_key = f"augur:consilium:prompts:{domain}:history"
@@ -293,7 +461,8 @@ class PersistenceManager:
         raw_list = cast(list[Any], self._r.lrange(history_key, 0, limit - 1))
         return [json.loads(entry) for entry in raw_list]
 
-    def rollback_prompt(self, domain: str) -> bool:
+    @learned_write
+    def rollback_prompt(self, domain: str, ctx: LearnContext | None = None) -> bool:
         """Restore previous prompt version. Returns True if rollback succeeded."""
         current_key = f"augur:consilium:prompts:{domain}:current"
         history_key = f"augur:consilium:prompts:{domain}:history"
@@ -313,7 +482,10 @@ class PersistenceManager:
         log.info("Rolled back prompt for domain %s", domain)
         return True
 
-    def update_current_prompt_score(self, domain: str, realized_score: float) -> None:
+    @learned_write
+    def update_current_prompt_score(
+        self, domain: str, realized_score: float, ctx: LearnContext | None = None
+    ) -> None:
         """Overwrite the CURRENT prompt entry's score in place (no archive).
 
         Lets the reflection cycle stamp the live prompt's REALIZED score (spec
@@ -341,7 +513,10 @@ class PersistenceManager:
 
     # -- MRT withheld-rating calibration tracking (spec 1B) ------------------
 
-    def mark_mrt_rating_session(self, session_id: str) -> None:
+    @learned_write
+    def mark_mrt_rating_session(
+        self, session_id: str, ctx: LearnContext | None = None
+    ) -> None:
         """Record that a session issued >=1 withheld-rating prompt (set: dedups)."""
         self._r.sadd("augur:limen:mrt_rating_sessions", session_id)
 
@@ -351,7 +526,10 @@ class PersistenceManager:
 
     # -- Threshold config ----------------------------------------------------
 
-    def save_thresholds(self, domain: str, thresholds_dict: dict) -> None:
+    @learned_write
+    def save_thresholds(
+        self, domain: str, thresholds_dict: dict, ctx: LearnContext | None = None
+    ) -> None:
         key = f"augur:vigil:thresholds:{domain}"
         self._set_json(key, thresholds_dict)
         log.debug("Saved thresholds for domain %s", domain)
@@ -362,7 +540,10 @@ class PersistenceManager:
 
     # -- Escalation matrix (cross-domain correlator) -------------------------
 
-    def save_escalation_matrix(self, matrix: dict) -> None:
+    @learned_write
+    def save_escalation_matrix(
+        self, matrix: dict, ctx: LearnContext | None = None
+    ) -> None:
         """Store the full matrix dict (including 'version' and 'rules' keys) as-is."""
         key = "augur:nexus:matrix"
         self._set_json(key, matrix)
@@ -373,6 +554,7 @@ class PersistenceManager:
         key = "augur:nexus:matrix"
         return self._get_json(key)
 
+    @non_learning_write(reason="operational liveness, not learned from perception")
     def save_health_snapshot(self, snapshot: dict) -> None:
         """Store the Praefectus health snapshot (overwritten each tick; no TTL — live state)."""
         key = "augur:praefectus:health"
@@ -385,8 +567,14 @@ class PersistenceManager:
 
     # ── App descriptors (autonomous app->identity map) ────────────────────
 
+    @learned_write
     def save_app_descriptor(
-        self, entity: str, descriptor: str, *, overwrite: bool
+        self,
+        entity: str,
+        descriptor: str,
+        *,
+        overwrite: bool,
+        ctx: LearnContext | None = None,
     ) -> None:
         """Store an app's descriptor in the augur:consilium:app_descriptors hash.
 
@@ -430,7 +618,10 @@ class PersistenceManager:
 
     # -- Correlation graph (cross-domain correlator) -------------------------
 
-    def save_correlation_graph(self, session_id: str, graph_data: dict) -> None:
+    @learned_write
+    def save_correlation_graph(
+        self, session_id: str, graph_data: dict, *, ctx: LearnContext | None = None
+    ) -> None:
         """Persist a session's correlation DiGraph as node_link_data JSON.
 
         Also maintains an ordered index list so list_correlation_graphs
@@ -465,7 +656,10 @@ class PersistenceManager:
 
     # -- Rule confidence state (reflection matrix tuning) --------------------
 
-    def save_rule_confidence(self, confidence_state: dict) -> None:
+    @learned_write
+    def save_rule_confidence(
+        self, confidence_state: dict, ctx: LearnContext | None = None
+    ) -> None:
         """Store per-rule EWMA confidence + restore_target snapshots.
 
         Schema: {rule_key: {"confidence": float, "restore_target": str | None}}
@@ -482,7 +676,10 @@ class PersistenceManager:
         key = "augur:nexus:escalation_confidence"
         return self._get_json(key)
 
-    def save_rule_window_state(self, state: dict) -> None:
+    @learned_write
+    def save_rule_window_state(
+        self, state: dict, ctx: LearnContext | None = None
+    ) -> None:
         """Persist per-rule observed-lag EWMA state.
 
         Schema: {rule_key: {"ewma_lag": float}}.
@@ -504,10 +701,12 @@ class PersistenceManager:
             log.warning("rule_window_state Redis value was corrupt; returning empty")
             return {}
 
+    @learned_write
     def save_tuning_state(
         self,
         confidence: dict | None = None,
         window_state: dict | None = None,
+        ctx: LearnContext | None = None,
     ) -> None:
         """Atomically persist rule_confidence + rule_window_state in one
         Redis MULTI/EXEC pipeline.
@@ -530,6 +729,7 @@ class PersistenceManager:
 
     # -- Reflection reports --------------------------------------------------
 
+    @non_learning_write(reason="written with a dry_run flag; readers filter (CL11)")
     def save_reflection(self, session_id: str, report_dict: dict) -> None:
         """Persist a per-session reflection report with a 30-day TTL.
 
@@ -549,6 +749,7 @@ class PersistenceManager:
 
     # -- Last anomaly / last advice (live state, not per-session) -----------
 
+    @non_learning_write(reason="ephemeral last-state snapshot for display")
     def save_last_anomaly(self, anomaly_dict: dict) -> None:
         """Persist the most recent anomaly event (no TTL — live state)."""
         self._set_json("augur:vigil:last_anomaly", anomaly_dict)
@@ -557,6 +758,7 @@ class PersistenceManager:
         """Return the most recent anomaly event or None if not set."""
         return self._get_json("augur:vigil:last_anomaly")
 
+    @non_learning_write(reason="ephemeral last-state snapshot for display")
     def save_last_advice(self, advice_dict: dict) -> None:
         """Persist the most recent LLM advice payload (no TTL — live state)."""
         self._set_json("augur:consilium:last_advice", advice_dict)
@@ -565,6 +767,7 @@ class PersistenceManager:
         """Return the most recent LLM advice payload or None if not set."""
         return self._get_json("augur:consilium:last_advice")
 
+    @non_learning_write(reason="derived read-model; Imperator filters at read (CL11)")
     def save_auspices(self, snapshot: dict) -> None:
         """Overwrite the live auspices snapshot (no TTL)."""
         self._set_json("augur:imperator:auspices", snapshot)
@@ -573,6 +776,7 @@ class PersistenceManager:
         """Return the auspices snapshot, or None if absent."""
         return self._get_json("augur:imperator:auspices")
 
+    @non_learning_write(reason="derived read-model; Imperator filters at read (CL11)")
     def save_self_model(self, snapshot: dict) -> None:
         """Overwrite the live self-model snapshot (no TTL)."""
         self._set_json("augur:imperator:self_model", snapshot)
@@ -581,7 +785,8 @@ class PersistenceManager:
         """Return the self-model snapshot, or None if absent."""
         return self._get_json("augur:imperator:self_model")
 
-    def save_proposal(self, record: dict) -> None:
+    @learned_write
+    def save_proposal(self, record: dict, ctx: LearnContext | None = None) -> None:
         """Append a terminal-status proposal record (newest-first, capped)."""
         key = "augur:imperator:proposals"
         self._r.lpush(key, json.dumps(record))
@@ -598,7 +803,10 @@ class PersistenceManager:
             )
             return []
 
-    def mark_proposal_applied(self, dedupe_key: str, *, ttl_s: int) -> None:
+    @learned_write
+    def mark_proposal_applied(
+        self, dedupe_key: str, *, ttl_s: int, ctx: LearnContext | None = None
+    ) -> None:
         """Durable applied-dedup marker (TTL'd), independent of the capped log."""
         self._r.set(f"augur:imperator:applied:{dedupe_key}", "1", ex=int(ttl_s))
 
@@ -606,7 +814,8 @@ class PersistenceManager:
         """True if a recent (un-expired) apply of this dedupe_key exists."""
         return bool(cast(int, self._r.exists(f"augur:imperator:applied:{dedupe_key}")))
 
-    def save_dialogue_turn(self, turn: dict) -> None:
+    @learned_write
+    def save_dialogue_turn(self, turn: dict, ctx: LearnContext | None = None) -> None:
         """Append a conversation turn (newest-first, capped)."""
         key = "augur:imperator:dialogue:log"
         self._r.lpush(key, json.dumps(turn))
@@ -638,7 +847,14 @@ class PersistenceManager:
             turns = [t for t in turns if t.get("session_id") == session_id][:limit]
         return turns
 
-    def save_dialogue_pending(self, session_id: str, pending: dict, ttl: float) -> None:
+    @learned_write
+    def save_dialogue_pending(
+        self,
+        session_id: str,
+        pending: dict,
+        ttl: float,
+        ctx: LearnContext | None = None,
+    ) -> None:
         """Store the single pending-confirmation intent for a session, with TTL.
 
         ``ex=max(1, int(ttl))``: a sub-second ``ttl`` (e.g. 0.5) truncates to
@@ -654,9 +870,13 @@ class PersistenceManager:
     def load_dialogue_pending(self, session_id: str) -> dict | None:
         return self._get_json(f"augur:imperator:dialogue:pending:{session_id}")
 
-    def clear_dialogue_pending(self, session_id: str) -> None:
+    @learned_write
+    def clear_dialogue_pending(
+        self, session_id: str, ctx: LearnContext | None = None
+    ) -> None:
         self._r.delete(f"augur:imperator:dialogue:pending:{session_id}")
 
+    @non_learning_write(reason="dialogue audit log")
     def append_dialogue_audit(self, record: dict) -> None:
         """Append a confirmed-apply/undo audit record (newest-first, capped)."""
         key = "augur:imperator:dialogue:audit"
@@ -683,6 +903,7 @@ class PersistenceManager:
 
     # ── Conscientia — verdicts + violations (spec 2026-07-07) ──────────────
 
+    @non_learning_write(reason="alignment audit record")
     def save_conscientia_verdict(self, record: dict) -> None:
         """Append a gated-review verdict (newest-first, capped)."""
         self._r.lpush("augur:conscientia:verdicts", json.dumps(record))
@@ -704,6 +925,7 @@ class PersistenceManager:
             )
             return []
 
+    @non_learning_write(reason="alignment audit record")
     def save_conscientia_violation(self, record: dict) -> None:
         """Append a screen-violation record (newest-first, capped)."""
         self._r.lpush("augur:conscientia:violations", json.dumps(record))
@@ -725,7 +947,10 @@ class PersistenceManager:
             )
             return []
 
-    def add_dialogue_directive(self, directive: dict) -> bool:
+    @learned_write
+    def add_dialogue_directive(
+        self, directive: dict, ctx: LearnContext | None = None
+    ) -> bool:
         """Store a context directive in the augur:imperator:dialogue:directives hash.
 
         *directive* must include a non-empty "directive_id" key (ValueError
@@ -747,7 +972,10 @@ class PersistenceManager:
             cap=MAX_DIALOGUE_DIRECTIVES,
         )
 
-    def remove_dialogue_directive(self, directive_id: str) -> None:
+    @learned_write
+    def remove_dialogue_directive(
+        self, directive_id: str, ctx: LearnContext | None = None
+    ) -> None:
         """Remove a context directive by directive_id."""
         self._r.hdel("augur:imperator:dialogue:directives", directive_id)
 
@@ -799,8 +1027,13 @@ class PersistenceManager:
 
     # -- Correlation tuning idempotency marker ------------------------------
 
+    @learned_write
     def mark_tuning_applied(
-        self, session_id: str, *, pass_name: str = "correlation"
+        self,
+        session_id: str,
+        *,
+        pass_name: str = "correlation",
+        ctx: LearnContext | None = None,
     ) -> None:
         """Mark a session as having had a named tuning pass applied.
 
@@ -827,52 +1060,73 @@ class PersistenceManager:
     # rather than raising (mirror load_rule_window_state corrupt-read guard,
     # persistence.py:297).
 
+    @non_learning_write(
+        reason="gate log; excluded from tuning at read in analyze_gate (CL11)"
+    )
     def save_silence_record(self, record: dict) -> None:
         """Append a gate suppression record to augur:limen:silences (capped).
 
-        Schema: {ts, decision_id, state_key, domain, entity, severity, arm,
-                 reason, metrics, mrt_eligible, p_withhold}
+        Schema: {ts, decision_id, session_id, state_key, domain, entity,
+                 severity, arm, reason, metrics, mrt_eligible, p_withhold}
         """
         key = "augur:limen:silences"
         self._r.lpush(key, json.dumps(record))
         self._r.ltrim(key, 0, MAX_GATE_SILENCES - 1)
 
-    def load_silence_records(self, *, limit: int = 100) -> list[dict]:
+    def load_silence_records(
+        self, *, limit: int = 100, learnable_only: bool = False
+    ) -> list[dict]:
         """Return up to *limit* recent silence records, newest first.
 
         Returns [] if the list is absent or any entry is corrupt.
+        ``learnable_only`` is the CL11 opt-in for the offline learning readers
+        (see :meth:`filter_learnable_records`); the online arms leave it False,
+        because a suppression that really happened must still count.
         """
         key = "augur:limen:silences"
         raw_list = cast(list[Any], self._r.lrange(key, 0, limit - 1))
         try:
-            return [json.loads(entry) for entry in raw_list]
+            records = [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
             log.warning("augur:limen:silences contained a corrupt entry; returning []")
             return []
+        return self.filter_learnable_records(records) if learnable_only else records
 
+    @non_learning_write(
+        reason="gate log; excluded from tuning at read in analyze_gate (CL11)"
+    )
     def save_emission(self, record: dict) -> None:
         """Append a gate emission record to augur:limen:emissions (capped).
 
-        Schema: {ts, decision_id, state_key, severity, tier, probe,
+        Schema: {ts, decision_id, session_id, state_key, severity, tier, probe,
                  audit_only, withheld_reason, mrt_eligible, p_fire}
         """
         key = "augur:limen:emissions"
         self._r.lpush(key, json.dumps(record))
         self._r.ltrim(key, 0, MAX_GATE_EMISSIONS - 1)
 
-    def load_emissions(self, *, limit: int = 100) -> list[dict]:
+    def load_emissions(
+        self, *, limit: int = 100, learnable_only: bool = False
+    ) -> list[dict]:
         """Return up to *limit* recent emission records, newest first.
 
         Returns [] if the list is absent or any entry is corrupt.
+        ``learnable_only`` is the CL11 opt-in for the offline learning readers
+        (see :meth:`filter_learnable_records`); the online arms leave it False,
+        because a delivery that really happened must still refract.
         """
         key = "augur:limen:emissions"
         raw_list = cast(list[Any], self._r.lrange(key, 0, limit - 1))
         try:
-            return [json.loads(entry) for entry in raw_list]
+            records = [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
             log.warning("augur:limen:emissions contained a corrupt entry; returning []")
             return []
+        return self.filter_learnable_records(records) if learnable_only else records
 
+    @non_learning_write(
+        reason="gate log; excluded from tuning at read in analyze_gate (CL11)"
+    )
     def save_observed(self, record: dict) -> None:
         """Append a gate observed-value record to augur:limen:observed (capped).
 
@@ -898,6 +1152,7 @@ class PersistenceManager:
             return []
         return [r for r in all_records if r.get("state_key") == state_key]
 
+    @non_learning_write(reason="drives Praefectus health, not learned")
     def save_delivery_failure(
         self,
         signature: object,
@@ -990,7 +1245,10 @@ class PersistenceManager:
 
     # -- habituation (online: h, last_event_ts, count) -----------------------
 
-    def save_habituation(self, state_key: str, entry: dict) -> bool:
+    @learned_write
+    def save_habituation(
+        self, state_key: str, entry: dict, ctx: LearnContext | None = None
+    ) -> bool:
         """Store per-channel habituation state. Returns False if refused at cap."""
         return self._hash_save("augur:limen:habituation", state_key, entry)
 
@@ -1000,7 +1258,10 @@ class PersistenceManager:
 
     # -- habituation_floor (offline: floor, last_ts) — separate Redis key ----
 
-    def save_habituation_floor(self, state_key: str, entry: dict) -> bool:
+    @learned_write
+    def save_habituation_floor(
+        self, state_key: str, entry: dict, ctx: LearnContext | None = None
+    ) -> bool:
         """Store per-channel habituation floor. Returns False if refused at cap."""
         return self._hash_save("augur:limen:habituation_floor", state_key, entry)
 
@@ -1010,7 +1271,10 @@ class PersistenceManager:
 
     # -- credibility (offline + conservative online: cred, n, last_fb_ts) ----
 
-    def save_credibility(self, signal_class: str, entry: dict) -> bool:
+    @learned_write
+    def save_credibility(
+        self, signal_class: str, entry: dict, ctx: LearnContext | None = None
+    ) -> bool:
         """Store per-class credibility state. Returns False if refused at cap."""
         return self._hash_save("augur:limen:credibility", signal_class, entry)
 
@@ -1020,7 +1284,10 @@ class PersistenceManager:
 
     # -- reservoir (online: count, last_ts) -----------------------------------
 
-    def save_reservoir(self, state_key: str, entry: dict) -> bool:
+    @learned_write
+    def save_reservoir(
+        self, state_key: str, entry: dict, ctx: LearnContext | None = None
+    ) -> bool:
         """Store per-channel reservoir state. Returns False if refused at cap."""
         return self._hash_save("augur:limen:reservoir", state_key, entry)
 
@@ -1030,7 +1297,10 @@ class PersistenceManager:
 
     # -- cost_tier_memory (online + offline: earned_tier2, helped, count, last_ts)
 
-    def save_cost_tier_memory(self, state_key: str, entry: dict) -> bool:
+    @learned_write
+    def save_cost_tier_memory(
+        self, state_key: str, entry: dict, ctx: LearnContext | None = None
+    ) -> bool:
         """Store per-channel cost-tier memory. Returns False if refused at cap."""
         return self._hash_save("augur:limen:cost_tier_memory", state_key, entry)
 
@@ -1040,7 +1310,10 @@ class PersistenceManager:
 
     # -- channel_stats (online: seen, consecutive_suppressions, ...) ----------
 
-    def save_channel_stats(self, state_key: str, entry: dict) -> bool:
+    @learned_write
+    def save_channel_stats(
+        self, state_key: str, entry: dict, ctx: LearnContext | None = None
+    ) -> bool:
         """Store per-channel tracking stats. Returns False if refused at cap."""
         return self._hash_save("augur:limen:channel_stats", state_key, entry)
 
@@ -1062,7 +1335,8 @@ class PersistenceManager:
 
     # -- advice_rate (string key: rate_ewma, last_ts) -------------------------
 
-    def save_advice_rate(self, entry: dict) -> None:
+    @learned_write
+    def save_advice_rate(self, entry: dict, ctx: LearnContext | None = None) -> None:
         """Persist the global advice-rate EWMA state."""
         self._set_json("augur:limen:advice_rate", entry)
 
@@ -1082,11 +1356,17 @@ class PersistenceManager:
 
     # -- self_tolerance set (offline: SADD/SREM/SISMEMBER/SMEMBERS) -----------
 
-    def add_self_tolerance(self, state_key: str) -> None:
+    @learned_write
+    def add_self_tolerance(
+        self, state_key: str, ctx: LearnContext | None = None
+    ) -> None:
         """Add state_key to the self-tolerance set."""
         self._r.sadd("augur:limen:self_tolerance", state_key)
 
-    def remove_self_tolerance(self, state_key: str) -> None:
+    @learned_write
+    def remove_self_tolerance(
+        self, state_key: str, ctx: LearnContext | None = None
+    ) -> None:
         """Remove state_key from the self-tolerance set."""
         self._r.srem("augur:limen:self_tolerance", state_key)
 
@@ -1121,6 +1401,7 @@ class PersistenceManager:
 
     # ── Task 1.3: atomic gate tuning save (spec §6) ──────────────────────────
 
+    @learned_write
     def save_gate_tuning_state(
         self,
         *,
@@ -1130,6 +1411,7 @@ class PersistenceManager:
         tolerance_add: list[str] | None = None,
         tolerance_remove: list[str] | None = None,
         advice_rate: dict | None = None,
+        ctx: LearnContext | None = None,
     ) -> None:
         """Atomically persist all gate offline keys in one pipeline (transaction).
 
@@ -1166,7 +1448,10 @@ class PersistenceManager:
     # processed_sessions}. The processed_sessions SET is both the idempotency
     # gate and the active-session decay clock (SCARD).
 
-    def save_memory_state(self, memory_id: str, state: dict) -> None:
+    @learned_write
+    def save_memory_state(
+        self, memory_id: str, state: dict, ctx: LearnContext | None = None
+    ) -> None:
         """Insert/update a memory's DSR state + tier index. Keeps the tier
         index single-membership (drops the other tier first) so a same-key
         re-save with a changed tier cannot leave a stale index entry."""
@@ -1233,10 +1518,15 @@ class PersistenceManager:
         if st is None:
             return
         self.save_memory_state(
-            memory_id, review(st, active_session, session_id, AugurConfig.from_env())
+            memory_id,
+            review(st, active_session, session_id, AugurConfig.from_env()),
+            ctx=self.resolve_learn_context(session_id),
         )
 
-    def apply_memory_sweep(self, session_id: str, plan) -> bool:
+    @learned_write
+    def apply_memory_sweep(
+        self, session_id: str, plan, ctx: LearnContext | None = None
+    ) -> bool:
         """Atomically apply a SweepPlan AND record the session, or no-op.
 
         Mirrors the save_tuning_state MULTI/EXEC discipline, with a WATCH on
@@ -1365,7 +1655,9 @@ class PersistenceManager:
                 # non-empty replaces; None/empty preserves prior teaching text
                 **({"rationale": rationale} if rationale else {}),
             }
-            self.save_memory_state(mid, reviewed)
+            self.save_memory_state(
+                mid, reviewed, ctx=self.resolve_learn_context(session_id)
+            )
             return mid
         state: dict[str, Any] = {
             "memory_id": mid,
@@ -1381,7 +1673,7 @@ class PersistenceManager:
             "taught_by": source,
             "rationale": rationale,
         }
-        self.save_memory_state(mid, state)
+        self.save_memory_state(mid, state, ctx=self.resolve_learn_context(session_id))
         return mid
 
     def load_taught_facts(self) -> list[dict]:
@@ -1432,8 +1724,14 @@ class PersistenceManager:
     # already-resolved id a true no-op, the exactly-once contract behind
     # invariant PR6.
 
+    @learned_write
     def append_praesagium_episode(
-        self, session_id: str, entry: dict, *, cap: int = MAX_PRAESAGIUM_EPISODES
+        self,
+        session_id: str,
+        entry: dict,
+        *,
+        cap: int = MAX_PRAESAGIUM_EPISODES,
+        ctx: LearnContext | None = None,
     ) -> None:
         """Append one episode to a session's list (RPUSH; newest at the tail).
 
@@ -1488,6 +1786,9 @@ class PersistenceManager:
         )
         return [sid.decode() if isinstance(sid, bytes) else sid for sid in raw_ids]
 
+    @non_learning_write(
+        reason="derived from the CL5-filtered episode corpus, not a single session"
+    )
     def save_praesagium_patterns(self, blob: dict) -> None:
         """Overwrite the live mined-patterns blob (no TTL; regenerated each
         mine cycle, same live-state discipline as save_auspices/save_self_model)."""
@@ -1497,8 +1798,13 @@ class PersistenceManager:
         """Return the mined-patterns blob, or None if absent."""
         return self._get_json("augur:praesagium:patterns")
 
+    @learned_write
     def save_praesagium_open_prediction(
-        self, rec: dict, *, cap: int = MAX_PRAESAGIUM_OPEN
+        self,
+        rec: dict,
+        *,
+        cap: int = MAX_PRAESAGIUM_OPEN,
+        ctx: LearnContext | None = None,
     ) -> bool:
         """Store an open prediction in the augur:praesagium:predictions:open hash.
 
@@ -1526,8 +1832,9 @@ class PersistenceManager:
                 continue
         return out
 
+    @learned_write
     def update_praesagium_open_prediction(
-        self, prediction_id: str, fields: dict
+        self, prediction_id: str, fields: dict, ctx: LearnContext | None = None
     ) -> None:
         """Merge *fields* into an existing open prediction; no-op if
         *prediction_id* is not present (already resolved or never existed).
@@ -1568,12 +1875,14 @@ class PersistenceManager:
                 except redis.WatchError:
                     continue
 
+    @learned_write
     def resolve_praesagium_prediction(
         self,
         prediction_id: str,
         resolved_rec: dict,
         *,
         cap: int = MAX_PRAESAGIUM_RESOLVED,
+        ctx: LearnContext | None = None,
     ) -> bool:
         """Move a prediction from open -> resolved. Returns True iff THIS
         call removed the open record and appended to the resolved log --

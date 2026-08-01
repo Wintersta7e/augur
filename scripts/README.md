@@ -12,9 +12,20 @@ Helper scripts for Augur development & live testing.
 | `gate_probe_test.py` | **Limen gate-arm probes**: reservoir Schmitt, absolute refractory, habituation under repetition + anti-starvation release (invariant D), high+correlated exemption (invariant B), silence-record persistence + MRT fields (invariant A). Best on a freshly flushed stack. | `.venv/bin/python scripts/gate_probe_test.py [--llm-wait 150]` |
 | `mcp_sweep.py` | **MCP surface sweep**: drives all 31 augur_mcp tools over real stdio — happy paths against live pipeline state + validation edges; escalation matrix roundtrip is self-restoring. `--flush` really wipes augur:* as the final step; `--skip-dialogue` avoids Ollama. | `.venv/bin/python scripts/mcp_sweep.py [--flush] [--skip-dialogue]` |
 | `armed_apply_test.py` | **Imperator II armed-apply rehearsal**: scratch-target apply machinery under `imperator_ii_apply_enabled` (anchors, dedupe, prompt-safety, klass gating) + an optional containerized armed cycle via `docker-compose.arm.yml`, fully restored + disarmed afterwards. | `.venv/bin/python scripts/armed_apply_test.py [--skip-container]` |
+| `reset_learned_state.py` | **Reset contaminated learned/tuned state to a clean slate**: classifies every `augur:*` key and deletes learned-policy + session-scoped + synthetic keys so faculties revert to config defaults, while keeping real perception baselines and user-taught (semantic) memories. `--dry-run` is the DEFAULT (prints the plan, changes nothing); `--confirm` executes; refuses a non-db-0 database without `--force`; unrecognized keys are kept and flagged. | `.venv/bin/python scripts/reset_learned_state.py [--confirm] [--force]` |
 
 All four connect to the **deploy stack** (or dev pipeline): NATS on `127.0.0.1:4222`, Redis on
 `127.0.0.1:6379`, with Ollama (`qwen2.5:32b`) reachable by the faculty containers via
 `host.docker.internal` (from WSL, export `AUGUR_OLLAMA_URL=http://<default-gateway-ip>:11434`).
 Use run-unique entity/session IDs so each run gets a fresh baseline or dialogue context.
 For a clean, fully-attributable run, flush Redis and restart the faculty containers first.
+
+Every perception-injecting driver (`inject_and_observe`, `complete_loop_test`,
+`stress_soak`, `chaos_test`, `taught_e2e_test`, `gate_probe_test`) records its
+session as `origin="synthetic"` provenance (`augur:session:meta:<sid>`,
+`learnable=False`) before it injects. Even run against the live deploy stack
+their events are **explicitly** non-learnable, so they cannot train the real
+system once provenance enforcement lands. The `taught_e2e_test` dialogue turns
+ride separate `dlg-*` sessions and are not affected. A static guard
+(`tests/test_synthetic_driver_provenance.py`) fails if a perception driver ever
+omits this mint.

@@ -39,7 +39,7 @@ def test_resolve_os_identity_saves_and_returns():
     assert desc == "Alpha Browser"
     assert needs is False
     pm.save_app_descriptor.assert_called_once_with(
-        "alpha_app", "Alpha Browser", overwrite=True
+        "alpha_app", "Alpha Browser", overwrite=True, ctx=None
     )
 
 
@@ -116,7 +116,7 @@ async def test_lane_enqueue_classifies_and_saves_hsetnx():
     lane.enqueue("epsilon_app")
     await lane.shutdown()
     pm.save_app_descriptor.assert_called_once_with(
-        "epsilon_app", "games launcher", overwrite=False
+        "epsilon_app", "games launcher", overwrite=False, ctx=None
     )
 
 
@@ -272,5 +272,5 @@ def test_resolve_unsafe_entity_still_caches_os_identity():
     )
     assert desc == "Weird Tool" and needs is False
     pm.save_app_descriptor.assert_called_once_with(
-        "weird!!name", "Weird Tool", overwrite=True
+        "weird!!name", "Weird Tool", overwrite=True, ctx=None
     )

@@ -29,6 +29,7 @@ from tabula.config import AugurConfig
 from tabula.connections import connect_redis
 from tabula.heartbeat import start_heartbeat
 from tabula.persistence import PersistenceManager
+from tabula.provenance import LearnContext, non_learning_write
 from nexus import matrix_ops
 
 # ---------------------------------------------------------------------------
@@ -213,6 +214,7 @@ def _decode_member(member: bytes | str) -> dict:
     return json.loads(member)
 
 
+@non_learning_write(reason="ephemeral per-session correlation window")
 def add_to_window(r: redis.Redis, anomaly: dict, prune_window_s: float) -> None:
     """Add an anomaly to the correlation window and prune old entries.
 
@@ -288,6 +290,7 @@ def _build_correlation_payload(
 
     return {
         "primary_anomaly": primary,
+        "session_id": primary.get("session_id"),
         "correlated_events": correlated,
         "correlation_found": True,
         "temporal_lag_seconds": round(temporal_lag, 3),
@@ -307,6 +310,7 @@ def _build_passthrough_payload(primary: dict) -> dict:
     """Assemble the pass-through payload for standalone medium/high events."""
     return {
         "primary_anomaly": primary,
+        "session_id": primary.get("session_id"),
         "correlated_events": [],
         "correlation_found": False,
         "temporal_lag_seconds": None,
@@ -457,7 +461,8 @@ def flush_graph_to_redis(
     converted to a list by the JSON round-trip inside PersistenceManager.
     """
     graph_data = json_graph.node_link_data(graph)
-    pm.save_correlation_graph(session_id, graph_data)
+    ctx = pm.resolve_learn_context(session_id)
+    pm.save_correlation_graph(session_id, graph_data, ctx=ctx)
     log.info(
         "Flushed correlation graph for session %s (%d nodes, %d edges)",
         session_id,
@@ -489,6 +494,7 @@ def ensure_matrix_seeded(pm: PersistenceManager) -> dict:
             rules=default_rules,
             version=DEFAULT_ESCALATION_MATRIX.get("version", "1.0"),
             mode="patch",
+            ctx=LearnContext.system(),
         )
         log.info("Seeded default escalation matrix (version=1.0)")
         return res.get("matrix", DEFAULT_ESCALATION_MATRIX)
@@ -505,7 +511,10 @@ def ensure_matrix_seeded(pm: PersistenceManager) -> dict:
     # Add ONLY the missing default rules via a CAS patch, so operator changes and a
     # concurrent Imperator-II patch to other rules/windows are never clobbered.
     res = matrix_ops.apply_matrix_update(
-        pm, rules={k: default_rules[k] for k in added}, mode="patch"
+        pm,
+        rules={k: default_rules[k] for k in added},
+        mode="patch",
+        ctx=LearnContext.system(),
     )
     log.info(
         "Seeded %d missing default rules into existing matrix: %s",

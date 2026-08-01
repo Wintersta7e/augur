@@ -110,16 +110,20 @@ _GATE_LOG_CAP = 2000  # MAX_GATE_SILENCES / MAX_GATE_EMISSIONS in tabula/persist
 def windowed_rates(pm, now: float, window_s: float) -> dict:
     """True windowed suppression rate + advice volume. Read cap-sized (default 100 < 2000 cap).
     Exclude probe / audit_only emissions from 'genuine delivered'.
+
+    CL11/§4.3e: these rates feed the self-model's blind spots, which Imperator II
+    reasons over — so they read the LEARNING view of the gate logs and a
+    synthetic driver's burst is excluded under ENFORCE.
     """
     lo = now - window_s
     silences = [
         s
-        for s in pm.load_silence_records(limit=_GATE_LOG_CAP)
+        for s in pm.load_silence_records(limit=_GATE_LOG_CAP, learnable_only=True)
         if float(s.get("ts", 0.0)) >= lo
     ]
     emissions = [
         e
-        for e in pm.load_emissions(limit=_GATE_LOG_CAP)
+        for e in pm.load_emissions(limit=_GATE_LOG_CAP, learnable_only=True)
         if float(e.get("ts", 0.0)) >= lo
         and not e.get("probe")
         and not e.get("audit_only")

@@ -23,10 +23,12 @@ from tabula.config import AugurConfig  # noqa: E402
 from tabula.connections import connect_redis  # noqa: E402
 from tabula.heartbeat import start_heartbeat  # noqa: E402
 from tabula.persistence import PersistenceManager  # noqa: E402
+from tabula.provenance import ProvenanceMode, get_provenance_mode  # noqa: E402
 from imperator import proposals as P, reasoner, apply as A  # noqa: E402
 
 log = logging.getLogger("imperator.improver")
-_CONSUMED = frozenset({"augur.disciplina.complete", "augur.imperator.ii.trigger"})
+_REFLECTION_SUBJECT = "augur.disciplina.complete"
+_CONSUMED = frozenset({_REFLECTION_SUBJECT, "augur.imperator.ii.trigger"})
 
 
 def consumed(subject: str) -> bool:
@@ -171,6 +173,20 @@ def make_on_msg(pm, config, http, *, lock, last_run, spawn, publish):
             payload = json.loads(msg.data.decode()) if msg.data else {}
         except (json.JSONDecodeError, UnicodeDecodeError):
             log.warning("imperator II trigger payload undecodable; skipping")
+            return
+        # §4.3e second layer: filtering the read-model keeps a non-learnable
+        # reflection out of the self-model, but the trigger would still spend a
+        # cycle reasoning about it. Only the reflection subject is gated — the
+        # dialogue trigger is a direct user action carrying no session.
+        if (
+            msg.subject == _REFLECTION_SUBJECT
+            and get_provenance_mode() is ProvenanceMode.ENFORCE
+            and not pm.is_learnable_session(payload.get("session_id"))
+        ):
+            log.info(
+                "imperator II trigger dropped: session %s is not learnable",
+                payload.get("session_id"),
+            )
             return
         # Take the lock synchronously HERE (not inside the task): this closes the
         # window where two back-to-back callbacks both pass lock.locked()==False

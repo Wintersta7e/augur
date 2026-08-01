@@ -1201,13 +1201,17 @@ class Gate:
         """
         if audit_only:
             pm.save_emission(
-                self._emission_record(signature, decision, now, tier, audit_only=True)
+                self._emission_record(
+                    signature, decision, now, tier, ctx=ctx, audit_only=True
+                )
             )
             return
 
         if decision.probe:
             pm.save_emission(
-                self._emission_record(signature, decision, now, tier, audit_only=False)
+                self._emission_record(
+                    signature, decision, now, tier, ctx=ctx, audit_only=False
+                )
             )
             return
 
@@ -1217,13 +1221,17 @@ class Gate:
             # state (no observed/h/advice-rate/channel_stats/cost_tier on a bogus
             # single:{domain}:? key).
             pm.save_emission(
-                self._emission_record(signature, decision, now, tier, audit_only=False)
+                self._emission_record(
+                    signature, decision, now, tier, ctx=ctx, audit_only=False
+                )
             )
             return
 
         # ── Normal delivery: advance all online state ──
         pm.save_emission(
-            self._emission_record(signature, decision, now, tier, audit_only=False)
+            self._emission_record(
+                signature, decision, now, tier, ctx=ctx, audit_only=False
+            )
         )
         pm.save_observed(
             {
@@ -1260,6 +1268,7 @@ class Gate:
         record = {
             "ts": now,
             "decision_id": decision.id,
+            "session_id": ctx.session_id if ctx else None,
             "state_key": signature.state_key,
             "domain": signature.domain,
             "entity": signature.entity,
@@ -1359,6 +1368,7 @@ class Gate:
         tier: int | None,
         *,
         audit_only: bool,
+        ctx=None,
     ) -> dict[str, Any]:
         """Build a gate emission record (spec §6 emissions schema).
 
@@ -1366,10 +1376,17 @@ class Gate:
         normal delivery carries ``audit_only=False``.  Gating-visible readers
         (refractory/pressure/duplicate/habituation) ignore any row whose
         ``probe`` or ``audit_only`` is True.
+
+        ``session_id`` comes from the event's ``LearnContext`` so the offline
+        learning readers can exclude a non-learnable session's rows (CL11); the
+        online arms read the log unfiltered, since a synthetic burst was still
+        really delivered.  ``None`` when no context was in hand — fail-closed,
+        so an unprovenanced row never trains anything.
         """
         return {
             "ts": now,
             "decision_id": decision.id,
+            "session_id": ctx.session_id if ctx else None,
             "state_key": signature.state_key,
             "severity": signature.severity,
             "tier": tier,

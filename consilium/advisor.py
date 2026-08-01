@@ -1322,6 +1322,7 @@ async def process_message(
             now,
             decision=decision,
             tier=1,
+            ctx=pm.resolve_learn_context(payload.get("session_id")),
         )
         return
 

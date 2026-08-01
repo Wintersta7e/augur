@@ -101,3 +101,58 @@ def test_enforce_excludes_non_learnable_reflection_from_imperator() -> None:
 
     set_provenance_mode(ProvenanceMode.ENFORCE)
     assert resolve_latest_reflection(pm)["session_id"] == "real-1"  # synthetic excluded
+
+
+def _spawned_for(pm: PersistenceManager, subject: str, payload: dict) -> int:
+    """Run the improver's dispatch callback once; return how many cycles it spawned."""
+    import asyncio
+
+    from imperator import improver
+    from tests.test_imperator_improver import _Cfg, _Msg
+
+    cfg = _Cfg()
+    cfg.imperator_ii_min_interval_s = 0.0
+    spawned: list = []
+
+    async def scenario() -> None:
+        on_msg = improver.make_on_msg(
+            pm,
+            cfg,
+            None,
+            lock=asyncio.Lock(),
+            last_run=[0.0],
+            spawn=lambda coro: (spawned.append(coro), coro.close()),
+            publish=lambda s, d: None,
+        )
+        await on_msg(_Msg(subject, payload))
+
+    asyncio.run(scenario())
+    return len(spawned)
+
+
+def test_enforce_skips_a_reflection_trigger_from_a_non_learnable_session() -> None:
+    # §4.3e second layer: filtering the read-model keeps a synthetic reflection
+    # out of the self-model, but the trigger itself would still spend an LLM
+    # cycle reasoning about it. Drop it at the dispatch path too.
+    pm = _pm()
+    _seed_reflection(pm, "synth-1", "synthetic", "2026-07-17T13:00:00+00:00")
+    payload = {"session_id": "synth-1", "timestamp": "2030-01-01T00:00:00+00:00"}
+
+    set_provenance_mode(ProvenanceMode.OFF)
+    assert _spawned_for(pm, "augur.disciplina.complete", payload) == 1
+
+    set_provenance_mode(ProvenanceMode.ENFORCE)
+    assert _spawned_for(pm, "augur.disciplina.complete", payload) == 0
+
+
+def test_enforce_still_runs_a_user_driven_dialogue_trigger() -> None:
+    # The dialogue trigger is a direct user action carrying no session; it is not
+    # perception learning and must never be gated on a session's provenance.
+    pm = _pm()
+    set_provenance_mode(ProvenanceMode.ENFORCE)
+    assert (
+        _spawned_for(
+            pm, "augur.imperator.ii.trigger", {"reason": "dialogue", "ts": 1.0}
+        )
+        == 1
+    )

@@ -1217,9 +1217,12 @@ def analyze_gate(
     for r in gate_rows:
         r["_arm"] = "withheld"
     reliability_audit = _behavioral_audit_per_arm(advice_rows + gate_rows, config)
+    # CL11: the readout tunes the gate, so it reads the LEARNING view of the
+    # logs — a synthetic driver's emissions/silences are excluded under ENFORCE
+    # (the online arms still read them unfiltered).
     mrt = _mrt_ipw_readout(
-        pm.load_emissions(limit=100),
-        pm.load_silence_records(limit=100),
+        pm.load_emissions(limit=100, learnable_only=True),
+        pm.load_silence_records(limit=100, learnable_only=True),
         advice_rows,
         gate_rows,
     )

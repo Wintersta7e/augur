@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -86,6 +87,13 @@ SESSION_KEY_TTL_S = 30 * 24 * 3600  # 30 days
 
 PROVENANCE_TTL_S = SESSION_META_TTL_S
 
+# Provenance-cache bounds (spec §4.3.1). Under ENFORCE every event on the
+# Vigil/Limen hot paths resolves its session, which would otherwise be a Redis
+# GET per event. Only LEARNABLE contexts are cached, and never longer than this
+# — nor longer than the metadata's own remaining TTL, whichever is shorter.
+LEARN_CONTEXT_CACHE_TTL_S = 60.0
+MAX_LEARN_CONTEXT_CACHE = 256
+
 # TTL for the correlation-tuning idempotency marker. Long enough to survive
 # manual reflect-trigger replays of a recent session, short enough to prevent
 # the key from lingering indefinitely.
@@ -97,6 +105,8 @@ class PersistenceManager:
 
     def __init__(self, r: redis.Redis) -> None:
         self._r = r
+        # session_id -> (monotonic expiry, LearnContext). Positives only.
+        self._learn_ctx_cache: dict[str, tuple[float, LearnContext]] = {}
 
     # -- JSON get/set helpers ------------------------------------------------
     # Collapse the uniform "set(key, json.dumps(x))" / "raw = get(key); return
@@ -142,11 +152,22 @@ class PersistenceManager:
         session id is not evidence; only a durable record this system wrote makes
         a session learnable. Unknown / missing / corrupt / expired provenance, or
         any Redis error, yields a non-learnable ``"unknown"`` context.
+
+        Learnable results are cached (§4.3.1, see :meth:`_cache_learn_context`);
+        a non-learnable one never is, so this stays a Redis read per event for
+        exactly the sessions that are not training anything.
         """
         if not session_id:
             return LearnContext.unknown(session_id)
+        cached = self._learn_ctx_cache.get(session_id)
+        if cached is not None:
+            expires_at, ctx = cached
+            if time.monotonic() < expires_at:
+                return ctx
+            del self._learn_ctx_cache[session_id]
+        key = REDIS_KEY_META.format(sid=session_id)
         try:
-            raw = self._r.get(REDIS_KEY_META.format(sid=session_id))
+            raw = self._r.get(key)
             if raw is None:
                 return LearnContext.unknown(session_id)
             data = json.loads(raw)
@@ -155,9 +176,73 @@ class PersistenceManager:
             origin = data.get("origin")
             if not isinstance(origin, str) or not origin:
                 origin = "unknown"
-            return LearnContext(session_id, data.get("learnable") is True, origin)
+            ctx = LearnContext(session_id, data.get("learnable") is True, origin)
         except Exception:
             return LearnContext.unknown(session_id)
+        if ctx.learnable:
+            self._cache_learn_context(session_id, key, ctx)
+        return ctx
+
+    def _cache_learn_context(
+        self, session_id: str, meta_key: str, ctx: LearnContext
+    ) -> None:
+        """Cache a LEARNABLE context, never past the metadata's own expiry (§4.3.1).
+
+        Both halves matter. Caching a negative would let a lookup that raced
+        metadata creation drop a real session's learning for the life of the
+        process. Letting a positive outlive its key would train on a session
+        whose provenance has expired — and expired means non-learnable — so the
+        entry's lifetime is capped by the key's remaining ``PTTL``.
+
+        Best-effort throughout: a Redis error here costs a cache entry, never a
+        wrong answer, since every miss re-reads the truth.
+        """
+        try:
+            pttl_ms = int(self._r.pttl(meta_key))
+        except Exception:
+            return  # unreadable TTL (or a stubbed client): resolve every time
+        if pttl_ms == -2:  # key vanished between the GET and here
+            return
+        ttl = LEARN_CONTEXT_CACHE_TTL_S
+        if pttl_ms >= 0:
+            ttl = min(ttl, pttl_ms / 1000.0)
+        if ttl <= 0:
+            return
+        if len(self._learn_ctx_cache) >= MAX_LEARN_CONTEXT_CACHE:
+            now = time.monotonic()
+            self._learn_ctx_cache = {
+                sid: entry
+                for sid, entry in self._learn_ctx_cache.items()
+                if entry[0] > now
+            }
+            if len(self._learn_ctx_cache) >= MAX_LEARN_CONTEXT_CACHE:
+                return  # still full of live entries: skip rather than thrash
+        self._learn_ctx_cache[session_id] = (time.monotonic() + ttl, ctx)
+
+    def filter_learnable_records(self, records: list[dict]) -> list[dict]:
+        """Drop records whose session may not train (CL11) — ENFORCE only.
+
+        For logs that are written unconditionally but read by BOTH a runtime
+        consumer and a learning one: the writer stays ``@non_learning_write`` (so
+        the online path always sees what really happened) and only the learning
+        reader opts in here. Provenance is resolved once per distinct session,
+        not once per record — a gate-log window is thousands of rows over a
+        handful of sessions. A record with no ``session_id`` is fail-closed:
+        no evidence it may train, so it is excluded.
+        """
+        from tabula.provenance import ProvenanceMode, get_provenance_mode
+
+        if get_provenance_mode() is not ProvenanceMode.ENFORCE:
+            return records
+        learnable: dict[Any, bool] = {}
+        out: list[dict] = []
+        for rec in records:
+            sid = rec.get("session_id")
+            if sid not in learnable:
+                learnable[sid] = self.resolve_learn_context(sid).learnable
+            if learnable[sid]:
+                out.append(rec)
+        return out
 
     def is_learnable_session(self, session_id: str | None) -> bool:
         """Return True only for a session recorded as learnable. Fails CLOSED.
@@ -981,25 +1066,31 @@ class PersistenceManager:
     def save_silence_record(self, record: dict) -> None:
         """Append a gate suppression record to augur:limen:silences (capped).
 
-        Schema: {ts, decision_id, state_key, domain, entity, severity, arm,
-                 reason, metrics, mrt_eligible, p_withhold}
+        Schema: {ts, decision_id, session_id, state_key, domain, entity,
+                 severity, arm, reason, metrics, mrt_eligible, p_withhold}
         """
         key = "augur:limen:silences"
         self._r.lpush(key, json.dumps(record))
         self._r.ltrim(key, 0, MAX_GATE_SILENCES - 1)
 
-    def load_silence_records(self, *, limit: int = 100) -> list[dict]:
+    def load_silence_records(
+        self, *, limit: int = 100, learnable_only: bool = False
+    ) -> list[dict]:
         """Return up to *limit* recent silence records, newest first.
 
         Returns [] if the list is absent or any entry is corrupt.
+        ``learnable_only`` is the CL11 opt-in for the offline learning readers
+        (see :meth:`filter_learnable_records`); the online arms leave it False,
+        because a suppression that really happened must still count.
         """
         key = "augur:limen:silences"
         raw_list = cast(list[Any], self._r.lrange(key, 0, limit - 1))
         try:
-            return [json.loads(entry) for entry in raw_list]
+            records = [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
             log.warning("augur:limen:silences contained a corrupt entry; returning []")
             return []
+        return self.filter_learnable_records(records) if learnable_only else records
 
     @non_learning_write(
         reason="gate log; excluded from tuning at read in analyze_gate (CL11)"
@@ -1007,25 +1098,31 @@ class PersistenceManager:
     def save_emission(self, record: dict) -> None:
         """Append a gate emission record to augur:limen:emissions (capped).
 
-        Schema: {ts, decision_id, state_key, severity, tier, probe,
+        Schema: {ts, decision_id, session_id, state_key, severity, tier, probe,
                  audit_only, withheld_reason, mrt_eligible, p_fire}
         """
         key = "augur:limen:emissions"
         self._r.lpush(key, json.dumps(record))
         self._r.ltrim(key, 0, MAX_GATE_EMISSIONS - 1)
 
-    def load_emissions(self, *, limit: int = 100) -> list[dict]:
+    def load_emissions(
+        self, *, limit: int = 100, learnable_only: bool = False
+    ) -> list[dict]:
         """Return up to *limit* recent emission records, newest first.
 
         Returns [] if the list is absent or any entry is corrupt.
+        ``learnable_only`` is the CL11 opt-in for the offline learning readers
+        (see :meth:`filter_learnable_records`); the online arms leave it False,
+        because a delivery that really happened must still refract.
         """
         key = "augur:limen:emissions"
         raw_list = cast(list[Any], self._r.lrange(key, 0, limit - 1))
         try:
-            return [json.loads(entry) for entry in raw_list]
+            records = [json.loads(entry) for entry in raw_list]
         except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
             log.warning("augur:limen:emissions contained a corrupt entry; returning []")
             return []
+        return self.filter_learnable_records(records) if learnable_only else records
 
     @non_learning_write(
         reason="gate log; excluded from tuning at read in analyze_gate (CL11)"

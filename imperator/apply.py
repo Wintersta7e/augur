@@ -27,9 +27,14 @@ _FLOOR_MIN, _FLOOR_MAX = 0.0, 0.6
 _DIRECTIVE_ACTIONS = ("suppress", "downgrade")
 
 
-def _arm_gate(pm, p: dict, *, cfg, ctx=None) -> bool:
+def _arm_gate(pm, p: dict, *, cfg, ctx) -> bool:
     """Write the durable applied-marker that arms the one-move-per-(kind,target)
     anti-thrash gate. Returns True if armed, False if the write failed.
+
+    ``ctx`` is REQUIRED, not defaulted: the marker is a learned write, so a
+    caller that forgets it makes this fail closed under ENFORCE — and because
+    the failure is caught below, the whole armed-apply path would die behind a
+    single log line. A missing keyword must break loudly at the call instead.
 
     The marker is the ONLY thing closing the gate, so it is written BEFORE the
     primary (matrix/prompt) write: a marker failure must abort the apply rather
@@ -168,7 +173,7 @@ def _apply_prompt_strategy(pm, p: dict, *, cfg, ctx=None) -> bool:
     current = pm.load_prompt(domain)
     if not is_prompt_acceptable(text, cfg) or current is None:
         return False
-    if not _arm_gate(pm, p, cfg=cfg):
+    if not _arm_gate(pm, p, cfg=cfg, ctx=ctx):
         return False
     if current != text:
         pm.save_prompt(domain, text, ctx=ctx)
@@ -207,7 +212,7 @@ def _apply_sigma(pm, p: dict, *, cfg, ctx=None) -> bool:
     if not math.isfinite(sigma) or not (sigma_min <= sigma <= sigma_max):
         return False
     current = pm.load_thresholds(domain) or {}
-    if not _arm_gate(pm, p, cfg=cfg):
+    if not _arm_gate(pm, p, cfg=cfg, ctx=ctx):
         return False
     a["prior_sigma"] = current.get("sigma_threshold")
     pm.save_thresholds(domain, {**current, "sigma_threshold": sigma}, ctx=ctx)
@@ -239,7 +244,7 @@ def _apply_gate_calibration(pm, p: dict, *, cfg, ctx=None) -> bool:
     op, sk = a.get("op"), a.get("state_key", p["target"])
     if op in ("self_tolerance_add", "self_tolerance_remove"):
         prior = pm.is_self_tolerant(sk)
-        if not _arm_gate(pm, p, cfg=cfg):
+        if not _arm_gate(pm, p, cfg=cfg, ctx=ctx):
             return False
         if op == "self_tolerance_add":
             pm.add_self_tolerance(sk, ctx=ctx)
@@ -262,7 +267,7 @@ def _apply_gate_calibration(pm, p: dict, *, cfg, ctx=None) -> bool:
         if not math.isfinite(value) or not (_FLOOR_MIN <= value <= _FLOOR_MAX):
             return False
         prior_entry = pm.load_habituation_floor(sk) or {}
-        if not _arm_gate(pm, p, cfg=cfg):
+        if not _arm_gate(pm, p, cfg=cfg, ctx=ctx):
             return False
         new_entry = {**prior_entry, "floor": value, "last_ts": time.time()}
         pm.save_gate_tuning_state(floors={sk: new_entry}, ctx=ctx)
@@ -376,7 +381,7 @@ def _apply_context_directive(pm, p: dict, *, cfg, ctx=None) -> bool:
         if not directive_id:
             return False
         prior = pm.get_dialogue_directive(directive_id)  # rollback anchor, pre-delete
-        if not _arm_gate(pm, p, cfg=cfg):
+        if not _arm_gate(pm, p, cfg=cfg, ctx=ctx):
             return False
         pm.remove_dialogue_directive(directive_id, ctx=ctx)
         a["prior_directive"] = prior
@@ -399,7 +404,7 @@ def _apply_context_directive(pm, p: dict, *, cfg, ctx=None) -> bool:
         "rationale": a.get("rationale", p.get("rationale", "")),
     }
     prior = pm.get_dialogue_directive(directive_id)  # rollback anchor, pre-write
-    if not _arm_gate(pm, p, cfg=cfg):
+    if not _arm_gate(pm, p, cfg=cfg, ctx=ctx):
         return False
     # Propagate the write's bool (True = written, False = NEW id refused at cap);
     # record the rollback anchor only when the directive was actually stored.
@@ -444,19 +449,16 @@ def _apply_semantic_fact(pm, p: dict, *, cfg, session_id: str | None) -> bool:
     other _dispatch_confirmed handler's contract.
     """
     a = p.get("action") or {}
+    ctx = pm.resolve_learn_context(session_id)
     if a.get("op") == "remove":
         mid = a.get("memory_id")
         if not mid:
             return False
         prior = pm.load_memory_state(mid)  # rollback anchor, read before the flip
-        if not _arm_gate(pm, p, cfg=cfg):
+        if not _arm_gate(pm, p, cfg=cfg, ctx=ctx):
             return False
         if prior is not None:
-            pm.save_memory_state(
-                mid,
-                {**prior, "status": "archived"},
-                ctx=pm.resolve_learn_context(session_id),
-            )
+            pm.save_memory_state(mid, {**prior, "status": "archived"}, ctx=ctx)
         a["prior_fact"] = prior
         return True
     pattern = a.get("pattern")
@@ -464,7 +466,7 @@ def _apply_semantic_fact(pm, p: dict, *, cfg, session_id: str | None) -> bool:
         return False
     mid = make_memory_id(pattern)
     prior = pm.load_memory_state(mid)  # rollback anchor, read before the write
-    if not _arm_gate(pm, p, cfg=cfg):
+    if not _arm_gate(pm, p, cfg=cfg, ctx=ctx):
         return False
     # Rationale precedence: action-level first (set by the undo-inverse
     # builder restoring a prior fact's own rationale), then proposal-level

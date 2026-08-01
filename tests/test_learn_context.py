@@ -4,17 +4,26 @@
 through the learning paths — session id, learnable bool, and origin kept together
 so a write can log and assert its own provenance instead of re-deriving it (or
 forgetting to). `resolve_learn_context` is the single reader; `is_learnable_session`
-delegates to it so the two can never disagree. Inert for now: no production caller.
+delegates to it so the two can never disagree.
+
+Under ENFORCE the resolver sits on the Vigil/Limen hot paths, so it caches —
+POSITIVES ONLY, never longer than the metadata itself survives (spec §4.3.1).
+Both halves of that rule close a real race: a cached ``False`` from a lookup
+that raced metadata creation would permanently drop real learning, and a cached
+``True`` outliving expired metadata would train on a session that is, by then,
+non-learnable.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import json
+import time
 
 import fakeredis
 import pytest
 
+import tabula.persistence as persistence
 from tabula.persistence import PersistenceManager
 from tabula.provenance import LearnContext
 from tabula.session import REDIS_KEY_META, build_session_meta
@@ -135,3 +144,91 @@ class TestResolverAndPredicateAgree:
         pm = _pm()
         setup(pm)
         assert pm.is_learnable_session("s") == pm.resolve_learn_context("s").learnable
+
+
+class _CountingRedis:
+    """Redis proxy that counts GETs, to prove the resolver stops round-tripping."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.gets = 0
+
+    def get(self, key):
+        self.gets += 1
+        return self._inner.get(key)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class TestProvenanceCache:
+    """§4.3.1 — positives cached, negatives never, lifetime capped by the key's TTL."""
+
+    def test_a_learnable_session_resolves_once(self) -> None:
+        r = _CountingRedis(fakeredis.FakeStrictRedis(decode_responses=True))
+        pm = PersistenceManager(r)
+        _write(pm, "s1", "real")
+        assert [pm.resolve_learn_context("s1").learnable for _ in range(5)] == [
+            True
+        ] * 5
+        assert r.gets == 1
+
+    def test_a_non_learnable_result_is_never_cached(self) -> None:
+        # The negative race: a lookup that lands before the metadata is visible
+        # must not pin that session as non-learnable for the rest of the process.
+        r = _CountingRedis(fakeredis.FakeStrictRedis(decode_responses=True))
+        pm = PersistenceManager(r)
+        assert pm.resolve_learn_context("s1").learnable is False
+        _write(pm, "s1", "real")
+        assert pm.resolve_learn_context("s1").learnable is True
+        assert r.gets == 2  # neither miss was served from the cache
+
+    def test_a_synthetic_session_is_never_cached(self) -> None:
+        r = _CountingRedis(fakeredis.FakeStrictRedis(decode_responses=True))
+        pm = PersistenceManager(r)
+        _write(pm, "s1", "synthetic")
+        for _ in range(3):
+            assert pm.resolve_learn_context("s1").learnable is False
+        assert r.gets == 3
+
+    def test_a_cached_positive_does_not_outlive_its_metadata(self) -> None:
+        # The positive race: expired provenance means non-learnable, so the
+        # cached entry may never live longer than the key it was read from.
+        pm = _pm()
+        pm._r.set(
+            REDIS_KEY_META.format(sid="s1"),
+            json.dumps(
+                build_session_meta("s1", origin="real", created_by="x", started_at="t")
+            ),
+            px=100,
+        )
+        assert pm.resolve_learn_context("s1").learnable is True
+        time.sleep(0.2)
+        assert pm.resolve_learn_context("s1").learnable is False
+
+    def test_a_positive_without_a_key_ttl_still_expires(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(persistence, "LEARN_CONTEXT_CACHE_TTL_S", 0.05)
+        pm = _pm()
+        _write(pm, "s1", "real")  # no TTL on the key: PTTL is -1
+        assert pm.resolve_learn_context("s1").learnable is True
+        pm._r.delete(REDIS_KEY_META.format(sid="s1"))
+        time.sleep(0.1)
+        assert pm.resolve_learn_context("s1").learnable is False
+
+    def test_the_cache_is_per_manager(self) -> None:
+        r = fakeredis.FakeStrictRedis(decode_responses=True)
+        warm, cold = PersistenceManager(r), PersistenceManager(r)
+        _write(warm, "s1", "real")
+        assert warm.resolve_learn_context("s1").learnable is True
+        r.delete(REDIS_KEY_META.format(sid="s1"))
+        assert cold.resolve_learn_context("s1").learnable is False
+
+    def test_the_cache_is_size_capped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(persistence, "MAX_LEARN_CONTEXT_CACHE", 2)
+        pm = _pm()
+        for i in range(6):
+            _write(pm, f"s{i}", "real")
+            assert pm.resolve_learn_context(f"s{i}").learnable is True
+        assert len(pm._learn_ctx_cache) <= 2

@@ -1,0 +1,17 @@
+# Explicit lint contract.
+#
+# This repo previously ran ruff with no configuration, so the gate was
+# whatever ruff shipped as its defaults that week -- 0.16 widened them and
+# flagged 382 findings across files nobody had touched, which is why the CI
+# pin existed. Declaring the rule set means a ruff release can no longer
+# move the gate on its own, and the version can be upgraded on its own
+# schedule.
+#
+# The selection below is ruff's 0.15 default set, which the codebase is
+# clean against. Widening it is a deliberate lint-policy change: make it in
+# its own commit, with the findings.
+
+target-version = "py312"
+
+[lint]
+select = ["E4", "E7", "E9", "F"]

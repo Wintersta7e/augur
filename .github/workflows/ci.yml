@@ -29,10 +29,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # ruff is PINNED: it gates the build, and its default rule set moves
-          # between minor releases -- 0.16 flagged 392 findings across untouched
-          # files. Bump deliberately, with the findings, never as a side effect.
-          pip install "ruff==0.15.12" pip-audit mypy pytest-cov
+          # ruff is pinned so a release cannot change the gate mid-branch. The
+          # rule set it enforces lives in ruff.toml, so bumping this pin is now
+          # a version bump and nothing else.
+          pip install "ruff==0.16.1" pip-audit mypy pytest-cov
 
       - name: Audit pinned deps for known CVEs
         run: pip-audit -r requirements.txt

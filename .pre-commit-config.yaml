@@ -3,7 +3,7 @@
 # caught locally before pushing instead of after a CI cycle.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.12
+    rev: v0.16.1
     hooks:
       - id: ruff
       - id: ruff-format

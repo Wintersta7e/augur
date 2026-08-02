@@ -1,6 +1,6 @@
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     # SEC-06: bind Redis to 127.0.0.1 only. Previously bound to all
     # interfaces with no password, exposing all Augur state to any
     # LAN-reachable host. Single-operator local use should not expose

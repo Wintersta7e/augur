@@ -1,12 +1,17 @@
-python-chess
-pygame
-river
-redis[hiredis]
-nats-py
-httpx
-keyboard
-pytest
-pytest-asyncio
-fakeredis>=2.36.2
-fastmcp
-networkx
+# Floors record the versions this repo is tested against. They were bare
+# names until now, which meant every CI run silently resolved to whatever
+# had just been published and no bump was ever recorded.
+# python-chess is a shim that only re-declares chess (and caps it at <2);
+# sensus/chess_board.py imports chess directly, so depend on it directly.
+chess>=1.11.2
+pygame>=2.6.1
+river>=0.25.0
+redis[hiredis]>=8.1.0
+nats-py>=2.15.0
+httpx>=0.28.1
+keyboard>=0.13.5
+pytest>=9.1.1
+pytest-asyncio>=1.4.0
+fakeredis>=2.37.0
+fastmcp>=3.4.5
+networkx>=3.6.1

@@ -276,7 +276,7 @@ Praefectus publishes `augur.praefectus.health` liveness/degradation transitions.
 
 ## License
 
-[MIT](LICENSE) — with one caveat: `sensus/chess_board.py` imports `python-chess`
+[MIT](LICENSE) — with one caveat: `sensus/chess_board.py` imports `chess`
 (**GPL-3.0**). The rest of the codebase does not depend on it and is cleanly MIT;
 exclude that one file for a strictly-MIT build (the typing monitor and your own
 perception sources are unaffected). For personal, non-redistributed use this is

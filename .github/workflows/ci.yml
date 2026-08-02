@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -44,7 +44,7 @@ jobs:
         run: ruff format --check .
 
       - name: Type check (report-only)
-        # mypy currently reports ~40 errors, most are false positives from
+        # mypy currently reports ~30 errors, most are false positives from
         # redis-py / nats-py library typing. Non-blocking until cleaned up
         # module by module. Issues surface as annotations on PRs.
         continue-on-error: true
@@ -85,7 +85,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -93,7 +93,7 @@ jobs:
 
       - name: Start Redis
         run: |
-          docker run -d --name redis -p 6379:6379 redis:7-alpine
+          docker run -d --name redis -p 6379:6379 redis:8-alpine
 
       - name: Start NATS with JetStream
         run: |

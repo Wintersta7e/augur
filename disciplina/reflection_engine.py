@@ -1368,7 +1368,6 @@ async def run_reflection(
     default_thresholds = {
         "sigma_threshold": 2.0,
         "ewma_alpha": 0.3,
-        "hst_threshold": 0.7,
     }
     thresholds_per_domain: dict[str, dict] = {
         d: {**default_thresholds, **(pm.load_thresholds(d) or {})}

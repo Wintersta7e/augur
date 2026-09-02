@@ -25,7 +25,7 @@ def test_payload_emits_pre_update_baseline_not_post_update():
         bl.observation_count,
     )
     value = 40.0
-    deviation, hst = bl.score(value)  # pre-update z-score
+    deviation = bl.score(value)  # pre-update z-score
     bl.update(value, 0.3)  # post-update mean now differs
     assert bl.ewma_mean != mean_before  # sanity: the update moved the mean
 
@@ -43,7 +43,6 @@ def test_payload_emits_pre_update_baseline_not_post_update():
     payload = build_anomaly_payload(
         event,
         deviation=deviation,
-        hst_score=hst,
         severity="high",
         mean_before=mean_before,
         std_before=std_before,
@@ -69,7 +68,7 @@ def test_pre_update_snapshot_is_consistent_with_deviation():
 
     mean_before, std_before = bl.ewma_mean, bl.ewma_std
     value = 30.0
-    deviation, _ = bl.score(value)  # pre-update z-score the payload emits
+    deviation = bl.score(value)  # pre-update z-score the payload emits
 
     # baseline_mean/std emitted alongside deviation_score MUST be these
     # pre-update values, not the post-update ones.

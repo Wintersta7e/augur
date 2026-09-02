@@ -692,7 +692,6 @@ def get_thresholds(domain: str | None = None) -> dict[str, Any]:
         return {
             "source": "config_defaults",
             "default_sigma_threshold": _config.default_sigma_threshold,
-            "hst_threshold": _config.hst_threshold,
             "severity_medium_sigma": _config.severity_medium_sigma,
             "severity_high_sigma": _config.severity_high_sigma,
             "min_observations": _config.min_observations,
@@ -704,7 +703,6 @@ def get_thresholds(domain: str | None = None) -> dict[str, Any]:
             "source": "config_defaults",
             "domain": domain,
             "default_sigma_threshold": _config.default_sigma_threshold,
-            "hst_threshold": _config.hst_threshold,
             "severity_medium_sigma": _config.severity_medium_sigma,
             "severity_high_sigma": _config.severity_high_sigma,
             "min_observations": _config.min_observations,

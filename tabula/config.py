@@ -50,11 +50,7 @@ class AugurConfig:
     # ── Detection ──────────────────────────────────────────────────────────
     default_sigma_threshold: float = 2.0
     ewma_alpha: float = 0.3
-    hst_n_trees: int = 10
-    hst_height: int = 8
-    hst_window_size: int = 50
     min_observations: int = 15
-    hst_threshold: float = 0.7
     severity_medium_sigma: float = 2.5
     severity_high_sigma: float = 4.0
     # Idle reclamation for per-entity in-memory baselines (each owns a River

@@ -9,7 +9,7 @@ def _cfg() -> AugurConfig:
 
 
 def _thresholds(domain: str, sigma: float = 2.0) -> dict:
-    return {"sigma_threshold": sigma, "ewma_alpha": 0.3, "hst_threshold": 0.7}
+    return {"sigma_threshold": sigma, "ewma_alpha": 0.3}
 
 
 def test_precision_empty_feedback():

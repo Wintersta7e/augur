@@ -92,14 +92,14 @@ class TestScoring:
     def test_deviation_zero_when_std_near_zero(self) -> None:
         bl = EntityBaseline()
         bl.update(5.0, alpha=0.3)  # single obs, var=0, std<0.01
-        deviation, _ = bl.score(100.0)
+        deviation = bl.score(100.0)
         assert deviation == 0.0  # can't compute sigma with no spread
 
     def test_deviation_scales_with_distance(self) -> None:
         bl = EntityBaseline()
         bl.ewma_mean = 10.0
         bl.ewma_var = 4.0  # std = 2.0
-        deviation, _ = bl.score(16.0)
+        deviation = bl.score(16.0)
         # |16 - 10| / 2 = 3.0 sigma
         assert deviation == pytest.approx(3.0)
 
@@ -107,18 +107,9 @@ class TestScoring:
         bl = EntityBaseline()
         bl.ewma_mean = 10.0
         bl.ewma_var = 4.0
-        dev_high, _ = bl.score(16.0)
-        dev_low, _ = bl.score(4.0)
+        dev_high = bl.score(16.0)
+        dev_low = bl.score(4.0)
         assert dev_high == pytest.approx(dev_low)
-
-    def test_hst_score_returns_numeric(self) -> None:
-        bl = EntityBaseline()
-        # Train HST with some data so it has something to score against
-        for v in [5.0, 5.1, 4.9, 5.2, 4.8]:
-            bl.update(v, alpha=0.3)
-        _, hst_score = bl.score(5.0)
-        assert isinstance(hst_score, (int, float))  # River may return int 0
-        assert 0.0 <= hst_score <= 1.0
 
 
 class TestSerialization:
@@ -142,15 +133,16 @@ class TestSerialization:
         assert restored.ewma_var == 0.0
         assert restored.observation_count == 0
 
-    def test_hst_not_serialized(self) -> None:
-        """HST model is not persisted — only EWMA state is.
-        A restored baseline starts with a fresh HST. This is by design:
-        HST rebuilds quickly from incoming data."""
+    def test_state_dict_carries_only_durable_fields(self) -> None:
         bl = EntityBaseline()
-        for v in [1.0, 2.0, 3.0]:
-            bl.update(v, alpha=0.3)
-        state = bl.to_state_dict()
-        assert "hst" not in state
+        bl.unit = "ms"
+        bl.update(5.0, alpha=0.3)
+        assert set(bl.to_state_dict()) == {
+            "ewma_mean",
+            "ewma_var",
+            "observation_count",
+            "unit",
+        }
 
 
 class TestIdleEviction:

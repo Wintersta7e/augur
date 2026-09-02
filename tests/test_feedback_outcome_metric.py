@@ -75,7 +75,7 @@ def test_degenerate_std_is_unmeasurable():
     assert t.finalized and t.unmeasurable and t.behavioral_score == 0.5
 
 
-def test_hst_only_fire_is_unmeasurable():
+def test_zero_decision_deviation_is_unmeasurable():
     t = _tracker(10.0, 2.0, 0.0)  # dev0 below MIN_DECISION_DEVIATION
     for v in (10.0, 10.0, 10.0):
         t.add_post_move(v)

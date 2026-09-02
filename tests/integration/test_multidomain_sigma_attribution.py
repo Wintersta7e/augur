@@ -28,7 +28,7 @@ async def test_correlated_feedback_lowers_sigma_in_both_domains(
     for domain in ("chess", "typing"):
         pm.save_thresholds(
             domain,
-            {"sigma_threshold": 2.0, "ewma_alpha": 0.3, "hst_threshold": 0.7},
+            {"sigma_threshold": 2.0, "ewma_alpha": 0.3},
             ctx=LearnContext.system(),
         )
     session_id = learnable_session("session-multi")

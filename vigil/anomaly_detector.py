@@ -2,8 +2,7 @@
 
 Subscribes to NATS 'augur.sensus.>' (wildcard), parses incoming
 messages as PerceptionEvent, scores each observation using per-series
-(domain, event_type, entity) EWMA baselines and River HalfSpaceTrees,
-then publishes anomalies
+(domain, event_type, entity) EWMA baselines, then publishes anomalies
 to 'augur.vigil.anomaly' and Redis.
 
 Baselines are persisted to Redis and survive restarts. Thresholds are
@@ -18,14 +17,13 @@ import logging
 import math
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import nats
 import redis
 from river import drift as river_drift
-from river.anomaly import HalfSpaceTrees
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tabula.config import AugurConfig
@@ -64,14 +62,13 @@ DEFAULT_THRESHOLDS = {
     "min_observations": 15,
     "ewma_alpha": 0.3,
     "sigma_threshold": 2.0,
-    "hst_threshold": 0.7,
     "severity_medium_sigma": 2.5,
     "severity_high_sigma": 4.0,
 }
 
 # LEAK-10: cap on the in-memory baselines dict. The detector creates one
 # EntityBaseline per unique (domain, event_type, entity) series seen on the wildcard
-# perception subject. Each EntityBaseline owns a River HalfSpaceTrees
+# perception subject.
 # model with 15 trees and a 50-sample window, so the per-entity memory
 # footprint is non-trivial. Without a cap, arbitrary entity names (e.g.,
 # from inject_sequence or malicious publishers) could balloon the dict.
@@ -90,7 +87,7 @@ DRIFT_RESTART_STD_CAP_FACTOR = 4.0
 
 @dataclass
 class EntityBaseline:
-    """Tracks EWMA mean/variance and HST model for one measurement series."""
+    """Tracks the EWMA mean/variance for one measurement series."""
 
     ewma_mean: float = 0.0
     ewma_var: float = 0.0
@@ -100,14 +97,6 @@ class EntityBaseline:
     # scales in one EWMA is what made every `typing` scale switch look like a
     # 4-sigma anomaly. Empty until the first observation.
     unit: str = ""
-    hst: HalfSpaceTrees = field(
-        default_factory=lambda: HalfSpaceTrees(
-            n_trees=15,
-            height=8,
-            window_size=50,
-            seed=42,
-        )
-    )
 
     # 1C drift detector (in-memory; NOT persisted — a process restart is a
     # natural detector reset). Plain class attrs (no annotation) so the
@@ -150,7 +139,6 @@ class EntityBaseline:
             diff = value - self.ewma_mean
             self.ewma_mean += alpha * diff
             self.ewma_var = (1 - alpha) * (self.ewma_var + alpha * diff * diff)
-        self.hst.learn_one({"value": value})
         self._maybe_drift_reset(value, mean_before, obs_before)
 
     def _maybe_drift_reset(
@@ -189,14 +177,13 @@ class EntityBaseline:
                 else river_drift.PageHinkley()
             )
 
-    def score(self, value: float) -> tuple[float, float]:
+    def score(self, value: float) -> float:
         std = self.ewma_std
         if std < 0.01:
             deviation = 0.0
         else:
             deviation = abs(value - self.ewma_mean) / std
-        hst_score: float = self.hst.score_one({"value": value})
-        return deviation, hst_score
+        return deviation
 
     def to_state_dict(self) -> dict:
         return {
@@ -225,13 +212,12 @@ class EntityBaseline:
 
 def classify_severity(
     deviation: float,
-    hst_score: float,
     medium_sigma: float,
     high_sigma: float,
 ) -> str:
-    if deviation >= high_sigma or hst_score >= 0.9:
+    if deviation >= high_sigma:
         return "high"
-    if deviation >= medium_sigma or hst_score >= 0.8:
+    if deviation >= medium_sigma:
         return "medium"
     return "low"
 
@@ -240,7 +226,6 @@ def build_anomaly_payload(
     event: PerceptionEvent,
     *,
     deviation: float,
-    hst_score: float,
     severity: str,
     mean_before: float,
     std_before: float,
@@ -274,7 +259,6 @@ def build_anomaly_payload(
         "baseline_observation_count": obs_before,
         "deviation_score": round(deviation, 3),
         "drift_reset": drift_reset,
-        "anomaly_score": round(hst_score, 3),
         "severity": severity,
         "timestamp": timestamp,
         # Compat aliases for downstream consumers not yet updated
@@ -367,10 +351,9 @@ def evict_idle_baselines(
 ) -> list[SeriesKey]:
     """Drop in-memory baselines not seen within ``idle_ttl_s`` seconds.
 
-    Each :class:`EntityBaseline` owns a River HalfSpaceTrees model, so an
-    unbounded entity namespace (churning IDs, hostile publishers) can pin
-    significant memory up to ``MAX_BASELINE_ENTITIES`` even while almost all
-    of those models are dormant. This reclaims dormant ones. Eviction drops
+    An unbounded entity namespace (churning IDs, hostile publishers) can pin
+    memory up to ``MAX_BASELINE_ENTITIES`` even while almost all of those
+    baselines are dormant. This reclaims dormant ones. Eviction drops
     only the in-memory model; the persisted Redis profile is left intact and a
     re-sighted entity rehydrates from it on the cache miss (``on_event``).
 
@@ -470,8 +453,9 @@ async def run() -> None:
         # carries the residue of `total_dwell - idle_dwell` over a span shorter
         # than the poll interval — float noise around 70ms, with a standard
         # deviation just above the zero-variance floor, so it scores like real
-        # data. Nothing downstream reads it for anything but noise, so it gets
-        # no baseline.
+        # data. It is also the worst case for the HST, whose default [0,1]
+        # feature range makes near-zero values saturate toward HIGH. Nothing
+        # downstream reads it for anything but noise, so it gets no baseline.
         if is_sentinel_entity(entity):
             log.debug("Ignoring sentinel entity %s/%s", domain, entity)
             return
@@ -544,7 +528,7 @@ async def run() -> None:
             )
 
         # Score BEFORE updating
-        deviation, hst_score = bl.score(value)
+        deviation = bl.score(value)
         is_trained = bl.observation_count >= th["min_observations"]
 
         # Freeze the DECISION-TIME (pre-update) baseline so the emitted
@@ -578,8 +562,7 @@ async def run() -> None:
         label = ctx.get("move_san", ctx.get("label", f"{value}{event.unit}"))
 
         log.info(
-            "[%s/%s] %s  value=%.2f%s  ewma=%.2f  std=%.2f  "
-            "dev=%.2f\u03c3  hst=%.3f  trained=%s",
+            "[%s/%s] %s  value=%.2f%s  ewma=%.2f  std=%.2f  dev=%.2f\u03c3  trained=%s",
             domain,
             entity,
             label,
@@ -588,7 +571,6 @@ async def run() -> None:
             bl.ewma_mean,
             bl.ewma_std,
             deviation,
-            hst_score,
             is_trained,
         )
 
@@ -600,15 +582,11 @@ async def run() -> None:
             )
             return
 
-        is_anomaly = (
-            deviation >= th["sigma_threshold"] or hst_score >= th["hst_threshold"]
-        )
-        if not is_anomaly:
+        if deviation < th["sigma_threshold"]:
             return
 
         severity = classify_severity(
             deviation,
-            hst_score,
             th["severity_medium_sigma"],
             th["severity_high_sigma"],
         )
@@ -618,7 +596,6 @@ async def run() -> None:
         anomaly_payload = build_anomaly_payload(
             event,
             deviation=deviation,
-            hst_score=hst_score,
             severity=severity,
             mean_before=mean_before,
             std_before=std_before,
@@ -628,13 +605,12 @@ async def run() -> None:
         )
 
         log.warning(
-            "  \u26a0 ANOMALY [%s] %s/%s: value=%.2f  dev=%.1f\u03c3  hst=%.3f",
+            "  \u26a0 ANOMALY [%s] %s/%s: value=%.2f  dev=%.1f\u03c3",
             severity.upper(),
             domain,
             entity,
             value,
             deviation,
-            hst_score,
         )
 
         try:

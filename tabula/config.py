@@ -149,7 +149,12 @@ class AugurConfig:
     gate_credibility_decay_alpha: float = 0.02
     gate_cred_mid: float = 0.5
     gate_cred_max_p: float = 0.8
-    gate_behavioral_weight: float = 0.2
+    # Explicit ratings need a person; behavioural scores need nobody. Deployed,
+    # the collector has no terminal, so explicit ratings arrive only when
+    # someone calls the submit_feedback tool — at 0.2 against an explicit weight
+    # of 1.0, credibility was effectively waiting on a signal that mostly never
+    # comes. Behavioural evidence still cannot outvote an explicit rating.
+    gate_behavioral_weight: float = 0.5
     gate_explicit_weight: float = 1.0
     gate_behavioral_deadband: float = 0.15
     gate_behavioral_min_samples: int = 5

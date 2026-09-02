@@ -137,6 +137,13 @@ async def maybe_prompt_withheld_rating(pending, config: AugurConfig, pm) -> bool
         return False
     if getattr(pending, "withheld_rating_p", None) is not None:
         return False  # already prompted
+    if not sys.stdin.isatty():
+        # No terminal: the prompt cannot be issued, so it must not be RECORDED
+        # as issued. Setting withheld_rating_p below is the IPW-exclusion key —
+        # doing it here would drop a control-arm row from the estimand on the
+        # strength of a question nobody was ever asked, and log every one of
+        # them as an informative "no_response".
+        return False
     print(
         f"\n{CYAN}[AUGUR]{RESET} (calibration) Would advice have helped a moment "
         f"ago? {BOLD}[y/n/s]{RESET} {GRAY}({EXPLICIT_TIMEOUT_S}s, s=skip){RESET} ",
@@ -708,16 +715,24 @@ async def run() -> None:
             severity,
         )
 
-        # Prompt for explicit feedback (non-blocking with timeout)
-        print(
-            f"\n{CYAN}[AUGUR]{RESET} Was this advice useful? "
-            f"{BOLD}[y/n/s]{RESET} "
-            f"{GRAY}({EXPLICIT_TIMEOUT_S}s to respond, s=skip){RESET} ",
-            end="",
-            flush=True,
-        )
-
-        response = await read_stdin_with_timeout(EXPLICIT_TIMEOUT_S)
+        # Prompt for explicit feedback (non-blocking with timeout).
+        # Skipped without a TTY: deployed, this process has no terminal, so the
+        # prompt could only print noise and stall the advice handler for up to
+        # EXPLICIT_TIMEOUT_S per advice while nobody could ever answer it.
+        # Ratings then arrive out-of-band on augur.responsum.feedback (the
+        # submit_feedback MCP tool), which on_feedback matches against the whole
+        # session's advice — so a rating is not confined to this short window.
+        if sys.stdin.isatty():
+            print(
+                f"\n{CYAN}[AUGUR]{RESET} Was this advice useful? "
+                f"{BOLD}[y/n/s]{RESET} "
+                f"{GRAY}({EXPLICIT_TIMEOUT_S}s to respond, s=skip){RESET} ",
+                end="",
+                flush=True,
+            )
+            response = await read_stdin_with_timeout(EXPLICIT_TIMEOUT_S)
+        else:
+            response = None
 
         if response in ("y", "yes"):
             pending.explicit_rating = "y"

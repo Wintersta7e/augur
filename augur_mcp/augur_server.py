@@ -1082,25 +1082,39 @@ async def trigger_reflection(session_id: str | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def submit_feedback(decision_id: str, rating: str) -> dict[str, Any]:
+async def submit_feedback(rating: str, decision_id: str = "") -> dict[str, Any]:
     """Submit an explicit y/n rating for a decision (headless feedback path).
 
-    The interactive stdin prompt in the feedback collector has no TTY in a
-    container, so deployed advice always logs no_response. This tool publishes
-    an out-of-band explicit rating to augur.responsum.feedback, where the
-    collector matches it to the in-flight advice by decision_id and records the
-    rating. That explicit signal is what lets Disciplina's matrix self-tuning
-    cross the disable threshold and flip a noisy correlation rule to LOW.
+    The feedback collector has no TTY in a container, so its interactive prompt
+    is skipped and this is the ONLY way explicit ratings reach the system. That
+    signal is what precision, utility, per-class credibility and the dismissal
+    rate are computed from — with no ratings, those stay null and Disciplina's
+    matrix self-tuning never crosses its disable threshold.
+
+    Omit ``decision_id`` to rate the most recent advice, which is the usual
+    case: you read the advice, you rate it. Requiring the id meant rating was
+    only possible for someone who had already gone looking for it in a log.
+    The collector matches a rating against the whole session's advice, so this
+    is not confined to a short window after delivery.
 
     Args:
-        decision_id: The decision_id carried by the advice to rate.
         rating: One of "y" (useful), "n" (not useful), or "no_response".
+        decision_id: The decision to rate; defaults to the most recent advice.
 
     Returns:
         Dict with 'status' and 'decision_id', or {'error': ...} on a bad rating.
     """
     if rating not in {"y", "n", "no_response"}:
         return {"error": f"invalid rating {rating!r}; expected y, n, or no_response"}
+
+    if not decision_id:
+        with _persistence_ctx() as pm:
+            last = pm.load_last_advice()
+        decision_id = (last or {}).get("decision_id") or ""
+        if not decision_id:
+            return {
+                "error": "no decision_id given and the last advice carries none",
+            }
 
     payload = json.dumps({"decision_id": decision_id, "rating": rating}).encode()
 

@@ -31,6 +31,7 @@ async def _drive(
     monkeypatch: pytest.MonkeyPatch,
     feed: Any,
     stdin_reader: Any = None,
+    tty: bool = True,
 ) -> dict[str, Any]:
     """Start run(), capture subscriber closures, run a feed coroutine.
 
@@ -80,6 +81,9 @@ async def _drive(
         return "s"
 
     monkeypatch.setattr(fc, "read_stdin_with_timeout", stdin_reader or fake_read)
+    # These drive the interactive path, so they must present as a terminal;
+    # without a TTY the collector skips the prompt entirely by design.
+    monkeypatch.setattr(fc.sys.stdin, "isatty", lambda: tty)
 
     task = asyncio.create_task(fc.run())
     for _ in range(50):
@@ -296,3 +300,33 @@ async def test_stdin_timeout_does_not_clobber_out_of_band_rating(
     fb = ctx["pm"].get_feedback("sess-1")
     # The out-of-band 'y' must survive the stdin timeout, not be reset.
     assert fb["advice_events"][0]["explicit_rating"] == "y"
+
+
+@pytest.mark.asyncio
+async def test_headless_advice_skips_the_prompt_but_still_takes_a_rating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deployed, this process has no terminal.
+
+    The prompt could then only print into the void while stalling the advice
+    handler for up to EXPLICIT_TIMEOUT_S per advice, so it is skipped. The
+    out-of-band path (the submit_feedback tool) must still record a rating —
+    it is the only way explicit feedback reaches the system in a container,
+    and precision, utility and credibility are computed from it alone.
+    """
+    holder: dict[str, Any] = {}
+
+    async def _unreachable_stdin(_timeout: float) -> None:
+        raise AssertionError("stdin must not be read without a TTY")
+
+    async def feed(cap: dict, ctx: dict) -> None:
+        holder["on_feedback"] = cap["on_feedback"]
+        _set_session(ctx["redis"], "sess-headless")
+        await cap["on_advice"](_advice_msg("white", "dec-h1"))
+        # Arrives well after any stdin window would have closed.
+        await holder["on_feedback"](_feedback_msg(decision_id="dec-h1", rating="n"))
+        await cap["on_session_end"](MagicMock())
+
+    ctx = await _drive(monkeypatch, feed, stdin_reader=_unreachable_stdin, tty=False)
+    fb = ctx["pm"].get_feedback("sess-headless")
+    assert fb["advice_events"][0]["explicit_rating"] == "n"

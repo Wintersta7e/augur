@@ -183,11 +183,34 @@ async def test_helper_prompts_and_marks_when_selected(monkeypatch):
         return "y"
 
     monkeypatch.setattr(fc, "read_stdin_with_timeout", _fake_stdin)
+    monkeypatch.setattr(fc.sys.stdin, "isatty", lambda: True)
     result = await maybe_prompt_withheld_rating(p, cfg, pm)
     assert result is True
     assert p.explicit_rating == "y"
     assert p.withheld_rating_p == 0.3
     assert pm.marked == ["s1"]
+
+
+@pytest.mark.asyncio
+async def test_helper_does_not_record_a_prompt_it_could_not_issue(monkeypatch):
+    """Without a TTY the control-arm question is never asked, so it must not be
+    logged as asked. withheld_rating_p is the IPW-exclusion key: setting it here
+    would drop a control-arm row from the estimand, and record an informative
+    "no_response", on the strength of a question nobody saw."""
+    pm = _FakePM()
+    cfg = _cfg(gate_mrt_withheld_rating_rate=0.3)
+    p = _gd()
+    p.selected_for_rating = True
+    p.finalized = True
+
+    async def _unreachable_stdin(_timeout):
+        raise AssertionError("stdin must not be read without a TTY")
+
+    monkeypatch.setattr(fc, "read_stdin_with_timeout", _unreachable_stdin)
+    monkeypatch.setattr(fc.sys.stdin, "isatty", lambda: False)
+    assert await maybe_prompt_withheld_rating(p, cfg, pm) is False
+    assert p.withheld_rating_p is None
+    assert pm.marked == []
 
 
 @pytest.mark.asyncio

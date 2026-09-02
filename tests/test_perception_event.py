@@ -192,7 +192,7 @@ class TestSentinelEntities:
             assert is_sentinel_entity(s), s
 
     def test_a_real_app_is_not_a_sentinel(self) -> None:
-        for s in ("firefox", "text editor", "a<b>", "<not closed", "x<y>z"):
+        for s in ("browser", "text editor", "a<b>", "<not closed", "x<y>z"):
             assert not is_sentinel_entity(s), s
 
     def test_empty_and_none_are_not_sentinels(self) -> None:

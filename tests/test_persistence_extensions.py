@@ -242,13 +242,13 @@ class TestJsonHelpers:
 
     def test_refactored_loader_returns_none_when_absent(self) -> None:
         pm = PersistenceManager(fakeredis.FakeStrictRedis())
-        assert pm.load_baseline("chess", "e2e4") is None
+        assert pm.load_baseline("chess", "move", "e2e4") is None
         assert pm.load_escalation_matrix() is None
 
     def test_refactored_save_load_round_trip(self) -> None:
         pm = PersistenceManager(fakeredis.FakeStrictRedis())
-        pm.save_baseline("chess", "e2e4", {"mean": 1.0, "observation_count": 5})
-        assert pm.load_baseline("chess", "e2e4") == {
+        pm.save_baseline("chess", "move", "e2e4", {"mean": 1.0, "observation_count": 5})
+        assert pm.load_baseline("chess", "move", "e2e4") == {
             "mean": 1.0,
             "observation_count": 5,
         }

@@ -757,6 +757,9 @@ def _build_advice_event(
     return {
         "domain": domain,
         "entity": entity,
+        # Baselines are keyed per measurement series, so a consumer that wants
+        # to look one up needs the event_type too (see persistence.baseline_key).
+        "event_type": primary.get("event_type"),
         "advice": advice_text,
         "value": value,
         "severity": severity,

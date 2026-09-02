@@ -23,6 +23,7 @@ pytestmark = pytest.mark.asyncio
 
 _DOMAIN = "inttest_meas"
 _ENTITY = "probe1"
+_EVENT_TYPE = "sample"
 
 
 async def _inject(nc, value: float) -> None:
@@ -30,7 +31,7 @@ async def _inject(nc, value: float) -> None:
         nc,
         domain=_DOMAIN,
         entity=_ENTITY,
-        event_type="sample",
+        event_type=_EVENT_TYPE,
         value=value,
         unit="units",
         context={},
@@ -40,7 +41,7 @@ async def _inject(nc, value: float) -> None:
 
 @pytest.mark.parametrize("pipeline", [["vigil"]], indirect=True)
 async def test_detector_emits_decision_time_snapshot(pipeline, redis_client, nats_conn):
-    baseline_key = f"augur:vigil:profile:{_DOMAIN}:{_ENTITY}"
+    baseline_key = f"augur:vigil:profile:{_DOMAIN}:{_EVENT_TYPE}:{_ENTITY}"
 
     # 1) Warmup until the baseline appears — RESEND in a loop so a warmup dropped
     #    before the detector subscribed (NATS core, no persistence) is retried.

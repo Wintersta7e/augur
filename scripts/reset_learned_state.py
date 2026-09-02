@@ -34,6 +34,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import redis as redis_lib  # noqa: E402
 
 from tabula.config import AugurConfig  # noqa: E402
+from tabula.persistence import (  # noqa: E402
+    BASELINE_KEY_PREFIX,
+    parse_baseline_key,
+)
 
 # Entities/domains that only ever appear in synthetic injections.
 _SYNTHETIC_ENTITY_SUFFIX = "_a2b60936"
@@ -79,9 +83,8 @@ class Decision:
 
 def _is_synthetic_vigil_entity(key: str) -> bool:
     """True for a vigil profile key whose entity/domain is synthetic-only."""
-    parts = key.split(":")
-    domain = parts[3] if len(parts) > 3 else ""
-    entity = parts[-1]
+    parsed = parse_baseline_key(key)
+    domain, entity = (parsed[0], parsed[2]) if parsed else ("", key.split(":")[-1])
     return entity.endswith(_SYNTHETIC_ENTITY_SUFFIX) or domain in _SYNTHETIC_DOMAINS
 
 
@@ -92,9 +95,13 @@ def classify_key(key: str, get_json: Callable[[str], object]) -> Decision:
     """
     # Real perception baselines are threshold-independent — keep them; only the
     # synthetic entities go.
-    if key.startswith("augur:vigil:profile:"):
+    if key.startswith(BASELINE_KEY_PREFIX):
         if _is_synthetic_vigil_entity(key):
             return Decision(key, "delete", "synthetic baseline entity")
+        if parse_baseline_key(key) is None:
+            # Pre-series key: one EWMA over every event_type of an entity, so
+            # its mean may straddle units. Unrestorable and unattributable.
+            return Decision(key, "delete", "legacy pre-series baseline (mixed units)")
         return Decision(key, "keep", "real perception baseline (threshold-independent)")
 
     # Memoria: NEVER delete a user-taught (semantic) memory. Only reflection-

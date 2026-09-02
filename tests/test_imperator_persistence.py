@@ -27,11 +27,16 @@ def test_self_model_round_trip():
 def test_scan_baseline_maturity_tallies_trained():
     pm = _pm()
     r = pm._r
-    r.set("augur:vigil:profile:typing:alice", json.dumps({"observation_count": 20}))
-    r.set("augur:vigil:profile:typing:bob", json.dumps({"observation_count": 5}))
     r.set(
-        "augur:vigil:profile:activity_focus:ide", json.dumps({"observation_count": 15})
+        "augur:vigil:profile:typing:sample:alice", json.dumps({"observation_count": 20})
     )
+    r.set("augur:vigil:profile:typing:pause:bob", json.dumps({"observation_count": 5}))
+    r.set(
+        "augur:vigil:profile:activity_focus:focus_change:ide",
+        json.dumps({"observation_count": 15}),
+    )
+    # Legacy pre-series key: unattributable to a series, so it must not count.
+    r.set("augur:vigil:profile:typing:legacy", json.dumps({"observation_count": 99}))
     out = pm.scan_baseline_maturity(trained_obs=15)
     assert out["total"] == 3
     assert out["trained"] == 2

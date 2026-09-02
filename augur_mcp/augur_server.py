@@ -59,7 +59,7 @@ COMPONENT_COMMANDS: dict[str, list[str]] = {
 
 # SEC-02: allowlist for domain / entity / stream_id values received through
 # MCP tool arguments. Unsanitized values would land in NATS subjects
-# (f"augur.sensus.{domain}") and Redis keys (f"augur:vigil:profile:{domain}:{entity}"),
+# (f"augur.sensus.{domain}") and Redis keys (persistence.baseline_key),
 # where a ":" or "." or wildcard character can break downstream parsing or
 # reach unintended keyspace. Keep it narrow.
 _SAFE_LABEL_RE = re.compile(r"^[a-z0-9_]{1,64}$")
@@ -532,13 +532,19 @@ async def inject_sequence(
 
 @mcp.tool()
 @_tool_safe
-def get_baseline(domain: str, entity: str) -> dict[str, Any]:
-    """Read the persisted EWMA baseline for a domain/entity pair."""
+def get_baseline(domain: str, event_type: str, entity: str) -> dict[str, Any]:
+    """Read the persisted EWMA baseline for one measurement series.
+
+    A baseline is scoped to (domain, event_type, entity) — one entity can emit
+    several streams on different scales, e.g. typing/sample in ms and
+    typing/pause in seconds.
+    """
+    ident = {"domain": domain, "event_type": event_type, "entity": entity}
     with _persistence_ctx() as pm:
-        baseline = pm.load_baseline(domain, entity)
+        baseline = pm.load_baseline(domain, event_type, entity)
     if baseline is None:
-        return {"error": "not found", "domain": domain, "entity": entity}
-    return {"domain": domain, "entity": entity, "baseline": baseline}
+        return {"error": "not found", **ident}
+    return {**ident, "baseline": baseline}
 
 
 @mcp.tool()

@@ -31,6 +31,38 @@ def _to_epoch(ts: Any) -> float:
         return 0.0
 
 
+BASELINE_KEY_PREFIX = "augur:vigil:profile:"
+
+
+def baseline_key(domain: str, event_type: str, entity: str) -> str:
+    """Redis key for the baseline of ONE measurement series.
+
+    The series — not the entity — is the unit an EWMA is valid over. A sensor
+    may publish several event types for the same entity on different scales
+    (``typing`` publishes ``sample`` in ms and ``pause`` in seconds), and
+    folding them into one baseline makes every scale switch look like a
+    4-sigma anomaly. ``entity`` is the tail so a name containing ':' survives
+    the round trip through :func:`parse_baseline_key`.
+    """
+    return f"{BASELINE_KEY_PREFIX}{domain}:{event_type}:{entity}"
+
+
+def parse_baseline_key(key: str) -> tuple[str, str, str] | None:
+    """Inverse of :func:`baseline_key`; ``None`` for anything else.
+
+    Legacy pre-series keys (``…:{domain}:{entity}``, two segments after the
+    prefix) return ``None`` on purpose: they cannot be attributed to a series
+    and their EWMA may mix units, so they must never be restored or counted.
+    Clear them with ``scripts/reset_learned_state.py``.
+    """
+    if not key.startswith(BASELINE_KEY_PREFIX):
+        return None
+    parts = key[len(BASELINE_KEY_PREFIX) :].split(":", 2)
+    if len(parts) != 3 or not all(parts):
+        return None
+    return parts[0], parts[1], parts[2]
+
+
 HISTORY_MAX = 1000
 PROMPT_HISTORY_MAX = 100
 # Cap on distinct app-descriptor entries in the Redis hash. Bounds memory +
@@ -279,27 +311,34 @@ class PersistenceManager:
     def save_baseline(
         self,
         domain: str,
+        event_type: str,
         entity: str,
         state_dict: dict,
         ctx: LearnContext | None = None,
     ) -> None:
-        key = f"augur:vigil:profile:{domain}:{entity}"
+        key = baseline_key(domain, event_type, entity)
         self._set_json(key, state_dict)
         log.debug("Saved baseline %s", key)
 
-    def load_baseline(self, domain: str, entity: str) -> dict | None:
-        key = f"augur:vigil:profile:{domain}:{entity}"
-        return self._get_json(key)
+    def load_baseline(self, domain: str, event_type: str, entity: str) -> dict | None:
+        return self._get_json(baseline_key(domain, event_type, entity))
 
     def scan_baseline_maturity(self, *, trained_obs: int = 15) -> dict:
         """Tally Vigil baselines by training maturity via SCAN (never KEYS).
 
         Returns {total, trained, untrained, by_domain:{domain:{total,trained}}}.
-        Trained = observation_count >= trained_obs. Key: augur:vigil:profile:{domain}:{entity}.
+        Trained = observation_count >= trained_obs. Legacy pre-series keys are
+        skipped (see :func:`parse_baseline_key`) so a contaminated mixed-unit
+        profile never counts toward coverage.
         """
         total = trained = 0
         by_domain: dict[str, dict[str, int]] = {}
-        for key in self._r.scan_iter(match="augur:vigil:profile:*", count=500):
+        for key in self._r.scan_iter(match=f"{BASELINE_KEY_PREFIX}*", count=500):
+            key_s = key.decode() if isinstance(key, bytes) else key
+            parsed = parse_baseline_key(key_s)
+            if parsed is None:
+                continue
+            domain = parsed[0]
             raw = cast(Any, self._r.get(key))
             if raw is None:
                 continue
@@ -307,9 +346,6 @@ class PersistenceManager:
                 obs = int(json.loads(raw).get("observation_count", 0))
             except (json.JSONDecodeError, TypeError, ValueError):
                 continue
-            key_s = key.decode() if isinstance(key, bytes) else key
-            parts = key_s.split(":")  # augur:vigil:profile:{domain}:{entity}
-            domain = parts[3] if len(parts) >= 5 else "unknown"
             d = by_domain.setdefault(domain, {"total": 0, "trained": 0})
             total += 1
             d["total"] += 1

@@ -7,13 +7,17 @@ and the entire detection layer produces garbage.
 
 from __future__ import annotations
 
+import json
 
+import fakeredis
 import pytest
 
 from tabula.config import AugurConfig
+from tabula.persistence import PersistenceManager, baseline_key, parse_baseline_key
 from vigil.anomaly_detector import (
     EntityBaseline,
     evict_idle_baselines,
+    load_persisted_baselines,
 )
 
 
@@ -232,3 +236,104 @@ class TestIdleEvictConfig:
     def test_negative_rejected(self) -> None:
         with pytest.raises(ValueError, match="baseline_entity_idle_evict_s"):
             AugurConfig(baseline_entity_idle_evict_s=-1.0)
+
+
+class TestSeriesScopedBaselines:
+    """A baseline is valid over ONE measurement series, not one entity.
+
+    The typing sensor publishes two streams for the same ``user`` entity on
+    different scales — ``sample`` in ms (~150-300) and ``pause`` in seconds
+    (~7). Keying baselines on (domain, entity) alone folded both into one EWMA,
+    so every switch between the streams read as a multi-sigma anomaly and the
+    stored mean oscillated between the two scales.
+    """
+
+    def test_key_and_parse_round_trip(self) -> None:
+        key = baseline_key("typing", "sample", "user")
+        assert key == "augur:vigil:profile:typing:sample:user"
+        assert parse_baseline_key(key) == ("typing", "sample", "user")
+
+    def test_entity_containing_a_colon_survives_the_round_trip(self) -> None:
+        key = baseline_key("activity_focus", "focus_change", "host:app")
+        assert parse_baseline_key(key) == ("activity_focus", "focus_change", "host:app")
+
+    def test_legacy_pre_series_key_is_not_parseable(self) -> None:
+        assert parse_baseline_key("augur:vigil:profile:typing:user") is None
+
+    def test_foreign_key_is_not_parseable(self) -> None:
+        assert parse_baseline_key("augur:limen:advice_rate") is None
+
+    def test_two_event_types_on_one_entity_get_separate_baselines(self) -> None:
+        pm = PersistenceManager(fakeredis.FakeStrictRedis())
+        pm.save_baseline("typing", "sample", "user", {"ewma_mean": 170.0}, ctx=None)
+        pm.save_baseline("typing", "pause", "user", {"ewma_mean": 7.0}, ctx=None)
+        assert pm.load_baseline("typing", "sample", "user") == {"ewma_mean": 170.0}
+        assert pm.load_baseline("typing", "pause", "user") == {"ewma_mean": 7.0}
+
+
+class TestUnitGuard:
+    """A series has exactly one unit; a change is a sensor bug, not data."""
+
+    def test_untrained_baseline_accepts_any_unit(self) -> None:
+        assert EntityBaseline().accepts_unit("ms")
+
+    def test_trained_baseline_rejects_a_different_unit(self) -> None:
+        bl = EntityBaseline()
+        bl.unit = "ms"
+        assert bl.accepts_unit("ms")
+        assert not bl.accepts_unit("seconds")
+
+    def test_unit_survives_serialization(self) -> None:
+        bl = EntityBaseline()
+        bl.unit = "seconds"
+        bl.update(7.0, alpha=0.3)
+        assert EntityBaseline.from_state_dict(bl.to_state_dict()).unit == "seconds"
+
+    def test_missing_unit_in_legacy_state_defaults_to_permissive(self) -> None:
+        bl = EntityBaseline.from_state_dict({"ewma_mean": 1.0, "observation_count": 3})
+        assert bl.unit == ""
+        assert bl.accepts_unit("anything")
+
+
+class TestBaselineRestore:
+    """Restart must not silently discard every durable baseline.
+
+    ``load_persisted_baselines`` split the Redis key positionally and read the
+    segments one index short, so ``domain`` came back as the literal string
+    ``"profile"``, every lookup missed, and the detector restarted from zero
+    baselines on every process start — then overwrote each durable profile with
+    a fresh one-observation EWMA.
+    """
+
+    def _redis_with(self, *entries: tuple[str, str, str, dict]):
+        r = fakeredis.FakeStrictRedis()
+        for domain, event_type, entity, state in entries:
+            r.set(baseline_key(domain, event_type, entity), json.dumps(state))
+        return r
+
+    def test_restores_a_persisted_baseline(self) -> None:
+        r = self._redis_with(
+            ("typing", "sample", "user", {"ewma_mean": 170.0, "observation_count": 173})
+        )
+        out = load_persisted_baselines(PersistenceManager(r), r)
+        assert ("typing", "sample", "user") in out
+        assert out[("typing", "sample", "user")].observation_count == 173
+
+    def test_restores_an_entity_whose_name_contains_a_space(self) -> None:
+        r = self._redis_with(
+            (
+                "activity_focus",
+                "focus_change",
+                "text editor",
+                {"ewma_mean": 5.0, "observation_count": 20},
+            )
+        )
+        out = load_persisted_baselines(PersistenceManager(r), r)
+        assert (
+            out[("activity_focus", "focus_change", "text editor")].ewma_mean == 5.0
+        )
+
+    def test_skips_legacy_pre_series_keys(self) -> None:
+        r = fakeredis.FakeStrictRedis()
+        r.set("augur:vigil:profile:typing:user", json.dumps({"observation_count": 999}))
+        assert load_persisted_baselines(PersistenceManager(r), r) == {}

@@ -182,14 +182,15 @@ async def test_activity_focus_event_creates_baseline(pipeline, clean_redis, sess
         await nc.flush()
         assert await _wait_until(
             lambda: (
-                clean_redis.get("augur:vigil:profile:activity_focus:code") is not None
+                clean_redis.get("augur:vigil:profile:activity_focus:focus_change:code")
+                is not None
             ),
             timeout_s=5.0,
         ), "baseline not created within timeout"
     finally:
         await nc.drain()
 
-    raw = clean_redis.get("augur:vigil:profile:activity_focus:code")
+    raw = clean_redis.get("augur:vigil:profile:activity_focus:focus_change:code")
     assert raw is not None, "baseline for (activity_focus, code) was not created"
     bl = json.loads(raw)
     assert "ewma_mean" in bl
@@ -217,7 +218,9 @@ async def test_activity_intensity_event_creates_baseline(
         await nc.flush()
         assert await _wait_until(
             lambda: (
-                clean_redis.get("augur:vigil:profile:activity_intensity:code")
+                clean_redis.get(
+                    "augur:vigil:profile:activity_intensity:intensity_sample:code"
+                )
                 is not None
             ),
             timeout_s=5.0,
@@ -225,7 +228,9 @@ async def test_activity_intensity_event_creates_baseline(
     finally:
         await nc.drain()
 
-    raw = clean_redis.get("augur:vigil:profile:activity_intensity:code")
+    raw = clean_redis.get(
+        "augur:vigil:profile:activity_intensity:intensity_sample:code"
+    )
     assert raw is not None, "baseline for (activity_intensity, code) was not created"
     bl = json.loads(raw)
     assert bl["ewma_mean"] > 0
@@ -275,7 +280,8 @@ async def test_activity_focus_and_typing_correlate_cross_domain(
         await nc.flush()
         assert await _wait_until(
             lambda: (
-                clean_redis.get("augur:vigil:profile:activity_focus:code") is not None
+                clean_redis.get("augur:vigil:profile:activity_focus:focus_change:code")
+                is not None
             ),
             timeout_s=5.0,
         ), "typing baseline not created within timeout"
@@ -360,7 +366,9 @@ async def test_activity_focus_and_intensity_correlate_cross_domain(
         await nc.flush()
         assert await _wait_until(
             lambda: (
-                clean_redis.get("augur:vigil:profile:activity_intensity:code")
+                clean_redis.get(
+                    "augur:vigil:profile:activity_intensity:intensity_sample:code"
+                )
                 is not None
             ),
             timeout_s=5.0,

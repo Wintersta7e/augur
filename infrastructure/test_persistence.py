@@ -40,15 +40,17 @@ def main() -> int:
             failed += 1
 
     print("=== Baseline persistence ===")
-    track("augur:vigil:profile:test:white")
-    track("augur:vigil:profile:test:black")
+    track("augur:vigil:profile:test:move:white")
+    track("augur:vigil:profile:test:move:black")
 
     state = {"ewma_mean": 3.5, "ewma_var": 0.8, "move_count": 12}
-    pm.save_baseline("test", "white", state)
-    loaded = pm.load_baseline("test", "white")
+    pm.save_baseline("test", "move", "white", state)
+    loaded = pm.load_baseline("test", "move", "white")
     check("save/load round-trip", loaded == state, f"got {loaded}")
 
-    check("load missing returns None", pm.load_baseline("test", "black") is None)
+    check(
+        "load missing returns None", pm.load_baseline("test", "move", "black") is None
+    )
 
     print("\n=== Event history ===")
     track("augur:vigil:history:test")

@@ -624,7 +624,13 @@ async def run() -> None:
         # domain-agnostic outcome metric (spec 1A). Prefer the advice payload's
         # values (carried pre-update from the triggering anomaly); fall back to
         # Redis for baseline_mean/std.
-        baseline_raw = pm.load_baseline(primary_domain, entity)
+        # Fallback only — the advice payload normally carries the decision-time
+        # baseline. Needs the event_type because a baseline is per-series; if
+        # the publisher omitted it there is no series to look up.
+        event_type = data.get("event_type")
+        baseline_raw = (
+            pm.load_baseline(primary_domain, event_type, entity) if event_type else None
+        )
         baseline_mean = data.get("baseline_mean")
         if baseline_mean is None:
             baseline_mean = (

@@ -1,8 +1,9 @@
 """Domain-agnostic anomaly detector.
 
 Subscribes to NATS 'augur.sensus.>' (wildcard), parses incoming
-messages as PerceptionEvent, scores each observation using per-(domain,
-entity) EWMA baselines and River HalfSpaceTrees, then publishes anomalies
+messages as PerceptionEvent, scores each observation using per-series
+(domain, event_type, entity) EWMA baselines and River HalfSpaceTrees,
+then publishes anomalies
 to 'augur.vigil.anomaly' and Redis.
 
 Baselines are persisted to Redis and survive restarts. Thresholds are
@@ -31,7 +32,16 @@ from tabula.config import AugurConfig
 from tabula.connections import connect_redis
 from tabula.contracts import PerceptionEvent
 from tabula.heartbeat import start_heartbeat
-from tabula.persistence import PersistenceManager
+from tabula.persistence import (
+    BASELINE_KEY_PREFIX,
+    PersistenceManager,
+    parse_baseline_key,
+)
+
+# A baseline is scoped to one measurement series: (domain, event_type, entity).
+# event_type is part of the identity because one entity can emit several
+# streams on different scales — see tabula.persistence.baseline_key.
+SeriesKey = tuple[str, str, str]
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -60,12 +70,12 @@ DEFAULT_THRESHOLDS = {
 }
 
 # LEAK-10: cap on the in-memory baselines dict. The detector creates one
-# EntityBaseline per unique (domain, entity) pair seen on the wildcard
+# EntityBaseline per unique (domain, event_type, entity) series seen on the wildcard
 # perception subject. Each EntityBaseline owns a River HalfSpaceTrees
 # model with 15 trees and a 50-sample window, so the per-entity memory
 # footprint is non-trivial. Without a cap, arbitrary entity names (e.g.,
 # from inject_sequence or malicious publishers) could balloon the dict.
-# When the cap is reached, new (domain, entity) pairs are logged and
+# When the cap is reached, new series are logged and
 # dropped rather than creating a new baseline.
 MAX_BASELINE_ENTITIES = 10_000
 
@@ -80,11 +90,16 @@ DRIFT_RESTART_STD_CAP_FACTOR = 4.0
 
 @dataclass
 class EntityBaseline:
-    """Tracks EWMA mean/variance and HST model for one (domain, entity)."""
+    """Tracks EWMA mean/variance and HST model for one measurement series."""
 
     ewma_mean: float = 0.0
     ewma_var: float = 0.0
     observation_count: int = 0
+    # Unit this series was trained in, learned from the first event. An event
+    # arriving in a different unit is refused rather than folded in: mixing
+    # scales in one EWMA is what made every `typing` scale switch look like a
+    # 4-sigma anomaly. Empty until the first observation.
+    unit: str = ""
     hst: HalfSpaceTrees = field(
         default_factory=lambda: HalfSpaceTrees(
             n_trees=15,
@@ -148,7 +163,7 @@ class EntityBaseline:
             self._cooldown_left -= 1
         if obs_before < min_obs:
             return  # still warming up
-        # Feed the RAW value. The detector is per-(domain, entity), so there is
+        # Feed the RAW value. The detector is per-series (one unit), so there is
         # no cross-entity scale domination to normalize away — and a z-score
         # self-normalizes as the EWMA tracks the shift, collapsing a sustained
         # level change into a single spike ADWIN can't detect. Raw values let
@@ -188,6 +203,7 @@ class EntityBaseline:
             "ewma_mean": self.ewma_mean,
             "ewma_var": self.ewma_var,
             "observation_count": self.observation_count,
+            "unit": self.unit,
         }
 
     @classmethod
@@ -196,7 +212,15 @@ class EntityBaseline:
         bl.ewma_mean = state.get("ewma_mean", 0.0)
         bl.ewma_var = state.get("ewma_var", 0.0)
         bl.observation_count = state.get("observation_count", 0)
+        bl.unit = str(state.get("unit", "") or "")
         return bl
+
+    def accepts_unit(self, unit: str) -> bool:
+        """True if ``unit`` matches the series this baseline was trained on.
+
+        An untrained baseline (no unit yet) accepts anything and adopts it.
+        """
+        return not self.unit or self.unit == unit
 
 
 def classify_severity(
@@ -283,31 +307,49 @@ def load_domain_thresholds(pm: PersistenceManager, domain: str) -> dict:
 def load_persisted_baselines(
     pm: PersistenceManager,
     r: redis.Redis,
-) -> dict[tuple[str, str], EntityBaseline]:
-    """Scan Redis for existing augur:vigil:profile:* keys and restore baselines."""
-    baselines: dict[tuple[str, str], EntityBaseline] = {}
+) -> dict[SeriesKey, EntityBaseline]:
+    """Scan Redis for existing baseline profiles and restore them.
+
+    Keys are parsed with :func:`parse_baseline_key`, which is the inverse of
+    the writer. A hand-rolled positional split lived here and read the segments
+    one index short — ``domain`` came back as the literal ``"profile"`` — so
+    every lookup missed and the detector silently restarted from zero
+    baselines on every process start, then overwrote each durable profile with
+    a fresh one-observation EWMA. Legacy pre-series keys are skipped.
+    """
+    baselines: dict[SeriesKey, EntityBaseline] = {}
+    legacy = 0
     cursor = 0
     while True:
-        cursor, keys = r.scan(cursor, match="augur:vigil:profile:*", count=100)
+        cursor, keys = r.scan(cursor, match=f"{BASELINE_KEY_PREFIX}*", count=100)
         for key in keys:
             key_str = key.decode() if isinstance(key, bytes) else key
-            parts = key_str.split(":")
-            if len(parts) >= 4:
-                domain = parts[2]
-                entity = parts[3]
-                state = pm.load_baseline(domain, entity)
-                if state is not None:
-                    bl = EntityBaseline.from_state_dict(state)
-                    baselines[(domain, entity)] = bl
-                    log.info(
-                        "Restored baseline (%s, %s): %d observations, mean=%.2f",
-                        domain,
-                        entity,
-                        bl.observation_count,
-                        bl.ewma_mean,
-                    )
+            parsed = parse_baseline_key(key_str)
+            if parsed is None:
+                legacy += 1
+                continue
+            domain, event_type, entity = parsed
+            state = pm.load_baseline(domain, event_type, entity)
+            if state is not None:
+                bl = EntityBaseline.from_state_dict(state)
+                baselines[parsed] = bl
+                log.info(
+                    "Restored baseline (%s, %s, %s): %d observations, mean=%.2f%s",
+                    domain,
+                    event_type,
+                    entity,
+                    bl.observation_count,
+                    bl.ewma_mean,
+                    bl.unit,
+                )
         if cursor == 0:
             break
+    if legacy:
+        log.warning(
+            "Ignored %d legacy pre-series baseline key(s); their EWMA may mix "
+            "units. Clear them with scripts/reset_learned_state.py.",
+            legacy,
+        )
     return baselines
 
 
@@ -317,12 +359,12 @@ def load_persisted_baselines(
 
 
 def evict_idle_baselines(
-    baselines: dict[tuple[str, str], EntityBaseline],
-    last_seen: dict[tuple[str, str], float],
+    baselines: dict[SeriesKey, EntityBaseline],
+    last_seen: dict[SeriesKey, float],
     *,
     now: float,
     idle_ttl_s: float,
-) -> list[tuple[str, str]]:
+) -> list[SeriesKey]:
     """Drop in-memory baselines not seen within ``idle_ttl_s`` seconds.
 
     Each :class:`EntityBaseline` owns a River HalfSpaceTrees model, so an
@@ -380,7 +422,7 @@ async def run() -> None:
     log.info("NATS connected (%s)", config.nats_url)
 
     # Restore persisted baselines
-    baselines: dict[tuple[str, str], EntityBaseline] = load_persisted_baselines(
+    baselines: dict[SeriesKey, EntityBaseline] = load_persisted_baselines(
         pm,
         redis_client,
     )
@@ -392,7 +434,7 @@ async def run() -> None:
     # them a full TTL of grace to receive an event before being reclaimed (the
     # Redis profile survives eviction either way, so a re-sighted entity simply
     # reloads its EWMA and re-warms its HST).
-    last_seen: dict[tuple[str, str], float] = {}
+    last_seen: dict[SeriesKey, float] = {}
     start_mono = time.monotonic()
     for _k in baselines:
         last_seen[_k] = start_mono
@@ -415,8 +457,9 @@ async def run() -> None:
 
         domain = event.domain
         entity = event.entity
+        event_type = event.event_type
         value = event.value
-        key = (domain, entity)
+        key: SeriesKey = (domain, event_type, entity)
         th = get_thresholds(domain)
 
         # Get or create baseline. LEAK-10: refuse new entries once the
@@ -425,15 +468,33 @@ async def run() -> None:
         if key not in baselines:
             if len(baselines) >= MAX_BASELINE_ENTITIES:
                 log.warning(
-                    "Baseline cap reached (%d entities); dropping new %s/%s",
+                    "Baseline cap reached (%d series); dropping new %s/%s/%s",
                     MAX_BASELINE_ENTITIES,
                     domain,
+                    event_type,
                     entity,
                 )
                 return
             baselines[key] = EntityBaseline()
 
         bl = baselines[key]
+
+        # Refuse a unit change within a series rather than folding it in: the
+        # EWMA would then straddle two scales and report the switch itself as
+        # an anomaly. Fail-closed — the baseline stays valid and the sensor bug
+        # is visible instead of silently training on nonsense.
+        if not bl.accepts_unit(event.unit):
+            log.error(
+                "Unit mismatch on %s/%s/%s: baseline trained in %r, event in "
+                "%r — event refused. Fix the sensor or split the event_type.",
+                domain,
+                event_type,
+                entity,
+                bl.unit,
+                event.unit,
+            )
+            return
+        bl.unit = event.unit
         # R4: stamp last-sighting so this (active) entity is never idle-evicted.
         last_seen[key] = time.monotonic()
 
@@ -465,9 +526,11 @@ async def run() -> None:
         # Persist baseline + history under the event's provenance
         learn_ctx = pm.resolve_learn_context(event.session_id)
         try:
-            pm.save_baseline(domain, entity, bl.to_state_dict(), ctx=learn_ctx)
+            pm.save_baseline(
+                domain, event_type, entity, bl.to_state_dict(), ctx=learn_ctx
+            )
         except redis.RedisError as exc:
-            log.error("Failed to persist baseline (%s, %s): %s", domain, entity, exc)
+            log.error("Failed to persist baseline %s: %s", key, exc)
 
         # Persist event to history
         try:

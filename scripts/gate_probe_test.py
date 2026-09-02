@@ -283,7 +283,7 @@ async def main() -> int:
     for attempt in range(3):
         e5, sid5 = f"med{attempt}_{rid}", _synth(f"probe5-{attempt}-{rid}")
         await baseline(e5, sid5, n=30)
-        stats = pm.load_baseline("typing", e5) or {}
+        stats = pm.load_baseline("typing", "pause", e5) or {}
         mean = float(stats.get("ewma_mean", 3.55))
         std = float(stats.get("ewma_var", 0.09)) ** 0.5 or 0.3
         target = mean + 3.0 * std

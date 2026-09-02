@@ -23,29 +23,51 @@ def _no_json(_key: str) -> object:
 
 class TestVigilProfiles:
     def test_real_app_baseline_is_kept(self) -> None:
-        d = classify_key("augur:vigil:profile:activity_focus:some_app", _no_json)
+        d = classify_key(
+            "augur:vigil:profile:activity_focus:focus_change:some_app", _no_json
+        )
         assert d.action == "keep"
 
     def test_real_typing_baseline_is_kept(self) -> None:
         assert (
-            classify_key("augur:vigil:profile:typing:user", _no_json).action == "keep"
+            classify_key("augur:vigil:profile:typing:sample:user", _no_json).action
+            == "keep"
         )
+
+    def test_entity_containing_a_colon_is_kept(self) -> None:
+        """The entity is the key's tail, so a ':' in an app name survives."""
+        assert (
+            classify_key(
+                "augur:vigil:profile:activity_focus:focus_change:host:app", _no_json
+            ).action
+            == "keep"
+        )
+
+    def test_legacy_pre_series_baseline_is_deleted(self) -> None:
+        """One EWMA over every event_type of an entity may straddle units."""
+        d = classify_key("augur:vigil:profile:typing:user", _no_json)
+        assert d.action == "delete"
+        assert "legacy" in d.reason
 
     def test_synthetic_suffix_entity_is_deleted(self) -> None:
         assert (
-            classify_key("augur:vigil:profile:typing:user_a2b60936", _no_json).action
+            classify_key(
+                "augur:vigil:profile:typing:pause:user_a2b60936", _no_json
+            ).action
             == "delete"
         )
         assert (
             classify_key(
-                "augur:vigil:profile:activity_focus:code_a2b60936", _no_json
+                "augur:vigil:profile:activity_focus:focus_change:code_a2b60936",
+                _no_json,
             ).action
             == "delete"
         )
 
     def test_chess_domain_entity_is_deleted(self) -> None:
         assert (
-            classify_key("augur:vigil:profile:chess:white", _no_json).action == "delete"
+            classify_key("augur:vigil:profile:chess:move:white", _no_json).action
+            == "delete"
         )
 
 

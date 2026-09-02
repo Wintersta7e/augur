@@ -21,7 +21,6 @@ from pathlib import Path
 
 import keyboard
 import nats
-import redis
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tabula.config import AugurConfig
@@ -48,6 +47,11 @@ NATS_SUBJECT = "augur.sensus.typing"
 DOMAIN = "typing"
 STREAM_ID = "typing_rhythm"
 ENTITY = "user"
+# Two series on ONE entity, deliberately on different scales. They must stay
+# distinct event types: Vigil keys a baseline per (domain, event_type, entity)
+# and refuses a unit change within a series.
+EVENT_TYPE_SAMPLE = "sample"  # mean inter-keypress interval, ms
+EVENT_TYPE_PAUSE = "pause"  # gap between keypresses, seconds
 
 PAUSE_THRESHOLD_S = 3.0  # gap > 3s = pause event
 ROLLING_WINDOW_S = 5.0  # window for rolling speed
@@ -160,11 +164,18 @@ async def run() -> None:
     redis_client = connect_redis(config)
     pm = PersistenceManager(redis_client)
 
-    # Load existing baseline
-    existing = pm.load_baseline(DOMAIN, ENTITY)
+    # Informational only. Baselines are Vigil's state — this sensor publishes
+    # perception events and never writes them. It used to save its own
+    # `avg_interval_ms` over the same key Vigil owns, with keypress_count as
+    # observation_count and no ewma_var at all, so whichever writer landed last
+    # won and a sensor write could zero the variance of a trained baseline.
+    existing = pm.load_baseline(DOMAIN, EVENT_TYPE_SAMPLE, ENTITY)
     if existing:
         log.info(
-            "Restored baseline: %d observations, mean=%.2fms",
+            "Vigil baseline for %s/%s/%s: %d observations, mean=%.2fms",
+            DOMAIN,
+            EVENT_TYPE_SAMPLE,
+            ENTITY,
             existing.get("observation_count", 0),
             existing.get("ewma_mean", 0),
         )
@@ -254,7 +265,7 @@ async def run() -> None:
                     domain=DOMAIN,
                     stream_id=STREAM_ID,
                     entity=ENTITY,
-                    event_type="pause",
+                    event_type=EVENT_TYPE_PAUSE,
                     value=result["value"],
                     unit="seconds",
                     context={
@@ -279,7 +290,7 @@ async def run() -> None:
                     domain=DOMAIN,
                     stream_id=STREAM_ID,
                     entity=ENTITY,
-                    event_type="sample",
+                    event_type=EVENT_TYPE_SAMPLE,
                     value=result["value"],
                     unit="ms",
                     context={
@@ -307,23 +318,6 @@ async def run() -> None:
                 log.debug("Published to %s", NATS_SUBJECT)
             except Exception as exc:
                 log.error("NATS publish failed: %s", exc)
-
-            # Persist baseline update (use avg interval as the tracked value
-            # for samples, and pause duration for pauses)
-            try:
-                # Save a lightweight baseline state
-                baseline_state = {
-                    "ewma_mean": tracker.avg_interval_ms(),
-                    "observation_count": tracker.keypress_count,
-                }
-                pm.save_baseline(
-                    DOMAIN,
-                    ENTITY,
-                    baseline_state,
-                    ctx=pm.resolve_learn_context(event.session_id),
-                )
-            except redis.RedisError as exc:
-                log.error("Failed to persist baseline: %s", exc)
 
     except (asyncio.CancelledError, KeyboardInterrupt):
         pass

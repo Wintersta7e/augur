@@ -60,9 +60,9 @@ REDIS_KEY_ANOMALY = "augur:vigil:last_anomaly"
 # Default thresholds (overridden per-domain via PersistenceManager)
 DEFAULT_THRESHOLDS = {
     "min_observations": 15,
-    "ewma_alpha": 0.3,
-    "sigma_threshold": 2.0,
-    "severity_medium_sigma": 2.5,
+    "ewma_alpha": 0.1,
+    "sigma_threshold": 2.2,
+    "severity_medium_sigma": 3.0,
     "severity_high_sigma": 4.0,
 }
 

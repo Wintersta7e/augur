@@ -48,10 +48,18 @@ class AugurConfig:
     ollama_classifier_timeout: int = 15
 
     # ── Detection ──────────────────────────────────────────────────────────
-    default_sigma_threshold: float = 2.0
-    ewma_alpha: float = 0.3
+    # Thresholds derived from the MEASURED null, not the Gaussian one. The
+    # EWMA variance at alpha has effective sample size (2-alpha)/alpha, so
+    # |value-mean|/sigma is t-like, not z-like, and the nominal Gaussian tail
+    # probabilities do not apply. At alpha=0.3 (effective n=5.7) a "2.0 sigma"
+    # threshold fired on 14.2% of stationary normal input and "4.0 sigma" on
+    # 1.13% — 190x its nominal rate, on the severity that bypasses correlation
+    # and is exempt at the gate. At alpha=0.1 (effective n=19) the measured
+    # tails are 5% at 2.20, 1% at 2.99 and 0.1% at 4.02.
+    default_sigma_threshold: float = 2.2
+    ewma_alpha: float = 0.1
     min_observations: int = 15
-    severity_medium_sigma: float = 2.5
+    severity_medium_sigma: float = 3.0
     severity_high_sigma: float = 4.0
     # Idle reclamation for per-entity in-memory baselines (each owns a River
     # HST model). Evict a (domain, entity) model not seen for this many seconds

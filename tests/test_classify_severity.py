@@ -7,7 +7,13 @@ If this function misclassifies severity, either the LLM fires on noise
 from __future__ import annotations
 
 
-from vigil.anomaly_detector import classify_severity, DEFAULT_THRESHOLDS
+import random
+
+from vigil.anomaly_detector import (
+    DEFAULT_THRESHOLDS,
+    EntityBaseline,
+    classify_severity,
+)
 
 # Use the actual project defaults for boundary tests
 MEDIUM = DEFAULT_THRESHOLDS["severity_medium_sigma"]  # 2.5
@@ -63,3 +69,56 @@ class TestEdgeCases:
     def test_negative_deviation_treated_as_low(self) -> None:
         # Shouldn't happen (abs value), but classify_severity should not crash
         assert classify_severity(-5.0, MEDIUM, HIGH) == "low"
+
+
+class TestThresholdsMatchTheMeasuredNull:
+    """The sigma thresholds are calibrated against the ESTIMATOR, not a z-table.
+
+    `ewma_var` at `alpha` has effective sample size (2-alpha)/alpha, so
+    `|value - mean| / sigma` is t-like and the Gaussian tail probabilities do
+    not apply. At the previous alpha=0.3 (effective n=5.7) the nominal "2.0
+    sigma" threshold fired on 14% of stationary normal input and "4.0 sigma" on
+    1.1% — 190x its nominal rate, on the severity that bypasses correlation
+    entirely and is exempt at the gate.
+
+    This is the guard against changing `ewma_alpha` without re-deriving the
+    thresholds: it fails if the realized tail rates drift from the design
+    intent (~5% fire, ~1% medium, ~0.1% high).
+    """
+
+    @staticmethod
+    def _null_rates(alpha: float, trials: int = 700, n: int = 120, burn: int = 40):
+        rng = random.Random(23)
+        devs = []
+        for _ in range(trials):
+            bl = EntityBaseline()
+            for i in range(n):
+                v = rng.gauss(100.0, 10.0)
+                if i >= burn:
+                    devs.append(bl.score(v))
+                bl.update(v, alpha)
+        total = len(devs)
+        return {
+            "fire": sum(d >= DEFAULT_THRESHOLDS["sigma_threshold"] for d in devs)
+            / total,
+            "medium": sum(
+                d >= DEFAULT_THRESHOLDS["severity_medium_sigma"] for d in devs
+            )
+            / total,
+            "high": sum(d >= DEFAULT_THRESHOLDS["severity_high_sigma"] for d in devs)
+            / total,
+        }
+
+    def test_realized_tail_rates_match_the_design_intent(self) -> None:
+        r = self._null_rates(DEFAULT_THRESHOLDS["ewma_alpha"])
+        assert 0.035 <= r["fire"] <= 0.075, f"fire rate {r['fire']:.4f} off target ~5%"
+        assert 0.005 <= r["medium"] <= 0.020, (
+            f"medium rate {r['medium']:.4f} off target ~1%"
+        )
+        assert r["high"] <= 0.004, f"high rate {r['high']:.4f} off target ~0.1%"
+
+    def test_the_old_alpha_would_now_fail_this_gate(self) -> None:
+        """Pins that the check has teeth: alpha=0.3 blows every band."""
+        r = self._null_rates(0.3)
+        assert r["fire"] > 0.075
+        assert r["high"] > 0.004

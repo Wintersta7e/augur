@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 from unittest.mock import MagicMock
 
+import math
+
 import pytest
 
 
@@ -308,9 +310,10 @@ def test_intensity_event_built_for_full_window():
     assert ev.stream_id == "activity_intensity"
     assert ev.entity == "code"
     assert ev.event_type == "intensity_sample"
-    assert ev.unit == "ipm"
-    # 40 events over 10s = 240 ipm
-    assert ev.value == pytest.approx(240.0, rel=1e-6)
+    assert ev.unit == "log1p_ipm"
+    # 40 events over 10s = 240 ipm, published log-compressed because the raw
+    # rate is strongly right-skewed and the detector's test is symmetric.
+    assert ev.value == pytest.approx(math.log1p(240.0), rel=1e-6)
     ctx = ev.context
     assert ctx["focused_app"] == "code"
     assert ctx["title"] == "main.py"
@@ -320,6 +323,8 @@ def test_intensity_event_built_for_full_window():
     assert ctx["idle_seconds"] == pytest.approx(0.5, rel=1e-6)
     assert ctx["source_id"] == "test-host"
     assert ctx["span_id"] == "span-1"
+    # The raw rate stays available for anything wanting a human number.
+    assert ctx["ipm"] == pytest.approx(240.0, rel=1e-6)
     assert ev.session_id == "sess-1"
     assert ev.timestamp
 

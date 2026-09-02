@@ -42,8 +42,10 @@ class TestDefaults:
         assert cfg.ollama_timeout == 120
 
     def test_default_sigma_threshold(self) -> None:
+        # Derived from the measured null at ewma_alpha=0.1 (5% tail), not from
+        # the Gaussian table — see the comment on the field.
         cfg = AugurConfig()
-        assert cfg.default_sigma_threshold == 2.0
+        assert cfg.default_sigma_threshold == 2.2
 
     def test_ollama_model_default(self) -> None:
         cfg = AugurConfig()
@@ -125,7 +127,7 @@ class TestAsDict:
         assert d["redis_url"] == "redis://127.0.0.1:6379"
         assert d["ollama_url"] == "http://host.docker.internal:11434"
         assert d["ollama_timeout"] == 120
-        assert d["default_sigma_threshold"] == 2.0
+        assert d["default_sigma_threshold"] == 2.2
         assert d["ollama_model"] == "qwen2.5:32b"
 
 

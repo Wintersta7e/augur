@@ -297,6 +297,10 @@ class _IntensityWindow:
             "window_duration_s": window_duration,
             "source_id": self.source_id,
             "span_id": self.span_id,
+            # Raw rate, for anything that wants a human-readable number. The
+            # published value is log-compressed (see below), so read this
+            # rather than back-transforming.
+            "ipm": round(ipm, 3),
         }
 
         if focused_identity:
@@ -307,8 +311,15 @@ class _IntensityWindow:
             stream_id="activity_intensity",
             entity=focused_app,
             event_type="intensity_sample",
-            value=ipm,
-            unit="ipm",
+            # Input rate is strongly right-skewed (measured coefficient of
+            # variation 0.68-1.07 across real apps), and the detector's test is
+            # a symmetric |value - mean| / sigma. On the raw rate that put the
+            # HIGH-severity rate near 2% against a 0.1% design target, and HIGH
+            # is the severity that skips correlation entirely and is exempt at
+            # the gate. Compressing the tail brings it to ~0.12%. Matches the
+            # activity_focus stream, which is already log1p_seconds.
+            value=math.log1p(ipm),
+            unit="log1p_ipm",
             context=ctx,
             timestamp=datetime.now(timezone.utc).isoformat(),
             session_id=self.session_id,

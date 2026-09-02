@@ -317,10 +317,12 @@ class TestBehavioralAudit:
 
 
 class TestAdviceRateTuning:
-    def test_tunes_rate_ewma_field_the_online_gate_reads(self) -> None:
-        # The online refractory-pressure arm reads `rate_ewma` (advisor_gate.py),
-        # so the offline pass MUST tune that exact field — not a dead
-        # `operating_point` field nothing reads.
+    def test_tunes_dismissal_ewma_not_the_online_volume_field(self) -> None:
+        # The offline pass measures how often advice was REJECTED. That is a
+        # different quantity from the online gate's delivery-VOLUME impulse
+        # EWMA (`rate_ewma`, limen/gate.py), and they must not share a field:
+        # when they did, a system that had merely delivered a lot of advice
+        # reported itself as one whose advice was dismissed.
         pm = _pm()
         events = [
             _advice(explicit="n", behavioral=0.1),
@@ -332,21 +334,32 @@ class TestAdviceRateTuning:
         result = analyze_gate("sess-1", pm, CONFIG)
 
         record = pm.load_advice_rate()
-        # The online gate reads exactly this field.
-        assert "rate_ewma" in record
-        assert isinstance(record["rate_ewma"], float)
+        assert record["dismissal_ewma"] == pytest.approx(0.5)
         # The dead field must NOT be injected.
         assert "operating_point" not in record
         # The report mirrors the persisted record (same field).
-        assert "rate_ewma" in result["advice_rate"]
+        assert "dismissal_ewma" in result["advice_rate"]
         assert "operating_point" not in result["advice_rate"]
 
-    def test_reconciles_with_existing_online_rate_ewma(self) -> None:
-        # When the online writer has already stored a `rate_ewma`, the offline
-        # EWMA must blend from THAT value (numeric last_ts preserved as a float),
-        # not fall back to the observed rate as if no prior existed.
+    def test_offline_pass_never_touches_the_online_volume_field(self) -> None:
+        # Regression pin for the field collision: reflection must leave
+        # `rate_ewma` exactly as the online writer left it.
         pm = _pm()
-        pm.save_advice_rate({"rate_ewma": 0.2, "last_ts": 1000.0})
+        pm.save_advice_rate({"rate_ewma": 0.77, "last_ts": 1000.0})
+        events = [_advice(explicit="n", behavioral=0.1) for _ in range(4)]
+        pm.save_feedback("sess-1", _feedback("sess-1", advice_events=events))
+        analyze_gate("sess-1", pm, CONFIG)
+
+        record = pm.load_advice_rate()
+        assert record["rate_ewma"] == pytest.approx(0.77)
+        assert record["dismissal_ewma"] == pytest.approx(1.0)
+
+    def test_reconciles_with_existing_dismissal_ewma(self) -> None:
+        # When a prior dismissal rate exists, the offline EWMA must blend from
+        # THAT value (numeric last_ts preserved as a float), not fall back to
+        # the observed rate as if no prior existed.
+        pm = _pm()
+        pm.save_advice_rate({"dismissal_ewma": 0.2, "last_ts": 1000.0})
         # 100% dismissal → observed_rate 1.0; EWMA nudges 0.2 toward 1.0.
         events = [_advice(explicit="n", behavioral=0.1) for _ in range(4)]
         pm.save_feedback("sess-1", _feedback("sess-1", advice_events=events))
@@ -354,7 +367,7 @@ class TestAdviceRateTuning:
 
         record = pm.load_advice_rate()
         # EWMA(0.2, observed=1.0, alpha=0.1) = 0.2 + 0.1*(1.0-0.2) = 0.28.
-        assert record["rate_ewma"] == pytest.approx(0.28)
+        assert record["dismissal_ewma"] == pytest.approx(0.28)
         # last_ts must stay a float (the online writer overwrites it numerically);
         # the offline pass must never clobber it with a session-id string.
         assert isinstance(record["last_ts"], float)

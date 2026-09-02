@@ -219,6 +219,11 @@ def _credibility_class(sig: Signature) -> str:
     return f"{sig.domain}:{sig.severity}"
 
 
+# Top of the severity_score scale (``high``). Arms that compare severity against
+# a [0, 1] quantity must normalize by this rather than against the raw score.
+SEVERITY_SCORE_MAX = 2.0
+
+
 def build_signature(payload: dict[str, Any]) -> Signature:
     """Build the deterministic gate :class:`Signature` for an anomaly payload.
 
@@ -230,7 +235,7 @@ def build_signature(payload: dict[str, Any]) -> Signature:
     A single event with a missing/``"?"``/empty entity is ``ungateable``.
     """
     severity = _norm(payload.get("combined_severity"))
-    severity_score = 2.0 if severity == "high" else 1.0
+    severity_score = SEVERITY_SCORE_MAX if severity == "high" else 1.0
     correlation_found = bool(payload.get("correlation_found"))
     exempt = correlation_found and severity == "high"
 
@@ -616,7 +621,7 @@ class Gate:
            ``severity_score`` is below the bar →
            ``SUPPRESS("relative_refractory_raised_bar", {bar, elapsed_s})``.
         3. **Pressure** — ``min(advice_rate, PRESSURE_CAP) * PRESSURE_WEIGHT >
-           severity_score`` →
+           severity_score / SEVERITY_SCORE_MAX`` (both sides in [0, 1]) →
            ``SUPPRESS("active_resolution_recent_advice_pressure", {advice_rate})``.
         4. **Duplicate** — a per-``state_key`` real emission within
            ``RELATIVE_REFRACTORY_S`` →
@@ -655,9 +660,16 @@ class Gate:
                     )
 
         # ── Pressure: active-resolution back-pressure from the advice-rate EWMA ─
+        # Both sides are normalized to [0, 1]. `rate_ewma` is a unit-impulse
+        # series so it never reaches 1.0, while `severity_score` is 1.0/2.0 —
+        # comparing them raw made this sub-check unsatisfiable, so a designed
+        # arm silently never fired. Normalizing severity by its own maximum
+        # keeps HIGH out of reach of pressure (it would need rate >= 1.0) while
+        # letting sustained delivery volume hold MEDIUM back.
         rate = float((state.get("advice_rate") or {}).get("rate_ewma", 0.0) or 0.0)
         effective_rate = min(rate, config.gate_pressure_cap)
-        if effective_rate * config.gate_pressure_weight > sig.severity_score:
+        severity_norm = sig.severity_score / SEVERITY_SCORE_MAX
+        if effective_rate * config.gate_pressure_weight > severity_norm:
             return GateDecision.suppress(
                 "active_resolution_recent_advice_pressure",
                 deciding_arm="refractory_burden",
@@ -1431,15 +1443,30 @@ class Gate:
     def _advance_advice_rate(self, pm: Any, now: float, *, ctx=None) -> None:
         """Advance the global advice-rate EWMA after a non-probe delivery.
 
-        Each delivery is a unit impulse EWMA'd with ``gate_pressure_alpha`` — the
+        Each delivery is a unit impulse EWMA'd with ``gate_pressure_alpha``; the
         refractory arm's pressure sub-reason reads ``rate_ewma`` as recent
         advice volume.
+
+        The previous value is first decayed by the time elapsed since the last
+        delivery. Without that decay the series is advanced *only* on delivery,
+        so it is a monotonic saturating counter rather than a rate: it climbs
+        toward 1.0 and never returns, and a system that has delivered enough
+        advice reports maximum "recent volume" forever, including after weeks
+        of silence.
+
+        ``rate_ewma`` is owned exclusively by this writer. The offline dismissal
+        rate lives in ``dismissal_ewma`` on the same record — the two are
+        different quantities and sharing one field made a busy system look like
+        a dismissed one.
         """
         rate = pm.load_advice_rate() or {}
         prev = float(rate.get("rate_ewma", 0.0) or 0.0)
+        last_ts = float(rate.get("last_ts", 0.0) or 0.0)
+        if last_ts > 0.0 and now > last_ts:
+            prev *= math.exp(-(now - last_ts) / self._config.gate_pressure_leak_tau_s)
         alpha = self._config.gate_pressure_alpha
         new_rate = alpha * 1.0 + (1.0 - alpha) * prev
-        pm.save_advice_rate({"rate_ewma": new_rate, "last_ts": now}, ctx=ctx)
+        pm.save_advice_rate({**rate, "rate_ewma": new_rate, "last_ts": now}, ctx=ctx)
 
     def _reset_channel_stats(
         self, signature: Signature, pm: Any, now: float, *, ctx=None

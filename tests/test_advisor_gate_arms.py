@@ -102,22 +102,52 @@ def test_refractory_relative_does_not_suppress_high(fake_pm, cfg):
 
 
 def test_refractory_pressure_suppresses_on_high_advice_rate(fake_pm, cfg):
-    """Pressure: advice_rate * PRESSURE_WEIGHT > severity_score suppresses."""
+    """Pressure: advice_rate * WEIGHT > severity_score / MAX suppresses.
+
+    Both sides are normalized to [0, 1]. Medium normalizes to 0.5, so a
+    sustained delivery rate of 0.8 holds it back.
+    """
     # No recent global emission (so absolute/relative pass), but advice-rate EWMA
-    # is high: rate 1.5 * weight 1.0 = 1.5 > medium severity_score 1.0.
-    fake_pm.save_advice_rate({"rate_ewma": 1.5, "last_ts": 10.0})
+    # is high: 0.8 * weight 1.0 = 0.8 > medium 1.0/2.0 = 0.5.
+    fake_pm.save_advice_rate({"rate_ewma": 0.8, "last_ts": 10.0})
     g = Gate()
     d = g.evaluate(build_signature(SINGLE_MEDIUM_TYPING), fake_pm, cfg, now=10_000.0)
     assert d.action == "suppress"
     assert d.reason == "active_resolution_recent_advice_pressure"
     assert d.deciding_arm == "refractory_burden"
-    assert d.metrics["advice_rate"] == 1.5
+    assert d.metrics["advice_rate"] == 0.8
+
+
+def test_refractory_pressure_is_reachable_from_a_real_advice_rate(fake_pm, cfg):
+    """The arm must fire on a rate the ONLINE writer can actually produce.
+
+    Regression pin. `rate_ewma` is a unit-impulse EWMA bounded by 1.0, but the
+    arm used to compare it against the raw severity_score (1.0 for medium), so
+    the sub-check was unsatisfiable and never fired in production. The old
+    tests hid that by feeding 1.5 and 100 — values no writer can emit.
+    """
+    g = Gate()
+    # Drive the real writer to saturation, then read what it actually stored.
+    for i in range(200):
+        g._advance_advice_rate(fake_pm, now=10.0 + i)
+    rate = fake_pm.load_advice_rate()["rate_ewma"]
+    assert rate < 1.0, "the impulse EWMA must stay bounded by 1.0"
+    d = g.evaluate(build_signature(SINGLE_MEDIUM_TYPING), fake_pm, cfg, now=10_300.0)
+    assert d.reason == "active_resolution_recent_advice_pressure"
+
+
+def test_refractory_pressure_never_suppresses_high(fake_pm, cfg):
+    """HIGH normalizes to 1.0, which a bounded rate can never exceed."""
+    fake_pm.save_advice_rate({"rate_ewma": 0.999999, "last_ts": 10.0})
+    g = Gate()
+    d = g.evaluate(build_signature(SINGLE_HIGH_TYPING), fake_pm, cfg, now=10_000.0)
+    assert d.reason != "active_resolution_recent_advice_pressure"
 
 
 def test_refractory_pressure_capped(fake_pm, cfg):
-    """Pressure compares against PRESSURE_CAP-clamped advice_rate."""
-    # rate 100 clamps to PRESSURE_CAP=3.0; 3.0 * 1.0 = 3.0 > medium 1.0 → suppress,
-    # but the reported advice_rate is the capped value.
+    """Pressure compares against the PRESSURE_CAP-clamped advice_rate."""
+    # A corrupt/out-of-range rate clamps to PRESSURE_CAP=1.0; 1.0 > medium 0.5
+    # → suppress, but the reported advice_rate is the capped value.
     fake_pm.save_advice_rate({"rate_ewma": 100.0, "last_ts": 10.0})
     g = Gate()
     d = g.evaluate(build_signature(SINGLE_MEDIUM_TYPING), fake_pm, cfg, now=10_000.0)
@@ -128,12 +158,31 @@ def test_refractory_pressure_capped(fake_pm, cfg):
 
 def test_refractory_pressure_passes_below_threshold(fake_pm, cfg):
     """Low advice-rate does not trip pressure."""
-    fake_pm.save_advice_rate({"rate_ewma": 0.5, "last_ts": 10.0})
+    fake_pm.save_advice_rate({"rate_ewma": 0.4, "last_ts": 10.0})
     g = Gate()
-    # 0.5 * 1.0 = 0.5 < medium 1.0 → pressure passes (refractory does not decide;
+    # 0.4 * 1.0 = 0.4 < medium 0.5 → pressure passes (refractory does not decide;
     # a fresh single+medium is held downstream by the reservoir arm).
     d = g.evaluate(build_signature(SINGLE_MEDIUM_TYPING), fake_pm, cfg, now=10_000.0)
     assert d.deciding_arm != "refractory_burden"
+
+
+def test_advice_rate_decays_between_deliveries(fake_pm, cfg):
+    """`rate_ewma` is a rate, not a counter: silence must bring it back down.
+
+    Regression pin. The writer only ever advanced on delivery, so the series
+    climbed toward 1.0 and never returned — a system idle for weeks still
+    reported maximum recent advice volume.
+    """
+    g = Gate()
+    for i in range(200):
+        g._advance_advice_rate(fake_pm, now=10.0 + i)
+    saturated = fake_pm.load_advice_rate()["rate_ewma"]
+    # One delivery after a long silence: the prior value decays first.
+    g._advance_advice_rate(fake_pm, now=10.0 + 199 + 100 * cfg.gate_pressure_leak_tau_s)
+    assert fake_pm.load_advice_rate()["rate_ewma"] < saturated
+    assert fake_pm.load_advice_rate()["rate_ewma"] == pytest.approx(
+        cfg.gate_pressure_alpha, abs=1e-6
+    )
 
 
 def test_refractory_duplicate_suppresses_recent_same_state_key(fake_pm, cfg):

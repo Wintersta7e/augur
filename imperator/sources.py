@@ -265,8 +265,15 @@ def gather(pm, stream_state: dict, now: float, cfg) -> dict:
     )
     health = pm.load_health_snapshot()
     last_advice = pm.load_last_advice()
+    # `dismissal_ewma` (offline, from explicit "n" ratings) — NOT `rate_ewma`,
+    # which is the gate's online delivery-VOLUME impulse EWMA on the same
+    # record. Reading that one made competence fall as Augur spoke more:
+    # a busy system reported itself as a rejected one. None until a reflection
+    # pass has seen rated feedback, which is correct — there is no evidence yet.
     advice_rate = pm.load_advice_rate() if hasattr(pm, "load_advice_rate") else None
-    dismissal = advice_rate.get("rate_ewma") if isinstance(advice_rate, dict) else None
+    dismissal = (
+        advice_rate.get("dismissal_ewma") if isinstance(advice_rate, dict) else None
+    )
 
     intens_hist = pm.get_history("activity_intensity", limit=1)
 

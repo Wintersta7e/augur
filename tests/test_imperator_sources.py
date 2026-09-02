@@ -190,7 +190,9 @@ def test_gather_uses_history_and_no_data_utility(monkeypatch):
         lambda trained_obs: {"total": 0, "trained": 0, "untrained": 0, "by_domain": {}},
     )
     monkeypatch.setattr(sources, "_build_blind_spots", lambda _pm, b, cfg: [])
-    monkeypatch.setattr(pm, "load_advice_rate", lambda: {"rate_ewma": 0.4})
+    monkeypatch.setattr(
+        pm, "load_advice_rate", lambda: {"rate_ewma": 0.9, "dismissal_ewma": 0.4}
+    )
     monkeypatch.setattr(
         pm,
         "get_history",
@@ -208,6 +210,8 @@ def test_gather_uses_history_and_no_data_utility(monkeypatch):
     assert out["activity"] == "ide"
     assert out["intensity_ewma"] == 88.0
     assert out["utility_no_data"] is True
+    # Must read `dismissal_ewma`, never the co-located online delivery-volume
+    # `rate_ewma` — reading that made competence fall as Augur spoke more.
     assert out["dismissal_rate"] == 0.4
     assert out["recent_self_tuning"] == {
         "sigma_adjusted": True,

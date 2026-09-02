@@ -127,7 +127,14 @@ class AugurConfig:
     gate_reservoir_leak_tau_s: int = 120
     gate_pressure_alpha: float = 0.2
     gate_pressure_weight: float = 1.0
-    gate_pressure_cap: float = 3.0
+    # The advice-rate EWMA is a unit-impulse-per-delivery series, so it lives in
+    # [0, 1); the cap is a clamp on that range, not a >1 headroom. Set
+    # gate_pressure_weight to 0.0 to disable the pressure sub-check entirely.
+    gate_pressure_cap: float = 1.0
+    # Time constant for decaying the advice-rate EWMA between deliveries. Without
+    # it the series only ever advances toward 1.0 and never returns, so "recent
+    # advice volume" saturates permanently after enough deliveries.
+    gate_pressure_leak_tau_s: float = 600.0
     gate_credibility_alpha: float = 0.1
     gate_credibility_decay_alpha: float = 0.02
     gate_cred_mid: float = 0.5
@@ -305,6 +312,16 @@ class AugurConfig:
             )
         if not self.activity_source_id.strip():
             raise ValueError("activity_source_id must be a non-empty string")
+        if not (0.0 < self.gate_pressure_cap <= 1.0):
+            raise ValueError(
+                f"gate_pressure_cap={self.gate_pressure_cap} outside (0, 1] — the "
+                "advice-rate EWMA is a unit-impulse series bounded by 1"
+            )
+        if not (1.0 <= self.gate_pressure_leak_tau_s <= 86400.0):
+            raise ValueError(
+                f"gate_pressure_leak_tau_s={self.gate_pressure_leak_tau_s} "
+                "outside [1, 86400]"
+            )
         if not (0 <= self.gate_behavioral_weight <= self.gate_explicit_weight):
             raise ValueError(
                 f"gate_behavioral_weight={self.gate_behavioral_weight} must be in "

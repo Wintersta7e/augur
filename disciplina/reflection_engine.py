@@ -1185,14 +1185,15 @@ def analyze_gate(
         new_cred = round(prev + alpha * (observed - prev), 4)
         credibility[cls] = {"cred": new_cred, "n": n, "last_fb_ts": now_ts}
 
-    # ── Advice-rate operating point: EWMA of the delivered-advice burden ─────
-    # Derive the dismissal rate over delivered advice; nudge the stored
-    # `rate_ewma` toward it so a high dismissal burden tightens the gate.  This
-    # MUST tune `rate_ewma` — the exact field the online refractory-pressure arm
-    # consumes (advisor_gate.py) and the documented schema for this key (§6) —
-    # so the offline tuning reconciles with the online EWMA instead of injecting
-    # a field nothing reads.  `last_ts` is owned by the online writer (a float
-    # timestamp); the offline pass leaves it untouched rather than clobbering it.
+    # ── Dismissal rate: EWMA of how often delivered advice is rated "n" ──────
+    # This writes `dismissal_ewma`, NOT `rate_ewma`. The two are different
+    # quantities that shared one field: `rate_ewma` is the online gate's
+    # unit-impulse EWMA of delivery *volume* (limen/gate.py), while this is the
+    # fraction of delivered advice the user *rejected*. Reconciling them onto
+    # one field meant whichever writer ran last defined the meaning — and since
+    # reflection only runs after feedback, a system that had simply delivered a
+    # lot read as a system that was being dismissed. `last_ts` is owned by the
+    # online writer; the offline pass leaves it untouched.
     advice_rate_update: dict | None = None
     genuine_delivered = [
         r for r in advice_rows if r.get("explicit_rating") in ("y", "n")
@@ -1201,11 +1202,11 @@ def analyze_gate(
         dismissed = sum(1 for r in genuine_delivered if r["explicit_rating"] == "n")
         observed_rate = dismissed / len(genuine_delivered)
         prev_state = pm.load_advice_rate() or {}
-        prev_rate = float(prev_state.get("rate_ewma", observed_rate))
+        prev_rate = float(prev_state.get("dismissal_ewma", observed_rate))
         new_rate = round(
             prev_rate + GATE_ADVICE_RATE_ALPHA * (observed_rate - prev_rate), 4
         )
-        advice_rate_update = {**prev_state, "rate_ewma": new_rate}
+        advice_rate_update = {**prev_state, "dismissal_ewma": new_rate}
 
     # ── Behavioral audit + MRT/IPW readout ───────────────────────────────────
     audit = _behavioral_audit(advice_rows, config)

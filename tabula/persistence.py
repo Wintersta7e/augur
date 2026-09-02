@@ -1369,7 +1369,14 @@ class PersistenceManager:
                 continue
         return out
 
-    # -- advice_rate (string key: rate_ewma, last_ts) -------------------------
+    # -- advice_rate (string key) --------------------------------------------
+    # Two independent series share this record and MUST NOT share a field:
+    #   rate_ewma      — online, gate-owned: unit-impulse EWMA of delivery
+    #                    VOLUME, time-decayed, in [0, 1). Feeds the refractory
+    #                    pressure arm.
+    #   dismissal_ewma — offline, reflection-owned: fraction of delivered advice
+    #                    explicitly rated "n". Feeds the Imperator self-model.
+    #   last_ts        — owned by the online writer.
 
     @learned_write
     def save_advice_rate(self, entry: dict, ctx: LearnContext | None = None) -> None:

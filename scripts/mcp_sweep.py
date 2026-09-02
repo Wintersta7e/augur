@@ -231,7 +231,13 @@ async def main() -> int:
             row("get_self_model", "error" not in r and bool(r), f"keys={sorted(r)[:6]}")
 
             # ---- state reads over live pipeline data
-            r = await call("get_baseline", {"domain": "typing", "entity": entity})
+            # event_type is part of the baseline's identity: one entity can
+            # emit several streams on different scales, so a baseline is scoped
+            # to (domain, event_type, entity). The seed above publishes "pause".
+            r = await call(
+                "get_baseline",
+                {"domain": "typing", "event_type": "pause", "entity": entity},
+            )
             row(
                 "get_baseline (seeded entity)",
                 "baseline" in r,

@@ -91,3 +91,77 @@ def test_filter_handles_unknown_severity_with_default_window():
     matrix = {"rule_windows": {}}
     result = filter_by_pairwise_window(primary, [cand], matrix, default_window_s=30.0)
     assert result == [cand]  # falls back to default 30s
+
+
+# same-span guard -------------------------------------------------------------
+
+
+def test_filter_drops_a_candidate_from_the_same_sensor_span():
+    """Two events from one sensor tick are not two detectors agreeing.
+
+    The activity sensor emits an intensity sample and a focus event for the
+    same app and the same focus span in one loop iteration, ~50ms apart. The
+    30s correlation window is 600x that gap, so without this guard the pair is
+    indistinguishable from genuine cross-domain corroboration and the matrix
+    escalates it as if two domains had independently agreed.
+    """
+    primary = {
+        "severity": "LOW",
+        "domain": "activity_focus",
+        "timestamp": _ts(0),
+        "context": {"span_id": "span-7"},
+    }
+    cand = {
+        "severity": "LOW",
+        "domain": "activity_intensity",
+        "timestamp": _ts(0.05),
+        "context": {"span_id": "span-7"},
+    }
+    assert filter_by_pairwise_window(primary, [cand], {}, default_window_s=30.0) == []
+
+
+def test_filter_keeps_a_candidate_from_a_different_span():
+    """A later span is a genuinely separate observation."""
+    primary = {
+        "severity": "LOW",
+        "domain": "activity_focus",
+        "timestamp": _ts(0),
+        "context": {"span_id": "span-8"},
+    }
+    cand = {
+        "severity": "LOW",
+        "domain": "activity_intensity",
+        "timestamp": _ts(5),
+        "context": {"span_id": "span-7"},
+    }
+    assert filter_by_pairwise_window(primary, [cand], {}, default_window_s=30.0) == [
+        cand
+    ]
+
+
+def test_filter_is_inert_for_domains_without_a_span_id():
+    """Typing and chess carry no span_id; the guard must not touch them."""
+    primary = {"severity": "LOW", "domain": "chess", "timestamp": _ts(0)}
+    cand = {"severity": "LOW", "domain": "typing", "timestamp": _ts(5)}
+    assert filter_by_pairwise_window(primary, [cand], {}, default_window_s=30.0) == [
+        cand
+    ]
+
+
+def test_a_null_span_on_one_side_does_not_match_a_null_on_the_other():
+    """Two events that merely both lack a span are not the same span."""
+    primary = {
+        "severity": "LOW",
+        "domain": "activity_focus",
+        "timestamp": _ts(0),
+        "context": {"span_id": None},
+    }
+    cand = {
+        "severity": "LOW",
+        "domain": "activity_intensity",
+        "timestamp": _ts(1),
+        "context": {"span_id": None},
+    }
+    assert filter_by_pairwise_window(primary, [cand], {}, default_window_s=30.0) == [
+        cand
+    ]

@@ -183,11 +183,26 @@ def filter_by_pairwise_window(
     look up its window, and keep the candidate only if
     (primary_ts - candidate_ts) <= rule_window. Unknown severities fall
     back to default_window_s.
+
+    A candidate sharing the primary's ``context.span_id`` is dropped first,
+    whatever the lag. Correlation is meant to mean "two detectors independently
+    agreed", but the activity sensor emits an intensity sample and a focus event
+    for the same app and the same focus span in one loop iteration, ~50ms apart.
+    Against a 30s window — 600x that gap — the two are indistinguishable from
+    genuine corroboration, and the matrix escalates them as if two domains had
+    agreed. Measured, they were ~40% of all correlations. The span id is the
+    only thing that separates "one sensor tick emitted twice" from two real
+    observations; entity equality would not, and would wrongly block genuine
+    cross-app correlations. Domains that publish no span_id are unaffected.
     """
     primary_ts = parse_timestamp(primary["timestamp"])
     primary_sev = primary.get("severity", "")
+    primary_span = (primary.get("context") or {}).get("span_id")
     survivors: list[dict] = []
     for cand in candidates:
+        cand_span = (cand.get("context") or {}).get("span_id")
+        if primary_span is not None and cand_span == primary_span:
+            continue
         cand_ts = parse_timestamp(cand["timestamp"])
         lag = primary_ts - cand_ts
         rule_key = normalize_rule_key_n_way([primary_sev, cand.get("severity", "")])

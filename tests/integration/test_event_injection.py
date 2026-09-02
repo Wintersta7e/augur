@@ -217,3 +217,72 @@ class TestEventInjection:
         assert found is not None, "injected event never reached domain history"
         assert found["domain"] == "inttest"
         assert found["entity"] == "player3"
+
+
+@pytest.mark.parametrize(
+    "pipeline",
+    [{"components": ["vigil"], "env": {"AUGUR_BASELINE_ENTITY_IDLE_EVICT_S": "2"}}],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_idle_eviction_does_not_reset_a_trained_baseline(
+    pipeline, redis_client, nats_conn
+) -> None:
+    """A series idle longer than the eviction TTL must keep its observations.
+
+    Eviction drops the in-memory model and leaves the Redis profile alone, but
+    the detector used to rebuild a fresh EntityBaseline on the cache miss and
+    persist it unconditionally — so the first re-sighted event overwrote a
+    trained profile with a one-observation EWMA. Any series whose inter-event
+    gap exceeded the TTL could therefore never accumulate, however long the
+    process ran; on the real activity domains most apps are that shape.
+
+    Runs against the REAL detector subprocess with a 2s TTL (the sweep cadence
+    is min(60, ttl)), because the two previous baseline defects both lived in
+    wiring that unit tests did not execute.
+    """
+    key = "augur:vigil:profile:inttest_evict:sample:probe"
+    for i in range(4):
+        await inject_perception_event(
+            nats_conn,
+            domain="inttest_evict",
+            entity="probe",
+            event_type="sample",
+            value=100.0 + i,
+            unit="ms",
+            context={},
+            session_id="evict-1",
+        )
+    assert await wait_for_redis_pattern(redis_client, key)
+
+    def _obs() -> int:
+        raw = redis_client.get(key)
+        return json.loads(raw)["observation_count"] if raw else 0
+
+    for _ in range(40):
+        if _obs() >= 4:
+            break
+        await asyncio.sleep(0.25)
+    assert _obs() == 4, "detector did not record all four warm-up events"
+
+    # Idle past the TTL so the sweep evicts the in-memory model.
+    await asyncio.sleep(6.0)
+
+    await inject_perception_event(
+        nats_conn,
+        domain="inttest_evict",
+        entity="probe",
+        event_type="sample",
+        value=104.0,
+        unit="ms",
+        context={},
+        session_id="evict-1",
+    )
+    for _ in range(40):
+        if _obs() != 4:
+            break
+        await asyncio.sleep(0.25)
+    assert _obs() == 5, (
+        f"re-sighted event reset the durable profile to {_obs()} observations "
+        "instead of extending it"
+    )

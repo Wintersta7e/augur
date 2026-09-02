@@ -335,3 +335,67 @@ class TestBaselineRestore:
         r = fakeredis.FakeStrictRedis()
         r.set("augur:vigil:profile:typing:user", json.dumps({"observation_count": 999}))
         assert load_persisted_baselines(PersistenceManager(r), r) == {}
+
+
+class TestRehydrateOnCacheMiss:
+    """Idle eviction must not destroy the durable profile it promises to keep.
+
+    ``evict_idle_baselines`` drops the in-memory model and leaves Redis alone,
+    but the detector used to build a fresh ``EntityBaseline`` on the cache miss
+    and persist it unconditionally — so the first re-sighted event overwrote a
+    trained profile with a one-observation EWMA. Any series whose inter-event
+    gap exceeded ``baseline_entity_idle_evict_s`` could therefore never
+    accumulate observations, however long the process ran. The activity domains
+    are exactly that shape.
+    """
+
+    def test_evicted_series_rehydrates_instead_of_resetting(self) -> None:
+        pm = PersistenceManager(fakeredis.FakeStrictRedis())
+        key = ("activity_focus", "focus_change", "browser")
+        trained = EntityBaseline()
+        for v in (
+            2.9,
+            3.1,
+            2.7,
+            3.4,
+            2.8,
+            3.0,
+            3.3,
+            2.6,
+            3.2,
+            2.95,
+            3.05,
+            2.85,
+            3.15,
+            2.75,
+            3.25,
+            2.9,
+            3.0,
+            3.1,
+        ):
+            trained.update(v, 0.3)
+        trained.unit = "log1p_seconds"
+        pm.save_baseline(*key, trained.to_state_dict(), ctx=None)
+
+        baselines = {key: trained}
+        assert evict_idle_baselines(
+            baselines, {key: 0.0}, now=7200.0, idle_ttl_s=3600.0
+        ) == [key]
+        assert key not in baselines
+
+        # What on_event does on a cache miss: rehydrate, not reset.
+        restored = pm.load_baseline(*key)
+        assert restored is not None
+        revived = EntityBaseline.from_state_dict(restored)
+        assert revived.observation_count == 18
+        assert revived.unit == "log1p_seconds"
+
+        # And the next event must extend that history, not replace it.
+        revived.update(3.0, 0.3)
+        pm.save_baseline(*key, revived.to_state_dict(), ctx=None)
+        assert pm.load_baseline(*key)["observation_count"] == 19
+
+    def test_a_genuinely_new_series_still_starts_empty(self) -> None:
+        pm = PersistenceManager(fakeredis.FakeStrictRedis())
+        assert pm.load_baseline("activity_focus", "focus_change", "unseen") is None
+        assert EntityBaseline().observation_count == 0

@@ -191,13 +191,24 @@ async def pipeline(
         "imperator_ii": [sys.executable, "-m", "imperator.improver"],
     }
 
-    requested: list[str] = getattr(request, "param", [])
+    # param is either a plain list of component names, or a dict
+    # {"components": [...], "env": {...}} when a test needs a component started
+    # with a specific AUGUR_* override (the components read config at import,
+    # so it has to be in the subprocess environment, not patched in-process).
+    param = getattr(request, "param", [])
+    if isinstance(param, dict):
+        requested = list(param.get("components", []))
+        extra_env = dict(param.get("env", {}))
+    else:
+        requested = list(param)
+        extra_env = {}
     procs: dict[str, asyncio.subprocess.Process] = {}
 
     cell_env = {
         **os.environ,
         "AUGUR_REDIS_URL": _config.redis_url,
         "AUGUR_NATS_URL": _config.nats_url,
+        **extra_env,
     }
 
     for name in requested:

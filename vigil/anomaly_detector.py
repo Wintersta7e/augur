@@ -371,11 +371,16 @@ def evict_idle_baselines(
     unbounded entity namespace (churning IDs, hostile publishers) can pin
     significant memory up to ``MAX_BASELINE_ENTITIES`` even while almost all
     of those models are dormant. This reclaims dormant ones. Eviction drops
-    only the in-memory model; the persisted Redis profile is left intact. A
-    re-sighted entity is then treated like any mid-run-new entity — it starts
-    a fresh in-memory baseline and re-warms from incoming data (the durable
-    profile survives for a future *startup* reload; it is not auto-reloaded
-    mid-run on cache-miss).
+    only the in-memory model; the persisted Redis profile is left intact and a
+    re-sighted entity rehydrates from it on the cache miss (``on_event``).
+
+    That reload is what makes "left intact" mean anything. Without it the first
+    re-sighted event persisted a fresh one-observation EWMA straight over the
+    durable profile, so a series whose inter-event gap exceeded ``idle_ttl_s``
+    could never accumulate observations however long the process ran — and the
+    activity domains are exactly that shape, an app touched twice a day being
+    permanently untrained. Only the HST is genuinely lost (it is not persisted)
+    and it self-recovers.
 
     Pure and clock-injected (``now`` passed in) so it is unit-testable. The
     caller stamps ``last_seen[key]`` on every event; both maps are pruned in
@@ -475,7 +480,25 @@ async def run() -> None:
                     entity,
                 )
                 return
-            baselines[key] = EntityBaseline()
+            # Rehydrate from the durable profile on a cache miss. Idle eviction
+            # drops the in-memory model and deliberately leaves Redis intact,
+            # but the first re-sighted event then persisted a fresh
+            # one-observation EWMA straight over it — so a series whose
+            # inter-event gap exceeds baseline_entity_idle_evict_s could never
+            # accumulate, however long it ran. Activity domains are exactly
+            # that shape: an app touched twice a day was permanently untrained.
+            restored = pm.load_baseline(domain, event_type, entity)
+            baselines[key] = (
+                EntityBaseline.from_state_dict(restored)
+                if restored is not None
+                else EntityBaseline()
+            )
+            if restored is not None:
+                log.info(
+                    "Rehydrated baseline %s: %d observations",
+                    key,
+                    baselines[key].observation_count,
+                )
 
         bl = baselines[key]
 

@@ -26,6 +26,28 @@ def test_canonical_key_none_for_missing_entity_key():
     assert canonical_key({"domain": "typing"}) is None
 
 
+def test_canonical_key_none_for_sentinel_entity():
+    """A daemon placeholder must never become a mineable stream.
+
+    `<no_foreground>` precedes nearly every app switch, so as an antecedent it
+    has high support and genuine lift for "some app gains focus". It would
+    clear the Wilson lower bound and the session-conditional null and be
+    promoted as a real pattern — the promotion math rejects coincidence, not a
+    placeholder that is definitionally present.
+    """
+    for sentinel in ("<no_foreground>", "<unknown>", "<denied>", "<gone>"):
+        assert (
+            canonical_key({"domain": "activity_focus", "entity": sentinel}) is None
+        ), sentinel
+
+
+def test_canonical_key_keeps_an_app_that_merely_contains_angle_brackets():
+    assert (
+        canonical_key({"domain": "activity_focus", "entity": "a<b>"})
+        == "activity_focus:a<b>"
+    )
+
+
 def test_canonical_key_none_for_missing_domain():
     assert canonical_key({"entity": "user"}) is None
 

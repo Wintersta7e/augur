@@ -30,7 +30,7 @@ from river.anomaly import HalfSpaceTrees
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tabula.config import AugurConfig
 from tabula.connections import connect_redis
-from tabula.contracts import PerceptionEvent
+from tabula.contracts import PerceptionEvent, is_sentinel_entity
 from tabula.heartbeat import start_heartbeat
 from tabula.persistence import (
     BASELINE_KEY_PREFIX,
@@ -464,6 +464,18 @@ async def run() -> None:
         entity = event.entity
         event_type = event.event_type
         value = event.value
+
+        # Sentinels (<no_foreground>, <unknown>, <denied>, <gone>) are the
+        # activity daemon saying it could not name an app. `<no_foreground>`
+        # carries the residue of `total_dwell - idle_dwell` over a span shorter
+        # than the poll interval — float noise around 70ms, with a standard
+        # deviation just above the zero-variance floor, so it scores like real
+        # data. Nothing downstream reads it for anything but noise, so it gets
+        # no baseline.
+        if is_sentinel_entity(entity):
+            log.debug("Ignoring sentinel entity %s/%s", domain, entity)
+            return
+
         key: SeriesKey = (domain, event_type, entity)
         th = get_thresholds(domain)
 

@@ -286,3 +286,51 @@ async def test_idle_eviction_does_not_reset_a_trained_baseline(
         f"re-sighted event reset the durable profile to {_obs()} observations "
         "instead of extending it"
     )
+
+
+@pytest.mark.parametrize("pipeline", [["vigil"]], indirect=True)
+@pytest.mark.asyncio
+async def test_sentinel_entity_gets_no_baseline(
+    pipeline, redis_client, nats_conn
+) -> None:
+    """A daemon placeholder must not be baselined or scored.
+
+    `<no_foreground>` is the activity daemon saying there was no foreground
+    window. Its value is the residue of `total_dwell - idle_dwell` over a span
+    shorter than the poll interval — float noise whose stdev still clears the
+    zero-variance floor, so it scored like real data and produced anomalies
+    from arithmetic. A real app injected alongside proves the guard is
+    entity-specific and not just a dead pipeline.
+    """
+    for i in range(6):
+        await inject_perception_event(
+            nats_conn,
+            domain="inttest_sentinel",
+            entity="<no_foreground>",
+            event_type="focus_change",
+            value=0.07 + i * 0.001,
+            unit="log1p_seconds",
+            context={},
+            session_id="sentinel-1",
+        )
+    for i in range(6):
+        await inject_perception_event(
+            nats_conn,
+            domain="inttest_sentinel",
+            entity="realapp",
+            event_type="focus_change",
+            value=3.0 + i * 0.1,
+            unit="log1p_seconds",
+            context={},
+            session_id="sentinel-1",
+        )
+
+    real_key = "augur:vigil:profile:inttest_sentinel:focus_change:realapp"
+    assert await wait_for_redis_pattern(redis_client, real_key)
+    await asyncio.sleep(1.0)
+    assert (
+        redis_client.get(
+            "augur:vigil:profile:inttest_sentinel:focus_change:<no_foreground>"
+        )
+        is None
+    ), "sentinel entity was baselined"

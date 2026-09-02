@@ -10,16 +10,26 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from tabula.contracts import is_sentinel_entity
+
 
 def canonical_key(anomaly: dict) -> str | None:
     """Session-invariant identity of an anomaly stream: '{domain}:{entity}'.
 
     Returns None (record nothing) when domain is missing/falsy or entity is
-    missing/'?'/'' -- mirrors Limen's ungateable rule (gate.py:253).
+    missing/'?'/'' -- mirrors Limen's ungateable rule (gate.py:253) -- or when
+    the entity is a daemon sentinel.
+
+    The sentinel case is not cosmetic. `<no_foreground>` precedes nearly every
+    app switch, so as an antecedent it has high support and genuine lift for
+    "some app gains focus". It would clear the Wilson lower bound and the
+    session-conditional null and be promoted as a real pattern, because the
+    promotion math is built to reject coincidence, not to reject a placeholder
+    that is definitionally present. Cheaper to exclude at the source.
     """
     domain = anomaly.get("domain")
     entity = anomaly.get("entity")
-    if not domain or entity in (None, "?", ""):
+    if not domain or entity in (None, "?", "") or is_sentinel_entity(entity):
         return None
     return f"{domain}:{entity}"
 

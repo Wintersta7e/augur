@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from tabula.contracts import PerceptionEvent
+from tabula.contracts import PerceptionEvent, is_sentinel_entity
 
 
 @pytest.fixture
@@ -175,3 +175,26 @@ class TestValueTypes:
         )
         restored = PerceptionEvent.from_json(event.to_json())
         assert restored.context == {}
+
+
+class TestSentinelEntities:
+    """Daemon placeholders the activity Sensus emits when it cannot name an app.
+
+    `<no_foreground>` carries the residue of `total_dwell - idle_dwell` over a
+    span shorter than the poll interval — float noise around 70ms whose stdev
+    still clears the zero-variance floor, so it scores like real data. Vigil,
+    Praesagium and Consilium all need the same answer, which is why the
+    predicate lives in the shared base rather than in a faculty.
+    """
+
+    def test_recognizes_the_daemon_placeholders(self) -> None:
+        for s in ("<no_foreground>", "<unknown>", "<denied>", "<gone>"):
+            assert is_sentinel_entity(s), s
+
+    def test_a_real_app_is_not_a_sentinel(self) -> None:
+        for s in ("firefox", "text editor", "a<b>", "<not closed", "x<y>z"):
+            assert not is_sentinel_entity(s), s
+
+    def test_empty_and_none_are_not_sentinels(self) -> None:
+        assert not is_sentinel_entity("")
+        assert not is_sentinel_entity(None)

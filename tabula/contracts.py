@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
@@ -11,6 +12,21 @@ from typing import Any, Literal
 # ingestion boundary (PerceptionEvent.__post_init__) — kept loose
 # for backward compatibility; tighten when all callers updated.
 Domain = Literal["chess", "typing", "activity_focus", "activity_intensity"]
+
+# Placeholder entities the activity Sensus emits when it cannot name a real
+# app: <no_foreground>, <unknown>, <denied>, <gone>. They are daemon
+# bookkeeping, not behaviour — `<no_foreground>` measures the sub-poll-interval
+# residue of `total_dwell - idle_dwell`, i.e. float noise around 70ms — so
+# nothing should baseline them, gate on them or mine patterns from them.
+# Lives here rather than in a faculty because Vigil, Praesagium and Consilium
+# all need the same answer.
+_SENTINEL_ENTITY_RE = re.compile(r"^<[^>]+>$")
+
+
+def is_sentinel_entity(entity: str | None) -> bool:
+    """True for a daemon placeholder entity like ``<no_foreground>``."""
+    return bool(entity) and bool(_SENTINEL_ENTITY_RE.match(entity))
+
 
 # Fields required to construct a valid PerceptionEvent. Used by
 # from_json() to surface schema-level problems at the ingestion boundary

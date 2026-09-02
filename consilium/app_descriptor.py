@@ -15,20 +15,24 @@ import httpx
 import redis
 
 from tabula.config import AugurConfig
+from tabula.contracts import is_sentinel_entity
 from tabula.persistence import PersistenceManager  # noqa: F401
 
 log = logging.getLogger("augur.app_descriptor")
 
 # Must stay in sync with the activity-domain subset of tabula.contracts.Domain.
 ACTIVITY_DOMAINS = frozenset({"activity_focus", "activity_intensity"})
-_SENTINEL_RE = re.compile(r"^<[^>]+>$")
 _SAFE_ENTITY_RE = re.compile(r"[\w.\- ]{1,64}", re.ASCII)
 _MAX_DESCRIPTOR_LEN = 60
 
 
 def is_sentinel_app(entity: str) -> bool:
-    """True for daemon sentinels like <unknown>/<no_foreground>/<denied>/<gone>."""
-    return bool(_SENTINEL_RE.match(entity))
+    """True for daemon sentinels like <unknown>/<no_foreground>/<denied>/<gone>.
+
+    Thin alias; the predicate lives in ``tabula.contracts`` because Vigil and
+    Praesagium need the same answer and must not import a sibling faculty.
+    """
+    return is_sentinel_entity(entity)
 
 
 def descriptor_suffix(ctx: dict) -> str:

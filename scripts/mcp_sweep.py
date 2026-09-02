@@ -28,7 +28,6 @@ import json
 import os
 import subprocess
 import uuid
-from datetime import timedelta
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
@@ -145,10 +144,13 @@ async def main() -> int:
             async def call(
                 tool: str, arguments: dict | None = None, timeout_s: float = 30.0
             ) -> dict:
+                # mcp 2.x takes plain seconds here; it was a timedelta in 1.x
+                # and the client now adds it straight to a float clock, so the
+                # old value raised TypeError on the very first tool call.
                 res = await session.call_tool(
                     tool,
                     arguments or {},
-                    read_timeout_seconds=timedelta(seconds=timeout_s),
+                    read_timeout_seconds=timeout_s,
                 )
                 return parse(res)
 

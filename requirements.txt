@@ -5,13 +5,13 @@
 # sensus/chess_board.py imports chess directly, so depend on it directly.
 chess>=1.11.2
 pygame>=2.6.1
-river>=0.25.0
+river>=0.26.1
 redis[hiredis]>=8.1.0
 nats-py>=2.15.0
 httpx>=0.28.1
 keyboard>=0.13.5
 pytest>=9.1.1
 pytest-asyncio>=1.4.0
-fakeredis>=2.37.0
-fastmcp>=3.4.5
+fakeredis>=2.37.1
+fastmcp>=4.0.1
 networkx>=3.6.1

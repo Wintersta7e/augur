@@ -1098,6 +1098,7 @@ def analyze_gate(
     session_id: str,
     pm: PersistenceManager,
     config: AugurConfig,
+    tuning_scope: str | None = None,
 ) -> dict[str, Any]:
     """The SIXTH reflection analysis — offline gate tuning + MRT readout (§9).
 
@@ -1112,10 +1113,11 @@ def analyze_gate(
     3. reports the MRT/IPW excursion estimate from persisted records alone.
 
     Idempotent via the ``gate`` ``pass_name`` marker (independent of the
-    ``correlation`` marker).
+    ``correlation`` marker), scoped by ``tuning_scope`` (default: the session).
     """
-    if pm.is_tuning_applied(session_id, pass_name="gate"):
-        log.info("Skipping gate offline pass — already applied for %s", session_id)
+    scope = tuning_scope or session_id
+    if pm.is_tuning_applied(scope, pass_name="gate"):
+        log.info("Skipping gate offline pass — already applied for %s", scope)
         return {"analysis": "gate", "skipped": True, "reason": "already_applied"}
 
     all_feedback = _dedupe_feedback_by_session(pm.get_all_feedback(limit=50))
@@ -1247,7 +1249,7 @@ def analyze_gate(
                 "reason": str(exc),
             }
 
-    pm.mark_tuning_applied(session_id, pass_name="gate", ctx=gate_ctx)
+    pm.mark_tuning_applied(scope, pass_name="gate", ctx=gate_ctx)
 
     return {
         "analysis": "gate",
@@ -1326,10 +1328,26 @@ async def run_reflection(
     http_client: httpx.AsyncClient,
     nc: nats.aio.client.Client,
     config: AugurConfig,
+    tuning_scope: str | None = None,
 ) -> dict[str, Any]:
     """Run the full reflection — every analysis pass reported under
     ``analyses`` plus the Memoria and Conscientia sweeps — and build the
-    reflection report."""
+    reflection report.
+
+    ``tuning_scope`` names the idempotency window for the once-per-scope tuning
+    passes; it defaults to ``session_id``, which is the end-of-session and
+    manual-trigger behaviour. A periodic in-session reflection passes a
+    per-cycle scope so each cycle may tune once, instead of the first cycle
+    consuming the session's only marker and every later one short-circuiting.
+
+    The scope covers the gate, prompt and correlation passes only. Memoria
+    stays per-SESSION deliberately: its ``processed_sessions`` set is both its
+    idempotency gate and its spaced-repetition clock (``SCARD`` is the active-
+    session count that drives decay), so counting reflection cycles as sessions
+    would age every memory several times per sitting. Praesagium likewise mines
+    once per session, throttled by ``praesagium_mine_min_interval_s``.
+    """
+    scope = tuning_scope or session_id
     domain = _derive_domain(feedback)
     # Resolve this reflection's provenance ONCE and thread it to every learned
     # write below (spec §4.3a); a non-learnable session's tuning is withheld
@@ -1387,7 +1405,7 @@ async def run_reflection(
     # roll back a regression OR mutate a low-utility prompt (mutually exclusive),
     # behind a per-session marker so a re-run neither double-rolls nor re-mutates.
     mutation_result = None
-    if not pm.is_tuning_applied(session_id, pass_name="prompt"):
+    if not pm.is_tuning_applied(scope, pass_name="prompt"):
         pm.update_current_prompt_score(domain, utility["utility_score"], ctx=learn_ctx)
         if maybe_rollback_prompt(pm, domain, config, ctx=learn_ctx):
             log.info("Auto-rolled-back regressed prompt for '%s'", domain)
@@ -1403,7 +1421,7 @@ async def run_reflection(
                 log.info("Prompt mutation successful")
             else:
                 log.warning("Prompt mutation skipped or failed")
-        pm.mark_tuning_applied(session_id, pass_name="prompt", ctx=learn_ctx)
+        pm.mark_tuning_applied(scope, pass_name="prompt", ctx=learn_ctx)
 
     # 3. Counterfactual analysis
     counterfactual = analyze_counterfactual(pm, domain, current_thresholds)
@@ -1413,7 +1431,7 @@ async def run_reflection(
     # Single matrix load, two analyses, single merged matrix save.
     matrix_tuning: dict[str, Any]
     window_tuning: dict[str, Any]
-    if pm.is_tuning_applied(session_id, pass_name="correlation"):
+    if pm.is_tuning_applied(scope, pass_name="correlation"):
         log.info(
             "Skipping correlation + window tuning — already applied for session %s",
             session_id,
@@ -1527,7 +1545,7 @@ async def run_reflection(
             and matrix_save_ok
             and state_save_ok
         ):
-            pm.mark_tuning_applied(session_id, pass_name="correlation", ctx=learn_ctx)
+            pm.mark_tuning_applied(scope, pass_name="correlation", ctx=learn_ctx)
         elif not (matrix_save_ok and state_save_ok):
             log.warning(
                 "Skipping mark_tuning_applied because at least one tuning write failed; "
@@ -1537,7 +1555,7 @@ async def run_reflection(
     # 6. Gate offline pass (spec §9) — own idempotency marker (pass_name="gate"),
     # independent of the correlation/window marker above.
     try:
-        gate = analyze_gate(session_id, pm, config)
+        gate = analyze_gate(session_id, pm, config, tuning_scope=scope)
         log.info(
             "Gate offline pass: %s",
             gate.get("reason")
@@ -1742,6 +1760,90 @@ async def run() -> None:
                 session_id, feedback, pm, redis_client, http_client, nc, config
             )
 
+    async def periodic_reflection() -> None:
+        """Reflect on the LIVE session at a fixed cadence.
+
+        Without this, reflection has exactly one automatic trigger —
+        ``augur.responsum.complete``, published only from Responsum's
+        ``on_session_end`` — so a session that is killed rather than closed
+        (container SIGKILL, reboot, crash) never reflects at all, and a long
+        sitting reflects once at the very end. Every downstream learner
+        (threshold tuning, the escalation matrix, gate credibility, and the
+        Imperator cycle keyed on ``augur.disciplina.complete``) inherits that
+        cadence, which is why a system can run for hours and learn nothing.
+
+        Each cycle gets its own tuning scope so it may tune once; a cycle is
+        skipped unless the session gained ``reflection_min_new_events`` tracked
+        outcomes since the last one, so an idle session is not re-tuned on
+        unchanged evidence. Shares ``reflection_lock`` with the session-end and
+        manual paths — a cadence tick never runs concurrently with those.
+        """
+        cycle = 0
+        last_event_count = 0
+        while True:
+            await asyncio.sleep(config.reflection_interval_s)
+            try:
+                current = pm.load_current_session()
+                session_id = (
+                    current.get("session_id") if isinstance(current, dict) else None
+                )
+                if not session_id:
+                    continue
+                feedback = pm.get_feedback(session_id)
+                if not feedback:
+                    continue
+                event_count = len(feedback.get("advice_events") or []) + len(
+                    feedback.get("gate_decision_events") or []
+                )
+                if event_count - last_event_count < config.reflection_min_new_events:
+                    log.debug(
+                        "Periodic reflection: only %d new outcomes for %s, skipping",
+                        event_count - last_event_count,
+                        session_id,
+                    )
+                    continue
+                if reflection_lock.locked():
+                    log.info(
+                        "Periodic reflection: another reflection running, skipping"
+                    )
+                    continue
+                async with reflection_lock:
+                    cycle += 1
+                    log.info(
+                        "Periodic reflection cycle %d for session %s (%d outcomes)",
+                        cycle,
+                        session_id,
+                        event_count,
+                    )
+                    await run_reflection(
+                        session_id,
+                        feedback,
+                        pm,
+                        redis_client,
+                        http_client,
+                        nc,
+                        config,
+                        tuning_scope=f"{session_id}#c{cycle}",
+                    )
+                last_event_count = event_count
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                # A cadence tick must never kill the reflection loop; the next
+                # tick retries against whatever state exists then.
+                log.error("Periodic reflection cycle failed: %s", exc)
+
+    periodic_task = (
+        asyncio.create_task(periodic_reflection())
+        if config.reflection_interval_s > 0
+        else None
+    )
+    if periodic_task is not None:
+        log.info(
+            "In-session reflection cadence: every %.0fs",
+            config.reflection_interval_s,
+        )
+
     # LEAK-06: save subscription handles so we can unsubscribe on shutdown
     # rather than relying on nc.close() to tear them down abruptly.
     sub_feedback = await nc.subscribe(
@@ -1760,6 +1862,12 @@ async def run() -> None:
     except asyncio.CancelledError:
         pass
     finally:
+        if periodic_task is not None:
+            periodic_task.cancel()
+            try:
+                await periodic_task
+            except asyncio.CancelledError:
+                pass
         if hb_task is not None:
             hb_task.cancel()
             try:

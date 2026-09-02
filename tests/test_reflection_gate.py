@@ -190,6 +190,52 @@ class TestIdempotency:
         second = analyze_gate("sess-1", pm, CONFIG)
         assert second["skipped"] is True
 
+    def test_a_new_tuning_scope_reopens_the_pass_within_one_session(self) -> None:
+        """Periodic in-session reflection must be able to tune more than once.
+
+        The marker is keyed by scope, not by session. With a session-keyed
+        marker the first cadence cycle consumed the session's only marker and
+        every later cycle short-circuited, so a long sitting still tuned once —
+        the exact cadence problem the periodic pass exists to fix.
+        """
+        pm = _pm()
+        events = [
+            _advice(explicit="n", domain="chess", entity="board")
+            for _ in range(GATE_CHRONIC_MIN_PRESENCE)
+        ]
+        for i in range(GATE_DISMISSAL_MIN):
+            events[i]["explicit_rating"] = "n"
+        pm.save_feedback("sess-1", _feedback("sess-1", advice_events=events))
+
+        first = analyze_gate("sess-1", pm, CONFIG, tuning_scope="sess-1#c1")
+        assert first.get("skipped") is not True
+        # Same scope again → still idempotent.
+        assert analyze_gate("sess-1", pm, CONFIG, tuning_scope="sess-1#c1")["skipped"]
+        # Next cycle → runs again.
+        second = analyze_gate("sess-1", pm, CONFIG, tuning_scope="sess-1#c2")
+        assert second.get("skipped") is not True
+
+    def test_scope_defaults_to_the_session(self) -> None:
+        """Omitting the scope must reproduce the pre-cadence behaviour exactly."""
+        pm = _pm()
+        pm.mark_tuning_applied("sess-D", pass_name="gate")
+        assert analyze_gate("sess-D", pm, CONFIG)["skipped"] is True
+
+    def test_a_scoped_run_does_not_consume_the_session_marker(self) -> None:
+        """A cadence cycle must not block the end-of-session reflection."""
+        pm = _pm()
+        events = [
+            _advice(explicit="n", domain="chess", entity="board")
+            for _ in range(GATE_CHRONIC_MIN_PRESENCE)
+        ]
+        for i in range(GATE_DISMISSAL_MIN):
+            events[i]["explicit_rating"] = "n"
+        pm.save_feedback("sess-1", _feedback("sess-1", advice_events=events))
+
+        analyze_gate("sess-1", pm, CONFIG, tuning_scope="sess-1#c1")
+        assert pm.is_tuning_applied("sess-1", pass_name="gate") is False
+        assert analyze_gate("sess-1", pm, CONFIG).get("skipped") is not True
+
     def test_gate_marker_independent_of_correlation_marker(self) -> None:
         pm = _pm()
         pm.mark_tuning_applied("sess-X", pass_name="correlation")

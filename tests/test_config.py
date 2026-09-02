@@ -274,3 +274,24 @@ class TestRedisDb:
 
     def test_unicode_digit_is_zero(self) -> None:
         assert AugurConfig(redis_url="redis://127.0.0.1:6379/²").redis_db == 0
+
+
+class TestReflectionCadence:
+    def test_defaults_to_a_periodic_cadence(self) -> None:
+        assert AugurConfig().reflection_interval_s == 600.0
+        assert AugurConfig().reflection_min_new_events == 3
+
+    def test_zero_is_the_documented_session_end_only_opt_out(self) -> None:
+        assert AugurConfig(reflection_interval_s=0.0).reflection_interval_s == 0.0
+
+    def test_interval_below_floor_raises(self) -> None:
+        with pytest.raises(ValueError, match="reflection_interval_s"):
+            AugurConfig(reflection_interval_s=30.0)
+
+    def test_interval_above_ceiling_raises(self) -> None:
+        with pytest.raises(ValueError, match="reflection_interval_s"):
+            AugurConfig(reflection_interval_s=90_000.0)
+
+    def test_min_new_events_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="reflection_min_new_events"):
+            AugurConfig(reflection_min_new_events=0)

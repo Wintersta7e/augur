@@ -74,6 +74,16 @@ class AugurConfig:
     history_max_events: int = 1000
 
     # ── Reflection / self-improvement ─────────────────────────────────────
+    # Cadence for in-session reflection. The only automatic trigger used to be
+    # augur.responsum.complete, which Responsum publishes solely on session end
+    # — so a session killed rather than closed (a container SIGKILL, a reboot)
+    # learned nothing at all, and a long sitting learned once. 0.0 restores that
+    # end-of-session-only behaviour.
+    reflection_interval_s: float = 600.0
+    # A periodic cycle is skipped unless the session gained at least this many
+    # tracked outcomes since the last one, so an idle session does not re-tune
+    # on unchanged evidence.
+    reflection_min_new_events: int = 3
     sigma_adjust_step: float = 0.1
     sigma_min: float = 1.5
     sigma_max: float = 5.0
@@ -312,6 +322,18 @@ class AugurConfig:
             )
         if not self.activity_source_id.strip():
             raise ValueError("activity_source_id must be a non-empty string")
+        if self.reflection_interval_s != 0.0 and not (
+            60.0 <= self.reflection_interval_s <= 86400.0
+        ):
+            raise ValueError(
+                f"reflection_interval_s={self.reflection_interval_s} must be 0 "
+                "(session-end only) or in [60, 86400]"
+            )
+        if not (1 <= self.reflection_min_new_events <= 1000):
+            raise ValueError(
+                f"reflection_min_new_events={self.reflection_min_new_events} "
+                "outside [1, 1000]"
+            )
         if not (0.0 < self.gate_pressure_cap <= 1.0):
             raise ValueError(
                 f"gate_pressure_cap={self.gate_pressure_cap} outside (0, 1] — the "

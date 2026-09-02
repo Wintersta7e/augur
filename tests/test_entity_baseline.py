@@ -329,9 +329,7 @@ class TestBaselineRestore:
             )
         )
         out = load_persisted_baselines(PersistenceManager(r), r)
-        assert (
-            out[("activity_focus", "focus_change", "text editor")].ewma_mean == 5.0
-        )
+        assert out[("activity_focus", "focus_change", "text editor")].ewma_mean == 5.0
 
     def test_skips_legacy_pre_series_keys(self) -> None:
         r = fakeredis.FakeStrictRedis()

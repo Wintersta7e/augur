@@ -14,4 +14,4 @@ pytest>=9.1.1
 pytest-asyncio>=1.4.0
 fakeredis>=2.37.1
 fastmcp>=4.0.1
-networkx>=3.6.1
+networkx>=3.7

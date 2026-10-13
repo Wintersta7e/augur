@@ -13,5 +13,5 @@ keyboard>=0.13.5
 pytest>=9.1.1
 pytest-asyncio>=1.4.0
 fakeredis>=2.37.1
-fastmcp>=4.0.1
+fastmcp>=4.1.0
 networkx>=3.6.1
